@@ -91,10 +91,10 @@ meson compile -C builddir
 
 ```bash
 # Open a PDF
-./builddir/src/framework document.pdf
+framework document.pdf
 
 # Open a DjVu file
-./builddir/src/framework book.djvu
+framework book.djvu
 ```
 
 One document per window. Multiple files open multiple windows.
