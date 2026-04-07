@@ -11,7 +11,7 @@ A fast, native GNOME document viewer built on MuPDF and DjVuLibre. Opens PDFs an
 
 ## Why this exists
 
-Every GNOME PDF viewer either lazy-renders (grey flash when scrolling), pulls in Poppler (slow on large files), or buries basic navigation behind obscure gestures. Framework renders pages ahead of time with a thread pool so fast scrolling never hits a placeholder. SumatraPDF's keyboard model adapted to GNOME HIG — accessible to a grandma, useful to a power user.
+I was essentially looking for a SumatraPDF-like client for Linux. I was frustrated with clients that used libPoppler and every muPDF client lacked any UI whatsoever and relied on keyboard-shortcuts. I wanted something in-between, as I was using Okular in a Gnome environment because it was the only one that took everything in stride. I wanted a Gnome solution. This is that.
 
 ## Features
 
