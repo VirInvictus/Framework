@@ -1,2 +1,112 @@
-# Framework
-A fast, keyboard-friendly document viewer for GNOME, built on MuPDF and DjVuLibre.
+<p align="center">
+  <img src="logo.svg" alt="Framework" width="420">
+</p>
+<p align="center">
+  <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-libadwaita-4a86cf" alt="GTK4"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
+  <a href="https://ko-fi.com/vrnvctss"><img src="https://img.shields.io/badge/support-Ko--fi-ff5f5f?logo=kofi" alt="Ko-fi"></a>
+</p>
+
+A fast, native GNOME document viewer built on MuPDF and DjVuLibre. Opens PDFs and DjVu files with aggressive pre-caching, a clean libadwaita UI, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer.
+
+## Why this exists
+
+Every GNOME PDF viewer either lazy-renders (grey flash when scrolling), pulls in Poppler (slow on large files), or buries basic navigation behind obscure gestures. Framework renders pages ahead of time with a thread pool so fast scrolling never hits a placeholder. SumatraPDF's keyboard model adapted to GNOME HIG — accessible to a grandma, useful to a power user.
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **MuPDF backend** | Fast PDF rendering via libmupdf with per-thread context safety |
+| **DjVuLibre backend** | Full DjVu/DjV support via ddjvuapi |
+| **Pre-cache engine** | Thread pool renders pages asynchronously with priority ordering — visible pages first, then forward, then backward |
+| **Fit-width default** | Pages scale to viewport width on open, regardless of source dimensions |
+| **Continuous scroll** | All pages stacked vertically with smooth kinetic scrolling |
+| **TOC sidebar** | Expandable tree view populated from document outline, toggle with F9 |
+| **Search** | Full-text search across all pages (Ctrl+F) |
+| **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
+| **Memory-bounded** | Only the nearest 50 pages are held in RAM — distant pages are evicted |
+
+## Keyboard shortcuts
+
+### Navigation
+
+| Action | Shortcut |
+|--------|----------|
+| Next page | Page Down |
+| Previous page | Page Up |
+| First page | Home, Ctrl+Home |
+| Last page | End, Ctrl+End |
+| Go to page | Ctrl+G |
+
+### Zoom
+
+| Action | Shortcut |
+|--------|----------|
+| Zoom in | Ctrl+Plus, Ctrl+= |
+| Zoom out | Ctrl+Minus |
+| Fit width | Ctrl+1 |
+| Fit page | Ctrl+2 |
+| Actual size (100%) | Ctrl+0 |
+
+### View
+
+| Action | Shortcut |
+|--------|----------|
+| Toggle sidebar | F9 |
+| Fullscreen | F11 |
+| Find | Ctrl+F |
+
+## Requirements
+
+**Build dependencies:**
+
+| Dependency | Purpose |
+|------------|---------|
+| gtk4 (4.16+) | UI toolkit |
+| libadwaita (1.7+) | GNOME design patterns |
+| mupdf (1.24+) | PDF rendering |
+| djvulibre (3.5.28+) | DjVu rendering |
+| cairo (1.18+) | Surface management |
+| glib (2.82+) | Data structures, threading |
+| json-glib (1.10+) | State persistence |
+| meson (1.4+) | Build system |
+
+On Fedora:
+
+```bash
+sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
+                 cairo-devel glib2-devel json-glib-devel meson gcc
+```
+
+## Building
+
+```bash
+meson setup builddir
+meson compile -C builddir
+```
+
+## Usage
+
+```bash
+# Open a PDF
+./builddir/src/framework document.pdf
+
+# Open a DjVu file
+./builddir/src/framework book.djvu
+```
+
+One document per window. Multiple files open multiple windows.
+
+## What Framework is not
+
+- **Not an editor.** No annotations, no form filling, no signatures
+- **Not a converter.** No export, no save-as, no format conversion
+- **Not a file manager.** No recent files, no library, no collections
+- **Not a browser.** No tabs, no multi-document within a single window
+- **Not an image viewer.** No JPEG, PNG, TIFF, SVG support
+- **Not an ebook reader.** No EPUB, no MOBI, no reflow
+
+## Support
+
+If this saved you time, consider [buying me a coffee](https://ko-fi.com/vrnvctss).

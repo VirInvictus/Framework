@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="framework">
+  <enum id="com.github.vrnvctss.framework.ZoomMode">
+    <value nick="fit-width" value="0"/>
+    <value nick="fit-page" value="1"/>
+    <value nick="custom" value="2"/>
+  </enum>
+  <enum id="com.github.vrnvctss.framework.ViewMode">
+    <value nick="single" value="0"/>
+    <value nick="facing" value="1"/>
+  </enum>
+
+  <schema id="com.github.vrnvctss.framework" path="/com/github/vrnvctss/framework/">
+    <key name="default-zoom-mode" enum="com.github.vrnvctss.framework.ZoomMode">
+      <default>'fit-width'</default>
+      <summary>Default zoom mode</summary>
+    </key>
+    <key name="default-zoom-level" type="d">
+      <default>1.0</default>
+      <summary>Default zoom level when zoom mode is custom</summary>
+    </key>
+    <key name="continuous-scroll" type="b">
+      <default>true</default>
+      <summary>Use continuous scroll mode by default</summary>
+    </key>
+    <key name="default-view-mode" enum="com.github.vrnvctss.framework.ViewMode">
+      <default>'single'</default>
+      <summary>Default view mode</summary>
+    </key>
+    <key name="invert-colors" type="b">
+      <default>false</default>
+      <summary>Invert document colors</summary>
+    </key>
+    <key name="window-width" type="i">
+      <default>900</default>
+      <summary>Window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>700</default>
+      <summary>Window height</summary>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Window maximized state</summary>
+    </key>
+    <key name="sidebar-visible" type="b">
+      <default>false</default>
+      <summary>Sidebar visibility</summary>
+    </key>
+    <key name="sidebar-width" type="i">
+      <default>280</default>
+      <summary>Sidebar width</summary>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,25 @@
+# Build directories
+build/
+builddir/
+
+# Meson generated files
+subprojects/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Compiled objects
+*.o
+*.so
+*.a
+
+# Spec (internal planning doc)
+framework-spec.md
+
+# OS junk
+.DS_Store
+Thumbs.db

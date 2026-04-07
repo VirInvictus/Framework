@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Framework
+Comment=View PDF and DjVu documents
+Exec=framework %U
+Icon=com.github.vrnvctss.framework
+Terminal=false
+Type=Application
+Categories=GTK;GNOME;Viewer;Office;
+MimeType=application/pdf;image/vnd.djvu;image/x-djvu;
+StartupNotify=true

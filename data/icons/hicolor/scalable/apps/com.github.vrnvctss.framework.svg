@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#1a5fb4"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f0f0f0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded app background -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+
+  <!-- Outer frame — the "framework" -->
+  <rect x="20" y="14" width="88" height="100" rx="4" fill="none"
+        stroke="#ffffff" stroke-width="3" opacity="0.35"/>
+
+  <!-- Document page -->
+  <rect x="30" y="22" width="68" height="88" rx="3" fill="url(#page)"
+        filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"/>
+
+  <!-- Dog-ear fold -->
+  <path d="M 82 22 L 98 22 L 98 38 Z" fill="#e0e0e0"/>
+  <path d="M 82 22 L 82 38 L 98 38 Z" fill="#d0d0d0"/>
+
+  <!-- Text lines -->
+  <rect x="38" y="34" width="36" height="3.5" rx="1.5" fill="#1a5fb4" opacity="0.7"/>
+  <rect x="38" y="43" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="50" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="57" width="42" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="64" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="71" width="46" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="78" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="85" width="38" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="92" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <rect x="38" y="99" width="30" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+</svg>
