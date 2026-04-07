@@ -38,6 +38,25 @@ fw_application_activate (GApplication *app)
 }
 
 static void
+open_file_cb (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  GtkFileDialog *dialog = GTK_FILE_DIALOG (source);
+  FwApplication *self = FW_APPLICATION (user_data);
+
+  g_autoptr (GFile) file = gtk_file_dialog_open_finish (dialog, result, NULL);
+  if (!file)
+    return;  /* user cancelled */
+
+  g_autofree char *path = g_file_get_path (file);
+  if (!path)
+    return;
+
+  GtkWindow *win = gtk_application_get_active_window (GTK_APPLICATION (self));
+  if (win && FW_IS_WINDOW (win))
+    fw_window_open_file (FW_WINDOW (win), path);
+}
+
+static void
 open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
 {
   (void) action;
@@ -69,9 +88,8 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   g_object_unref (filter);
   g_object_unref (filters);
 
-  gtk_file_dialog_open (dialog, win, NULL, NULL, NULL);
-  /* TODO: connect async callback to open the selected file */
-  g_object_unref (dialog);
+  gtk_file_dialog_open (dialog, win, NULL,
+                        (GAsyncReadyCallback) open_file_cb, self);
 }
 
 static void
@@ -95,14 +113,30 @@ fw_application_startup (GApplication *app)
   g_action_map_add_action_entries (G_ACTION_MAP (app), entries,
                                    G_N_ELEMENTS (entries), app);
 
-  /* Accelerators */
-  const char *open_accels[]  = { "<Control>o", NULL };
-  const char *quit_accels[]  = { "<Control>q", "<Control>w", NULL };
-
-  gtk_application_set_accels_for_action (GTK_APPLICATION (app),
-                                          "app.open", open_accels);
-  gtk_application_set_accels_for_action (GTK_APPLICATION (app),
-                                          "app.quit", quit_accels);
+  /* Accelerators — registered here because the app object is needed */
+  struct { const char *action; const char *accels[4]; } shortcuts[] = {
+    { "app.open",            { "<Control>o", NULL } },
+    { "app.quit",            { "<Control>q", "<Control>w", NULL } },
+    { "win.zoom-in",         { "<Control>plus", "<Control>equal", NULL } },
+    { "win.zoom-out",        { "<Control>minus", NULL } },
+    { "win.zoom-actual",     { "<Control>0", NULL } },
+    { "win.zoom-fit-width",  { "<Control>1", NULL } },
+    { "win.zoom-fit-page",   { "<Control>2", NULL } },
+    { "win.next-page",       { "Page_Down", NULL } },
+    { "win.prev-page",       { "Page_Up", NULL } },
+    { "win.first-page",      { "Home", "<Control>Home", NULL } },
+    { "win.last-page",       { "End", "<Control>End", NULL } },
+    { "win.toggle-sidebar",  { "F9", NULL } },
+    { "win.fullscreen",      { "F11", NULL } },
+    { "win.find",            { "<Control>f", NULL } },
+    { "win.go-to-page",      { "<Control>g", NULL } },
+    { "win.invert-colors",   { "<Control>i", NULL } },
+    { "win.print",           { "<Control>p", NULL } },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (shortcuts); i++)
+    gtk_application_set_accels_for_action (GTK_APPLICATION (app),
+                                            shortcuts[i].action,
+                                            shortcuts[i].accels);
 }
 
 static void

@@ -10,6 +10,7 @@
 #include "fw-search.h"
 #include "fw-cache.h"
 #include "fw-document.h"
+#include <gdk/gdk.h>
 
 struct _FwWindow {
   AdwApplicationWindow  parent_instance;
@@ -215,6 +216,89 @@ static void act_go_to_page (GSimpleAction *a, GVariant *p, gpointer d)
   gtk_editable_select_region (GTK_EDITABLE (w->page_entry), 0, -1);
 }
 
+static void act_invert_colors (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  (void)d;
+  /* TODO: implement color inversion on rendered surfaces */
+}
+
+static void act_print (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  (void)d;
+  /* TODO: implement printing via GtkPrintOperation */
+}
+
+static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  AdwAboutDialog *dlg = ADW_ABOUT_DIALOG (adw_about_dialog_new ());
+  adw_about_dialog_set_application_name (dlg, "Framework");
+  adw_about_dialog_set_version (dlg, APP_VERSION);
+  adw_about_dialog_set_comments (dlg,
+    "A fast, native GNOME document viewer built on MuPDF and DjVuLibre.");
+  adw_about_dialog_set_application_icon (dlg, APP_ID);
+  adw_about_dialog_set_license_type (dlg, GTK_LICENSE_GPL_3_0);
+  adw_about_dialog_set_website (dlg, "https://github.com/VirInvictus/Framework");
+  adw_about_dialog_set_issue_url (dlg,
+    "https://github.com/VirInvictus/Framework/issues");
+  const char *developers[] = { "Brandon LaRocque", NULL };
+  adw_about_dialog_set_developers (dlg, developers);
+  adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (w));
+}
+
+/* ── Arrow key scrolling ──────────────────────────────────────────── */
+
+#define SCROLL_STEP 60
+
+static gboolean
+on_key_pressed (GtkEventControllerKey *controller,
+                guint                  keyval,
+                guint                  keycode,
+                GdkModifierType        state,
+                gpointer               user_data)
+{
+  (void) controller; (void) keycode; (void) state;
+  FwWindow *self = FW_WINDOW (user_data);
+
+  if (!self->view)
+    return FALSE;
+
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scroll);
+
+  switch (keyval) {
+  case GDK_KEY_Up:
+    if (vadj) {
+      double v = gtk_adjustment_get_value (vadj);
+      gtk_adjustment_set_value (vadj, v - SCROLL_STEP);
+    }
+    return TRUE;
+  case GDK_KEY_Down:
+    if (vadj) {
+      double v = gtk_adjustment_get_value (vadj);
+      gtk_adjustment_set_value (vadj, v + SCROLL_STEP);
+    }
+    return TRUE;
+  case GDK_KEY_Left:
+    if (hadj) {
+      double v = gtk_adjustment_get_value (hadj);
+      gtk_adjustment_set_value (hadj, v - SCROLL_STEP);
+    }
+    return TRUE;
+  case GDK_KEY_Right:
+    if (hadj) {
+      double v = gtk_adjustment_get_value (hadj);
+      gtk_adjustment_set_value (hadj, v + SCROLL_STEP);
+    }
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
 /* ── Build UI ─────────────────────────────────────────────────────── */
 
 static void
@@ -280,7 +364,6 @@ fw_window_constructed (GObject *object)
 
   g_menu_append (menu, "Invert Colors", "win.invert-colors");
   g_menu_append (menu, "Print...", "win.print");
-  g_menu_append (menu, "Keyboard Shortcuts", "win.show-help-overlay");
   g_menu_append (menu, "About Framework", "win.about");
 
   GtkMenuButton *menu_button = GTK_MENU_BUTTON (gtk_menu_button_new ());
@@ -394,32 +477,25 @@ fw_window_constructed (GObject *object)
     { .name = "fullscreen",    .activate = act_toggle_fullscreen },
     { .name = "find",          .activate = act_find },
     { .name = "go-to-page",    .activate = act_go_to_page },
+    { .name = "invert-colors", .activate = act_invert_colors },
+    { .name = "print",         .activate = act_print },
+    { .name = "about",         .activate = act_about },
   };
   g_action_map_add_action_entries (G_ACTION_MAP (self), win_entries,
                                    G_N_ELEMENTS (win_entries), self);
 
-  /* ── Keyboard accelerators ── */
-  GtkApplication *app = gtk_window_get_application (GTK_WINDOW (self));
-  if (app) {
-    struct { const char *action; const char *accels[4]; } shortcuts[] = {
-      { "win.zoom-in",       { "<Control>plus", "<Control>equal", NULL } },
-      { "win.zoom-out",      { "<Control>minus", NULL } },
-      { "win.zoom-actual",   { "<Control>0", NULL } },
-      { "win.zoom-fit-width",{ "<Control>1", NULL } },
-      { "win.zoom-fit-page", { "<Control>2", NULL } },
-      { "win.next-page",     { "Page_Down", NULL } },
-      { "win.prev-page",     { "Page_Up", NULL } },
-      { "win.first-page",    { "Home", "<Control>Home", NULL } },
-      { "win.last-page",     { "End", "<Control>End", NULL } },
-      { "win.toggle-sidebar",{ "F9", NULL } },
-      { "win.fullscreen",    { "F11", NULL } },
-      { "win.find",          { "<Control>f", NULL } },
-      { "win.go-to-page",    { "<Control>g", NULL } },
-    };
-    for (size_t i = 0; i < G_N_ELEMENTS (shortcuts); i++)
-      gtk_application_set_accels_for_action (app, shortcuts[i].action,
-                                              shortcuts[i].accels);
-  }
+  /* ── Arrow key scrolling ── */
+  GtkEventController *key_ctl =
+    gtk_event_controller_key_new ();
+  gtk_event_controller_set_propagation_phase (key_ctl, GTK_PHASE_CAPTURE);
+  g_signal_connect (key_ctl, "key-pressed",
+                    G_CALLBACK (on_key_pressed), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), key_ctl);
+
+  /* Make view focusable and give it initial focus so arrow keys
+   * don't land in the header bar entries. */
+  gtk_widget_set_focusable (GTK_WIDGET (self->view), TRUE);
+  gtk_widget_grab_focus (GTK_WIDGET (self->view));
 }
 
 /* ── Deferred fit-width via tick callback ─────────────────────────── */

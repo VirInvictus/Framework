@@ -252,7 +252,9 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
 
   self->priority_len = idx;
 
-  /* Evict pages outside the window to free RAM */
+  /* Evict pages outside the window to free RAM — but only if they've
+   * already been replaced at the current generation. Keep stale surfaces
+   * so users see the old render instead of grey while re-rendering. */
   GHashTable *keep_set = g_hash_table_new (g_direct_hash, g_direct_equal);
   for (int i = 0; i < self->priority_len; i++)
     g_hash_table_add (keep_set, GINT_TO_POINTER (self->priority_order[i]));
@@ -263,8 +265,13 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
   g_hash_table_iter_init (&iter, self->pages);
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     if (!g_hash_table_contains (keep_set, key)) {
-      int pg = GPOINTER_TO_INT (key);
-      g_array_append_val (to_remove, pg);
+      CacheEntry *entry = value;
+      /* Only evict if the surface is current-gen (already replaced)
+       * or if there's no surface at all */
+      if (!entry->surface || entry->generation == self->generation) {
+        int pg = GPOINTER_TO_INT (key);
+        g_array_append_val (to_remove, pg);
+      }
     }
   }
   for (guint i = 0; i < to_remove->len; i++)

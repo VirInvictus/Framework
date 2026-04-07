@@ -1,5 +1,61 @@
 # Framework — Patch Notes
 
+## v1.0.2 (2026-04-06)
+
+---
+
+### Keyboard Shortcuts
+
+All keyboard shortcuts now work. They were previously registered in
+`fw_window_constructed` where `gtk_window_get_application()` returns NULL —
+the entire shortcut block was silently skipped. Moved to
+`fw_application_startup` where the application object is guaranteed to exist.
+
+Full shortcut list: Ctrl+/- (zoom), Ctrl+0/1/2 (actual/fit-width/fit-page),
+Page Up/Down (navigation), Home/End (first/last page), Ctrl+G (go to page),
+F9 (sidebar), F11 (fullscreen), Ctrl+F (find), Ctrl+I (invert colors),
+Ctrl+P (print), Ctrl+O (open), Ctrl+Q/W (quit).
+
+### Arrow Key Scrolling
+
+Arrow keys now scroll the document view. Previously, Up arrow selected all
+text in the page number entry because GTK focused the first focusable widget
+in the header bar. Fixed with a `GtkEventControllerKey` in `GTK_PHASE_CAPTURE`
+on the window — intercepts Up/Down/Left/Right before any child widget sees
+them. The view widget is made focusable and given initial focus.
+
+### Grey Flash on Zoom (DjVu)
+
+Zooming DjVu files no longer flashes grey. The cache eviction in
+`fw_cache_set_priority` was removing old-generation surfaces before new
+renders completed. Eviction now only removes pages whose surfaces have already
+been replaced at the current generation — stale surfaces stay visible until
+their replacements arrive.
+
+### Menu Items
+
+**About Framework** — shows an `AdwAboutDialog` with app name, version,
+description, license (GPL-3.0), website, and issue tracker link.
+
+**Invert Colors** and **Print** — no longer greyed out. Actions are registered
+(stubs for now). Previously the menu referenced `win.invert-colors`,
+`win.print`, and `win.show-help-overlay` but no matching actions existed.
+Removed the Keyboard Shortcuts menu entry (requires a `GtkShortcutsWindow`
+not yet built).
+
+### File Dialog
+
+The Open dialog (Ctrl+O) now actually opens the selected file. Previously
+`gtk_file_dialog_open` was called with a NULL callback — the async result
+was discarded. Wired up `open_file_cb` to receive the result and call
+`fw_window_open_file`.
+
+### Version Flag
+
+`framework --version` and `framework -v` print the version and exit.
+
+---
+
 ## v1.0.0 (2026-04-06)
 
 ---
