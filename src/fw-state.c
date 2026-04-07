@@ -29,19 +29,22 @@ load_root (void)
   g_autofree char *path = get_state_path ();
 
   if (!g_file_test (path, G_FILE_TEST_EXISTS))
-    return json_node_new (JSON_NODE_OBJECT);
+    return json_node_init_object (json_node_new (JSON_NODE_OBJECT),
+                                   json_object_new ());
 
   g_autoptr (JsonParser) parser = json_parser_new ();
   g_autoptr (GError) error = NULL;
 
   if (!json_parser_load_from_file (parser, path, &error)) {
     g_warning ("Failed to load state: %s", error->message);
-    return json_node_new (JSON_NODE_OBJECT);
+    return json_node_init_object (json_node_new (JSON_NODE_OBJECT),
+                                   json_object_new ());
   }
 
   JsonNode *root = json_parser_get_root (parser);
   if (!root || !JSON_NODE_HOLDS_OBJECT (root))
-    return json_node_new (JSON_NODE_OBJECT);
+    return json_node_init_object (json_node_new (JSON_NODE_OBJECT),
+                                   json_object_new ());
 
   return json_node_copy (root);
 }

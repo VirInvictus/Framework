@@ -25,6 +25,7 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | **TOC sidebar** | Expandable tree view populated from document outline, toggle with F9 |
 | **Search** | Full-text search across all pages (Ctrl+F) |
 | **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
+| **State persistence** | Saves page, scroll position, and zoom per document — reopens where you left off |
 | **Memory-bounded** | Only the nearest 50 pages are held in RAM — distant pages are evicted |
 
 ## Keyboard shortcuts

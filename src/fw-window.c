@@ -10,6 +10,7 @@
 #include "fw-search.h"
 #include "fw-cache.h"
 #include "fw-document.h"
+#include "fw-state.h"
 #include <gdk/gdk.h>
 
 struct _FwWindow {
@@ -43,9 +44,16 @@ struct _FwWindow {
   double                zoom;
   int                   rotation;
   int                   current_page;
+  char                 *file_path;   /* absolute path of current document */
+
+  /* Deferred restore */
+  double                _restore_scroll;  /* scroll fraction to restore */
+  gboolean              _restore_pending;
 };
 
 G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
+
+static void fw_window_save_state (FwWindow *self);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -155,6 +163,23 @@ page_entry_activated (GtkEntry *entry, gpointer user_data)
     gtk_entry_get_buffer (entry));
   int page = (int) g_ascii_strtoll (text, NULL, 10) - 1;
   go_to_page (self, page);
+}
+
+/* ── Scroll tracking ─────────────────────────────────────────────── */
+
+static void
+on_scroll_changed (GtkAdjustment *adj, gpointer user_data)
+{
+  (void) adj;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->view || !self->document)
+    return;
+
+  int page = fw_view_get_current_page (self->view);
+  if (page != self->current_page) {
+    self->current_page = page;
+    update_page_entry (self);
+  }
 }
 
 /* ── Search toggle ────────────────────────────────────────────────── */
@@ -299,6 +324,16 @@ on_key_pressed (GtkEventControllerKey *controller,
   }
 }
 
+/* ── Close handler ───────────────────────────────────────────────── */
+
+static gboolean
+on_close_request (GtkWindow *window, gpointer user_data)
+{
+  (void) user_data;
+  fw_window_save_state (FW_WINDOW (window));
+  return FALSE;  /* allow the window to close */
+}
+
 /* ── Build UI ─────────────────────────────────────────────────────── */
 
 static void
@@ -415,6 +450,12 @@ fw_window_constructed (GObject *object)
                                    GTK_POLICY_AUTOMATIC,
                                    GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_kinetic_scrolling (self->scroll, TRUE);
+
+  /* Track current page as user scrolls */
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (vadj)
+    g_signal_connect (vadj, "value-changed",
+                      G_CALLBACK (on_scroll_changed), self);
   gtk_widget_set_vexpand (GTK_WIDGET (self->scroll), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->scroll), TRUE);
 
@@ -496,6 +537,10 @@ fw_window_constructed (GObject *object)
    * don't land in the header bar entries. */
   gtk_widget_set_focusable (GTK_WIDGET (self->view), TRUE);
   gtk_widget_grab_focus (GTK_WIDGET (self->view));
+
+  /* Save document state before the window is destroyed */
+  g_signal_connect (self, "close-request",
+                    G_CALLBACK (on_close_request), self);
 }
 
 /* ── Deferred fit-width via tick callback ─────────────────────────── */
@@ -519,6 +564,38 @@ apply_fit_width_tick (GtkWidget *widget, GdkFrameClock *clock,
   return G_SOURCE_REMOVE;
 }
 
+/* ── Deferred state restore via tick callback ────────────────────── */
+
+static gboolean
+restore_state_tick (GtkWidget *widget, GdkFrameClock *clock,
+                    gpointer user_data)
+{
+  (void) clock; (void) widget;
+  FwWindow *self = FW_WINDOW (user_data);
+
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (!vadj)
+    return G_SOURCE_CONTINUE;
+
+  double upper = gtk_adjustment_get_upper (vadj);
+  if (upper <= 0)
+    return G_SOURCE_CONTINUE;  /* layout not ready yet */
+
+  /* Restore: go to saved page, then fine-tune with scroll fraction */
+  if (self->view)
+    fw_view_go_to_page (self->view, self->current_page);
+
+  if (self->_restore_scroll > 0) {
+    /* Re-read upper after go_to_page may have triggered layout */
+    upper = gtk_adjustment_get_upper (vadj);
+    gtk_adjustment_set_value (vadj, self->_restore_scroll * upper);
+  }
+
+  update_page_entry (self);
+  self->_restore_pending = FALSE;
+  return G_SOURCE_REMOVE;
+}
+
 /* ── Open file ────────────────────────────────────────────────────── */
 
 void
@@ -527,12 +604,16 @@ fw_window_open_file (FwWindow *self, const char *path)
   g_return_if_fail (FW_IS_WINDOW (self));
   g_return_if_fail (path != NULL);
 
+  /* Save state of previous document before switching */
+  fw_window_save_state (self);
+
   /* Clean up previous document */
   if (self->cache) {
     fw_cache_stop (self->cache);
     g_clear_object (&self->cache);
   }
   g_clear_object (&self->document);
+  g_clear_pointer (&self->file_path, g_free);
 
   /* Open new document */
   g_autoptr (GError) error = NULL;
@@ -546,24 +627,48 @@ fw_window_open_file (FwWindow *self, const char *path)
     return;
   }
 
+  self->file_path = g_strdup (path);
+
   /* Update title */
   g_autofree char *basename = g_path_get_basename (path);
   gtk_label_set_text (self->title_label, basename);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->title_label), path);
 
-  /* Configure view first (so it has the document for fit-width calc) */
+  /* Load saved state for this document */
+  FwDocumentState *saved = fw_state_load (path);
+
+  /* Configure view */
   self->cache = fw_cache_new (self->document, GTK_WIDGET (self->view));
   fw_view_set_document (self->view, self->document, self->cache);
 
-  /* Defer fit-width until the scrolled window has a real allocation */
-  set_zoom (self, 1.0);
-  fw_cache_start (self->cache, self->zoom, self->rotation);
-  gtk_widget_add_tick_callback (GTK_WIDGET (self->scroll),
-                                apply_fit_width_tick, self, NULL);
+  /* Apply saved zoom or default to fit-width */
+  if (saved) {
+    self->rotation = saved->rotation;
+    set_zoom (self, saved->zoom_level);
+    fw_cache_start (self->cache, self->zoom, self->rotation);
+    self->current_page = saved->page;
+  } else {
+    set_zoom (self, 1.0);
+    fw_cache_start (self->cache, self->zoom, self->rotation);
+    self->current_page = 0;
+  }
 
-  /* Update page entry */
-  self->current_page = 0;
   update_page_entry (self);
+
+  /* Defer scroll position restore (and fit-width for new docs) until
+   * the scrolled window has a real allocation. */
+  if (saved) {
+    /* Store the scroll fraction to restore after layout */
+    self->_restore_scroll = saved->scroll_position;
+    self->_restore_pending = TRUE;
+    gtk_widget_add_tick_callback (GTK_WIDGET (self->scroll),
+                                  restore_state_tick, self, NULL);
+    fw_document_state_free (saved);
+  } else {
+    self->_restore_pending = FALSE;
+    gtk_widget_add_tick_callback (GTK_WIDGET (self->scroll),
+                                  apply_fit_width_tick, self, NULL);
+  }
 
   /* Load TOC into sidebar */
   FwTocNode *toc = fw_document_get_toc (self->document);
@@ -574,15 +679,47 @@ fw_window_open_file (FwWindow *self, const char *path)
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
 static void
+fw_window_save_state (FwWindow *self)
+{
+  if (!self->file_path || !self->document)
+    return;
+
+  /* Get current page and scroll position from the view */
+  int page = self->view ? fw_view_get_current_page (self->view) : 0;
+
+  double scroll_frac = 0;
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (vadj) {
+    double upper = gtk_adjustment_get_upper (vadj);
+    if (upper > 0)
+      scroll_frac = gtk_adjustment_get_value (vadj) / upper;
+  }
+
+  FwDocumentState state = {
+    .page            = page,
+    .scroll_position = scroll_frac,
+    .zoom_level      = self->zoom,
+    .zoom_mode       = (char *) "fit-width",
+    .view_mode       = (char *) "continuous",
+    .rotation        = self->rotation,
+  };
+
+  fw_state_save (self->file_path, &state);
+}
+
+static void
 fw_window_dispose (GObject *object)
 {
   FwWindow *self = FW_WINDOW (object);
+
+  fw_window_save_state (self);
 
   if (self->cache) {
     fw_cache_stop (self->cache);
     g_clear_object (&self->cache);
   }
   g_clear_object (&self->document);
+  g_clear_pointer (&self->file_path, g_free);
 
   G_OBJECT_CLASS (fw_window_parent_class)->dispose (object);
 }

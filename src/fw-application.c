@@ -6,6 +6,7 @@
 #include "fw-config.h"
 #include "fw-application.h"
 #include "fw-window.h"
+#include "fw-state.h"
 
 struct _FwApplication {
   AdwApplication parent_instance;
@@ -104,6 +105,9 @@ static void
 fw_application_startup (GApplication *app)
 {
   G_APPLICATION_CLASS (fw_application_parent_class)->startup (app);
+
+  /* Prune stale state entries */
+  fw_state_init ();
 
   /* Actions */
   static const GActionEntry entries[] = {

@@ -25,5 +25,6 @@ double  fw_view_fit_width_zoom (FwView   *self,
                               int       viewport_w);
 void    fw_view_go_to_page   (FwView     *self,
                               int         page);
+int     fw_view_get_current_page (FwView *self);
 
 G_END_DECLS

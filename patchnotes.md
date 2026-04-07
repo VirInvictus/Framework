@@ -1,5 +1,44 @@
 # Framework — Patch Notes
 
+## v1.1.0 (2026-04-07)
+
+---
+
+### State Persistence
+
+Framework now saves and restores per-document state across sessions. On close,
+the current page, scroll position, zoom level, and rotation are written to
+`~/.local/share/framework/state.json`. Reopening the same file restores
+exactly where you left off. Entries older than 90 days are pruned on startup,
+capped at 500 documents (LRU).
+
+**Save trigger.** State is saved via the `close-request` signal, which fires
+while the window and all its widgets are still alive — not in `dispose` where
+adjustments may already be destroyed.
+
+**Scroll restore.** Deferred via `gtk_widget_add_tick_callback` until the
+scrolled window has a real allocation and the layout is computed. The saved
+page is navigated to first, then the scroll fraction is applied for sub-page
+precision.
+
+### Live Page Tracking
+
+The page number in the header bar now updates as you scroll through the
+document. Previously it only changed on explicit navigation (Page Up/Down,
+go-to-page). A `value-changed` handler on the vadjustment calls
+`fw_view_get_current_page` — a reverse lookup through the page y-offset
+array — and updates the entry on every scroll position change. Works for
+both PDF and DjVu.
+
+### Bug Fixes
+
+**JSON state crash.** `json_node_new(JSON_NODE_OBJECT)` creates a node typed
+as object but leaves the internal object pointer NULL. All three fallback
+paths in `load_root` now use `json_node_init_object` with a properly
+allocated `json_object_new()`.
+
+---
+
 ## v1.0.2 (2026-04-06)
 
 ---

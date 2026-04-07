@@ -426,6 +426,24 @@ fw_view_go_to_page (FwView *self, int page)
   gtk_adjustment_set_value (self->vadjustment, self->page_y_offsets[page]);
 }
 
+int
+fw_view_get_current_page (FwView *self)
+{
+  g_return_val_if_fail (FW_IS_VIEW (self), 0);
+
+  if (!self->vadjustment || !self->page_y_offsets || self->page_count == 0)
+    return 0;
+
+  double scroll_y = gtk_adjustment_get_value (self->vadjustment);
+
+  /* Find the page whose top is closest to (but not past) the viewport top */
+  for (int i = self->page_count - 1; i >= 0; i--) {
+    if (self->page_y_offsets[i] <= scroll_y + 1.0)
+      return i;
+  }
+  return 0;
+}
+
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
 static void
