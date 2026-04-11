@@ -32,6 +32,10 @@ struct _FwView {
   GtkAdjustment *vadjustment;
   GtkScrollablePolicy hscroll_policy;
   GtkScrollablePolicy vscroll_policy;
+
+  /* Velocity tracking */
+  double       last_scroll_y;
+  gint64       last_frame_time;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -497,8 +501,38 @@ fw_view_class_init (FwViewClass *klass)
   g_object_class_override_property (object_class, PROP_VSCROLL_POLICY, "vscroll-policy");
 }
 
+static gboolean
+view_tick_cb (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
+{
+  FwView *self = FW_VIEW (widget);
+  gint64 time = gdk_frame_clock_get_frame_time (clock);
+  
+  if (self->vadjustment && self->cache) {
+    double scroll_y = gtk_adjustment_get_value (self->vadjustment);
+
+    if (self->last_frame_time > 0) {
+      double dy = scroll_y - self->last_scroll_y;
+      double dt = (time - self->last_frame_time) / 1000.0; /* microseconds to ms */
+      
+      if (dt > 0) {
+        double velocity = fabs (dy / dt);
+        if (fw_cache_set_velocity (self->cache, velocity)) {
+          update_cache_priority (self);
+        }
+      }
+    }
+
+    self->last_scroll_y = scroll_y;
+  }
+
+  self->last_frame_time = time;
+  
+  return G_SOURCE_CONTINUE;
+}
+
 static void
 fw_view_init (FwView *self)
 {
   self->zoom = 1.0;
+  gtk_widget_add_tick_callback (GTK_WIDGET (self), view_tick_cb, self, NULL);
 }

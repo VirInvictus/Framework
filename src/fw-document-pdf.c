@@ -254,10 +254,8 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
     fz_matrix ctm = build_transform (zoom, rotation);
     pix = fz_new_pixmap_from_page (self->ctx, pg, ctm,
                                     fz_device_rgb (self->ctx), 0);
-    surface = pixmap_to_cairo_surface (pix);
   }
   fz_always (self->ctx) {
-    fz_drop_pixmap (self->ctx, pix);
     fz_drop_page (self->ctx, pg);
   }
   fz_catch (self->ctx) {
@@ -266,6 +264,14 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
   }
 
   g_mutex_unlock (&self->lock);
+
+  if (pix) {
+    surface = pixmap_to_cairo_surface (pix);
+    
+    g_mutex_lock (&self->lock);
+    fz_drop_pixmap (self->ctx, pix);
+    g_mutex_unlock (&self->lock);
+  }
 
   return surface;
 }

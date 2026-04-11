@@ -23,6 +23,12 @@ typedef struct {
   guint    generation; /* invalidation counter at time of job creation */
 } RenderJob;
 
+typedef enum {
+  FW_RENDER_STATE_STATIC,
+  FW_RENDER_STATE_CRUISING,
+  FW_RENDER_STATE_SCRUBBING
+} FwRenderState;
+
 struct _FwCache {
   GObject        parent_instance;
 
@@ -35,6 +41,12 @@ struct _FwCache {
   int            rotation;
   int            page_count;
   guint          generation;  /* bumped on invalidate to cancel stale jobs */
+
+  /* Velocity and queuing */
+  double         velocity;
+  FwRenderState  render_state;
+  int            active_jobs;
+  int            max_jobs;
 
   /* Priority state */
   int           *priority_order;  /* page indices in render priority order */
@@ -74,6 +86,8 @@ get_or_create_entry (FwCache *self, int page)
 
 /* ── Thread pool worker ───────────────────────────────────────────── */
 
+static void submit_next_jobs (FwCache *self);
+
 static void
 render_worker (gpointer data, gpointer user_data)
 {
@@ -83,7 +97,15 @@ render_worker (gpointer data, gpointer user_data)
 
   /* Check if this job is still relevant */
   g_mutex_lock (&self->lock);
-  if (job->generation != self->generation) {
+  gboolean stale = (job->generation != self->generation);
+  gboolean scrubbing = (self->render_state == FW_RENDER_STATE_SCRUBBING);
+  if (stale || scrubbing) {
+    if (!stale && scrubbing) {
+      CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (job->page));
+      if (entry) entry->rendering = FALSE;
+    }
+    self->active_jobs--;
+    submit_next_jobs (self);
     g_mutex_unlock (&self->lock);
     g_free (job);
     return;
@@ -114,31 +136,47 @@ render_worker (gpointer data, gpointer user_data)
     if (surface)
       cairo_surface_destroy (surface);
   }
+  
+  self->active_jobs--;
+  submit_next_jobs (self);
   g_mutex_unlock (&self->lock);
 
   g_free (job);
 }
 
 static void
-submit_page (FwCache *self, int page)
+submit_next_jobs (FwCache *self)
 {
-  CacheEntry *entry = get_or_create_entry (self, page);
-  if (entry->rendering)
-    return;
-  /* If already rendered at current generation, skip */
-  if (entry->surface && entry->generation == self->generation)
+  if (self->render_state == FW_RENDER_STATE_SCRUBBING)
     return;
 
-  entry->rendering = TRUE;
+  while (self->active_jobs < self->max_jobs) {
+    int page_to_submit = -1;
+    for (int i = 0; i < self->priority_len; i++) {
+      int pg = self->priority_order[i];
+      CacheEntry *entry = get_or_create_entry (self, pg);
+      if (!entry->rendering && (!entry->surface || entry->generation != self->generation)) {
+        page_to_submit = pg;
+        break;
+      }
+    }
 
-  RenderJob *job = g_new0 (RenderJob, 1);
-  job->cache      = self;
-  job->page       = page;
-  job->zoom       = self->zoom;
-  job->rotation   = self->rotation;
-  job->generation = self->generation;
+    if (page_to_submit == -1)
+      break;
 
-  g_thread_pool_push (self->pool, job, NULL);
+    CacheEntry *entry = get_or_create_entry (self, page_to_submit);
+    entry->rendering = TRUE;
+    self->active_jobs++;
+
+    RenderJob *job = g_new0 (RenderJob, 1);
+    job->cache      = self;
+    job->page       = page_to_submit;
+    job->zoom       = self->zoom;
+    job->rotation   = self->rotation;
+    job->generation = self->generation;
+
+    g_thread_pool_push (self->pool, job, NULL);
+  }
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -177,15 +215,17 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
   }
 
   /* Submit only pages in the priority window.  If no priority has been
-   * set yet (first open), submit the first CACHE_WINDOW pages so there
+   * set yet (first open), submit the first few pages so there
    * is something to show immediately. */
   if (self->priority_order && self->priority_len > 0) {
-    for (int i = 0; i < self->priority_len; i++)
-      submit_page (self, self->priority_order[i]);
+    submit_next_jobs (self);
   } else {
-    int n = self->page_count < CACHE_WINDOW ? self->page_count : CACHE_WINDOW;
+    int n = self->page_count < 14 ? self->page_count : 14;
+    self->priority_order = g_new (int, n);
     for (int i = 0; i < n; i++)
-      submit_page (self, i);
+      self->priority_order[i] = i;
+    self->priority_len = n;
+    submit_next_jobs (self);
   }
 
   g_mutex_unlock (&self->lock);
@@ -281,10 +321,43 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
   g_hash_table_unref (keep_set);
 
   /* Submit renders for pages in the window */
-  for (int i = 0; i < self->priority_len; i++)
-    submit_page (self, self->priority_order[i]);
+  submit_next_jobs (self);
 
   g_mutex_unlock (&self->lock);
+}
+
+gboolean
+fw_cache_set_velocity (FwCache *self, double velocity)
+{
+  g_return_val_if_fail (FW_IS_CACHE (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+
+  self->velocity = velocity;
+  FwRenderState new_state;
+  if (velocity > 2.0)
+    new_state = FW_RENDER_STATE_SCRUBBING;
+  else if (velocity > 0.2)
+    new_state = FW_RENDER_STATE_CRUISING;
+  else
+    new_state = FW_RENDER_STATE_STATIC;
+
+  gboolean state_changed = (self->render_state != new_state);
+
+  if (state_changed) {
+    self->render_state = new_state;
+
+    if (new_state == FW_RENDER_STATE_SCRUBBING) {
+      /* High-Velocity Abort: drop queued jobs instantly */
+      self->generation++;
+    } else {
+      /* Submit jobs again if we dropped back to cruising or static */
+      submit_next_jobs (self);
+    }
+  }
+
+  g_mutex_unlock (&self->lock);
+  return state_changed;
 }
 
 cairo_surface_t *
@@ -383,4 +456,7 @@ fw_cache_init (FwCache *self)
   if (n_threads > 8) n_threads = 8;
 
   self->pool = g_thread_pool_new (render_worker, NULL, n_threads, FALSE, NULL);
+  self->max_jobs = n_threads;
+  self->active_jobs = 0;
+  self->render_state = FW_RENDER_STATE_STATIC;
 }

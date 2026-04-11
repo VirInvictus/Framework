@@ -1,5 +1,20 @@
 # Framework — Patch Notes
 
+## v1.2.0 (2026-04-11)
+
+---
+
+### The Velocity Engine
+Replaced the brute-force static cache with intelligent resource pacing. 
+- **Velocity Tracking:** The app now actively tracks scroll speed (`dy/dt`) using frame clock ticks.
+- **Dynamic Queue Management:** Three render states (Static, Cruising, Scrubbing) automatically adjust the cache window. During high-velocity scrubbing, queued background render jobs are instantly aborted to prevent CPU thrashing.
+- **Thread Drip-Feeding:** The worker pool now evaluates velocity after every single page render, preventing queue flooding and memory spikes.
+
+### Memory & Performance Fixes
+- **64MB MuPDF Clamp:** Hardcoded the `fz_new_context` store limit from the default 256MB down to 64MB, drastically reducing the baseline memory footprint.
+- **Surgical Mutexing:** Cairo surface copying has been moved outside the MuPDF global lock, ending memory doubling during page transit and thread starvation.
+- **Safe Exception Variables:** Addressed a critical crash risk by making variables modified in MuPDF's `fz_try` blocks `volatile` to comply with `setjmp/longjmp` rules.
+
 ## v1.1.0 (2026-04-07)
 
 ---

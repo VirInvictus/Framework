@@ -29,6 +29,9 @@ void             fw_cache_set_priority  (FwCache         *self,
                                          const int       *visible_pages,
                                          int              n_visible);
 
+gboolean         fw_cache_set_velocity  (FwCache         *self,
+                                         double           velocity);
+
 cairo_surface_t *fw_cache_get_page      (FwCache         *self,
                                          int              page);
 

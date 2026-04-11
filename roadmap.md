@@ -9,7 +9,6 @@ What's done, what's next, what's deferred. Updated as of v1.1.0.
 - [x] MuPDF PDF backend with mutex-serialized thread safety
 - [x] DjVuLibre backend with async decode, TOC, text, search, links
 - [x] Pre-cache engine with thread pool, priority ordering, generation invalidation
-- [x] Memory-bounded cache (50-page sliding window with eviction)
 - [x] GtkScrollable view with continuous vertical scroll
 - [x] Horizontal scroll when zoomed past fit-width
 - [x] Fit-width default zoom (deferred until widget allocation)
@@ -29,10 +28,25 @@ What's done, what's next, what's deferred. Updated as of v1.1.0.
 - [x] Desktop entry, AppStream metainfo, GSettings schema
 - [x] App icon and logo
 - [x] `--version` / `-v` flag
+- [x] *Legacy:* Memory-bounded cache (50-page sliding window) — *Replaced in v1.2*
 
 ---
 
-## v1.2 — Interaction
+## v1.2 — The Velocity Engine (Architecture Pivot)
+
+*Replacing the brute-force static cache with intelligent resource pacing.*
+
+- [x] **64MB MuPDF Clamp** — Hardcode `fz_new_context` limit to drop baseline RAM footprint.
+- [ ] **Two-Tier Cache Split** — Separate parsed backend objects (low RAM) from rendered cairo surfaces (high RAM).
+- [x] **Velocity Tracker** — Implement `dy/dt` calculation via `gtk_widget_add_tick_callback`.
+- [x] **Dynamic Queue Management** — Implement Static, Cruising, and Scrubbing render states based on velocity thresholds.
+- [x] **High-Velocity Abort** — Ensure `FwCache` drops all queued jobs instantly when the user scrubs, preventing CPU spin-up and DjVu mutex locks.
+- [x] **Thread Drip-Feeding** — Force the `GThreadPool` worker to evaluate velocity after every single page render before picking up the next job.
+- [x] **Surgical Mutexing** — Move Cairo surface copying outside the MuPDF global lock to prevent memory doubling during transit.
+- [ ] **Make sure DJVU & PDF interactions are similar**
+- [ ] **A button for downloading stream objects from PDF**
+
+## v1.3 — Interaction
 
 Core interaction features that SumatraPDF has and we don't yet.
 
@@ -45,7 +59,7 @@ Core interaction features that SumatraPDF has and we don't yet.
 - [ ] **Rotation** — Ctrl+Shift+Plus / Ctrl+Shift+Minus, 90-degree increments
 - [ ] **Printing** — GtkPrintOperation, render pages to the print context's cairo surface (Ctrl+P)
 
-## v1.3 — Text & Links
+## v1.4 — Text & Links
 
 - [ ] **Text selection** — click-drag to select text using backend `get_text` with rectangle
 - [ ] **Copy selected text** — Ctrl+C
@@ -56,7 +70,7 @@ Core interaction features that SumatraPDF has and we don't yet.
 - [ ] **Link cursor** — pointer hand cursor over link areas
 - [ ] **Navigation history** — Alt+Left / Alt+Right to go back/forward after link jumps
 
-## v1.4 — Polish
+## v1.5 — Polish
 
 - [ ] **Keyboard shortcuts dialog** — GtkShortcutsWindow showing all bindings (Ctrl+?)
 - [ ] **Document properties dialog** — metadata display (title, author, page count, file size)

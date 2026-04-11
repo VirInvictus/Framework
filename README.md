@@ -26,7 +26,7 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | **Search** | Full-text search across all pages (Ctrl+F) |
 | **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
 | **State persistence** | Saves page, scroll position, and zoom per document — reopens where you left off |
-| **Memory-bounded** | Only the nearest 50 pages are held in RAM — distant pages are evicted |
+| **Velocity Engine** | Dynamic cache management tracks scroll speed to pace rendering, abort stale jobs, and minimize memory footprint |
 
 ## Keyboard shortcuts
 
@@ -81,6 +81,8 @@ sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
 ```
 
 ## Building
+
+We standardize on `builddir` as the output directory. Do not use `build` to avoid confusion.
 
 ```bash
 meson setup builddir
