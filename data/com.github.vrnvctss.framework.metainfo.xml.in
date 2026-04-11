@@ -16,6 +16,16 @@
   <url type="bugtracker">https://github.com/vrnvctss/framework/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.2.0" date="2026-04-11">
+      <description>
+        <p>The Velocity Engine update: dynamic resource pacing, memory clamps, and major performance fixes.</p>
+      </description>
+    </release>
+    <release version="1.1.0" date="2026-04-07">
+      <description>
+        <p>State persistence, live page tracking, and bug fixes.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-04-06">
       <description>
         <p>Initial release.</p>

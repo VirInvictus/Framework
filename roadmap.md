@@ -1,6 +1,6 @@
 # Framework — Roadmap
 
-What's done, what's next, what's deferred. Updated as of v1.1.0.
+What's done, what's next, what's deferred. Updated as of v1.2.0.
 
 ---
 
