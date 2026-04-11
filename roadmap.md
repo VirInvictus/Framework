@@ -50,7 +50,7 @@ What's done, what's next, what's deferred. Updated as of v1.2.0.
 
 Core interaction features that SumatraPDF has and we don't yet.
 
-- [ ] **Ctrl+scroll wheel zoom** — zoom in/out with Ctrl held during scroll events
+- [x] **Ctrl+scroll wheel zoom** — zoom in/out with Ctrl held during scroll events
 - [ ] **Search result highlighting** — paint semi-transparent yellow overlay on matching text regions across visible pages
 - [ ] **Search next/prev** — F3 / Shift+F3 to cycle through matches, scroll to current match
 - [ ] **Search match count** — "3 of 47 matches" label in the search bar

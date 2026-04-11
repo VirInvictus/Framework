@@ -274,9 +274,36 @@ static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
   adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (w));
 }
 
-/* ── Arrow key scrolling ──────────────────────────────────────────── */
+/* ── Arrow key scrolling & Ctrl+Scroll zoom ─────────────────────── */
 
 #define SCROLL_STEP 60
+
+static gboolean
+on_scroll (GtkEventControllerScroll *controller,
+           double                    dx,
+           double                    dy,
+           gpointer                  user_data)
+{
+  (void) controller; (void) dx;
+  FwWindow *self = FW_WINDOW (user_data);
+
+  if (!self->view || dy == 0)
+    return FALSE;
+
+  GdkModifierType state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (controller));
+  if ((state & GDK_CONTROL_MASK) != 0) {
+    if (dy < 0) {
+      set_zoom (self, self->zoom + 0.1);
+    } else if (dy > 0) {
+      double new_zoom = self->zoom - 0.1;
+      if (new_zoom < 0.1) new_zoom = 0.1;
+      set_zoom (self, new_zoom);
+    }
+    return TRUE;
+  }
+  
+  return FALSE;
+}
 
 static gboolean
 on_key_pressed (GtkEventControllerKey *controller,
@@ -525,13 +552,20 @@ fw_window_constructed (GObject *object)
   g_action_map_add_action_entries (G_ACTION_MAP (self), win_entries,
                                    G_N_ELEMENTS (win_entries), self);
 
-  /* ── Arrow key scrolling ── */
+  /* ── Arrow key scrolling & Ctrl+Scroll zoom ── */
   GtkEventController *key_ctl =
     gtk_event_controller_key_new ();
   gtk_event_controller_set_propagation_phase (key_ctl, GTK_PHASE_CAPTURE);
   g_signal_connect (key_ctl, "key-pressed",
                     G_CALLBACK (on_key_pressed), self);
   gtk_widget_add_controller (GTK_WIDGET (self), key_ctl);
+
+  GtkEventController *scroll_ctl =
+    gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+  gtk_event_controller_set_propagation_phase (scroll_ctl, GTK_PHASE_CAPTURE);
+  g_signal_connect (scroll_ctl, "scroll",
+                    G_CALLBACK (on_scroll), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), scroll_ctl);
 
   /* Make view focusable and give it initial focus so arrow keys
    * don't land in the header bar entries. */
