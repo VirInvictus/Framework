@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="logo.svg" alt="Framework" width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="logo.svg">
+    <img src="logo.svg" alt="Framework" width="420">
+  </picture>
 </p>
 <p align="center">
   <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-libadwaita-4a86cf" alt="GTK4"></a>
@@ -48,8 +52,8 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 
 | Action | Shortcut |
 |--------|----------|
-| Zoom in | Ctrl+Plus, Ctrl+= |
-| Zoom out | Ctrl+Minus |
+| Zoom in | Ctrl+Plus, Ctrl+=, Ctrl+Scroll Up |
+| Zoom out | Ctrl+Minus, Ctrl+Scroll Down |
 | Fit width | Ctrl+1 |
 | Fit page | Ctrl+2 |
 | Actual size (100%) | Ctrl+0 |
@@ -113,7 +117,6 @@ One document per window. Multiple files open multiple windows.
 - **Not a file manager.** No recent files, no library, no collections
 - **Not a browser.** No tabs, no multi-document within a single window
 - **Not an image viewer.** No JPEG, PNG, TIFF, SVG support
-- **Not an ebook reader.** No EPUB, no MOBI, no reflow
 
 ## Support
 

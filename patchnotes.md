@@ -32,6 +32,12 @@ Render resolution now accounts for the display's device pixel ratio.
 ### Invert Colors
 `Ctrl+I` now works. Color inversion is applied at the display stage — RGB channels are bitwise-inverted on the pixel data during snapshot, without re-rendering the underlying document surfaces. Toggling is instant with no cache invalidation.
 
+### Ctrl+Scroll Wheel Zoom
+Zooming with `Ctrl+Scroll` now anchors to the pointer position rather than the viewport center. The zoom target is calculated from the pointer coordinates relative to the document, so the content under the cursor stays fixed as the zoom level changes.
+
+### MuPDF Thread Safety
+Fixed a critical crash (SIGSEGV) when opening PDF files. The MuPDF context was created without a `fz_locks_context`, so cloned render contexts sharing the font/image store had no thread synchronization. Added `FzLockData` with `GMutex` arrays and lock/unlock callbacks passed to `fz_new_context()`, making the shared store safe for concurrent access.
+
 ### Ref-Counted View Pointers
 `FwView` now holds proper GObject references to the document and cache objects via `g_set_object()`, preventing dangling pointer crashes on document swap.
 
