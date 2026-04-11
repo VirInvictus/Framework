@@ -19,6 +19,11 @@ struct _FwDocumentDjvu {
   char              *path;
   int                page_count;
   GMutex             render_lock;  /* DjVuLibre is not thread-safe */
+  volatile gboolean  cancel_flag;  /* checked by render to bail out early */
+
+  /* Page sizes cached at open time (in points, 72 DPI) */
+  double            *page_widths;
+  double            *page_heights;
 };
 
 static void fw_document_djvu_iface_init (FwDocumentInterface *iface);
@@ -151,6 +156,27 @@ djvu_open (FwDocument *doc, const char *path, GError **error)
 
   self->page_count = ddjvu_document_get_pagenum (self->djvu_doc);
   self->path = g_strdup (path);
+
+  /* Pre-cache all page dimensions to avoid repeated ddjvu_document_get_pageinfo
+   * calls during layout. Matches the PDF backend's fast probing strategy. */
+  self->page_widths  = g_new (double, self->page_count);
+  self->page_heights = g_new (double, self->page_count);
+
+  for (int i = 0; i < self->page_count; i++) {
+    self->page_widths[i]  = 612.0;  /* fallback: US Letter */
+    self->page_heights[i] = 792.0;
+
+    ddjvu_pageinfo_t info;
+    ddjvu_status_t status = ddjvu_document_get_pageinfo (self->djvu_doc,
+                                                          i, &info);
+    if (status == DDJVU_JOB_OK) {
+      double dpi = (double) info.dpi;
+      if (dpi <= 0) dpi = 300.0;
+      self->page_widths[i]  = (double) info.width  * 72.0 / dpi;
+      self->page_heights[i] = (double) info.height * 72.0 / dpi;
+    }
+  }
+
   return TRUE;
 }
 
@@ -168,6 +194,8 @@ djvu_close (FwDocument *doc)
     self->djvu_ctx = NULL;
   }
   g_clear_pointer (&self->path, g_free);
+  g_clear_pointer (&self->page_widths, g_free);
+  g_clear_pointer (&self->page_heights, g_free);
   self->page_count = 0;
 }
 
@@ -183,20 +211,46 @@ djvu_get_page_size (FwDocument *doc, int page,
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
 
-  ddjvu_pageinfo_t info;
-  ddjvu_status_t status = ddjvu_document_get_pageinfo (self->djvu_doc,
-                                                        page, &info);
-  if (status == DDJVU_JOB_OK) {
-    /* DjVuLibre reports size in pixels at the document's DPI.
-     * Convert to points (72 DPI) for consistency with the PDF backend. */
-    double dpi = (double) info.dpi;
-    if (dpi <= 0) dpi = 300.0;
-    if (width)  *width  = (double) info.width  * 72.0 / dpi;
-    if (height) *height = (double) info.height * 72.0 / dpi;
+  if (page >= 0 && page < self->page_count && self->page_widths) {
+    if (width)  *width  = self->page_widths[page];
+    if (height) *height = self->page_heights[page];
   } else {
     if (width)  *width  = 612.0;
     if (height) *height = 792.0;
   }
+}
+
+/* Apply rotation to a cairo surface via a new rotated surface + cairo transform */
+static cairo_surface_t *
+djvu_apply_rotation (cairo_surface_t *surface, int w, int h, int rotation)
+{
+  if (rotation == 0 || !surface)
+    return surface;
+
+  int rw = w, rh = h;
+  if (rotation == 90 || rotation == 270) {
+    rw = h;
+    rh = w;
+  }
+
+  cairo_surface_t *rotated =
+    cairo_image_surface_create (CAIRO_FORMAT_ARGB32, rw, rh);
+  cairo_t *cr = cairo_create (rotated);
+
+  if (rotation == 90) {
+    cairo_translate (cr, rw, 0);
+  } else if (rotation == 180) {
+    cairo_translate (cr, rw, rh);
+  } else if (rotation == 270) {
+    cairo_translate (cr, 0, rh);
+  }
+  cairo_rotate (cr, rotation * G_PI / 180.0);
+  cairo_set_source_surface (cr, surface, 0, 0);
+  cairo_paint (cr);
+  cairo_destroy (cr);
+
+  cairo_surface_destroy (surface);
+  return rotated;
 }
 
 static cairo_surface_t *
@@ -207,6 +261,14 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
 
   g_mutex_lock (&self->render_lock);
 
+  /* Check cancel flag before starting expensive decode */
+  if (g_atomic_int_get (&self->cancel_flag)) {
+    g_mutex_unlock (&self->render_lock);
+    return NULL;
+  }
+  /* Clear cancel flag — this render is wanted */
+  g_atomic_int_set (&self->cancel_flag, FALSE);
+
   ddjvu_page_t *pg = ddjvu_page_create_by_pageno (self->djvu_doc, page);
   if (!pg) {
     g_mutex_unlock (&self->render_lock);
@@ -215,6 +277,13 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
 
   djvu_wait_for_job (self->djvu_ctx, ddjvu_page_job (pg));
   djvu_drain_messages (self->djvu_ctx);
+
+  /* Check cancel flag again after decode */
+  if (g_atomic_int_get (&self->cancel_flag)) {
+    ddjvu_page_release (pg);
+    g_mutex_unlock (&self->render_lock);
+    return NULL;
+  }
 
   if (ddjvu_page_decoding_error (pg)) {
     g_warning ("DjVu: decoding error on page %d", page);
@@ -239,39 +308,10 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   if (h < 1) h = 1;
 
   surface = djvu_render_to_cairo (self->djvu_ctx, pg, w, h);
-
-  /* Handle rotation by transforming the cairo surface */
-  if (rotation != 0 && surface) {
-    int rw = w, rh = h;
-    if (rotation == 90 || rotation == 270) {
-      rw = h;
-      rh = w;
-    }
-
-    cairo_surface_t *rotated =
-      cairo_image_surface_create (CAIRO_FORMAT_ARGB32, rw, rh);
-    cairo_t *cr = cairo_create (rotated);
-
-    if (rotation == 90) {
-      cairo_translate (cr, rw, 0);
-    } else if (rotation == 180) {
-      cairo_translate (cr, rw, rh);
-    } else if (rotation == 270) {
-      cairo_translate (cr, 0, rh);
-    }
-    cairo_rotate (cr, rotation * G_PI / 180.0);
-    cairo_set_source_surface (cr, surface, 0, 0);
-    cairo_paint (cr);
-    cairo_destroy (cr);
-
-    cairo_surface_destroy (surface);
-    surface = rotated;
-  }
-
   ddjvu_page_release (pg);
   g_mutex_unlock (&self->render_lock);
 
-  return surface;
+  return djvu_apply_rotation (surface, w, h, rotation);
 }
 
 /* ── TOC extraction ───────────────────────────────────────────────── */
@@ -516,6 +556,85 @@ djvu_get_links (FwDocument *doc, int page)
   return links;
 }
 
+/* ── Page handle API ─────────────────────────────────────────────── */
+
+static gpointer
+djvu_open_page (FwDocument *doc, int page)
+{
+  FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
+  ddjvu_page_t *pg = NULL;
+
+  g_mutex_lock (&self->render_lock);
+
+  pg = ddjvu_page_create_by_pageno (self->djvu_doc, page);
+  if (pg) {
+    djvu_wait_for_job (self->djvu_ctx, ddjvu_page_job (pg));
+    djvu_drain_messages (self->djvu_ctx);
+
+    if (ddjvu_page_decoding_error (pg)) {
+      g_warning ("DjVu: decoding error on page %d", page);
+      ddjvu_page_release (pg);
+      pg = NULL;
+    }
+  }
+
+  g_mutex_unlock (&self->render_lock);
+  return pg;
+}
+
+static void
+djvu_close_page (FwDocument *doc, gpointer handle)
+{
+  (void) doc;
+  ddjvu_page_t *pg = handle;
+  if (pg)
+    ddjvu_page_release (pg);
+}
+
+static cairo_surface_t *
+djvu_render_page_from_handle (FwDocument *doc, gpointer handle,
+                              double zoom, int rotation)
+{
+  FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
+  ddjvu_page_t *pg = handle;
+  cairo_surface_t *surface = NULL;
+
+  if (!pg)
+    return NULL;
+
+  g_mutex_lock (&self->render_lock);
+
+  if (g_atomic_int_get (&self->cancel_flag)) {
+    g_mutex_unlock (&self->render_lock);
+    return NULL;
+  }
+
+  int dpi = ddjvu_page_get_resolution (pg);
+  if (dpi <= 0) dpi = 300;
+
+  int orig_w = ddjvu_page_get_width (pg);
+  int orig_h = ddjvu_page_get_height (pg);
+
+  double scale = zoom * 72.0 / (double) dpi;
+  int w = (int) ((double) orig_w * scale + 0.5);
+  int h = (int) ((double) orig_h * scale + 0.5);
+
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+
+  surface = djvu_render_to_cairo (self->djvu_ctx, pg, w, h);
+  g_mutex_unlock (&self->render_lock);
+
+  return djvu_apply_rotation (surface, w, h, rotation);
+}
+
+static void
+djvu_cancel_render (FwDocument *doc)
+{
+  FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
+  g_atomic_int_set (&self->cancel_flag, TRUE);
+}
+
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
 static void
@@ -559,6 +678,10 @@ fw_document_djvu_iface_init (FwDocumentInterface *iface)
   iface->search         = djvu_search;
   iface->get_text       = djvu_get_text;
   iface->get_links      = djvu_get_links;
+  iface->open_page      = djvu_open_page;
+  iface->close_page     = djvu_close_page;
+  iface->render_page_from_handle = djvu_render_page_from_handle;
+  iface->cancel_render  = djvu_cancel_render;
 }
 
 FwDocumentDjvu *

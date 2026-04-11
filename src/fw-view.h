@@ -26,5 +26,7 @@ double  fw_view_fit_width_zoom (FwView   *self,
 void    fw_view_go_to_page   (FwView     *self,
                               int         page);
 int     fw_view_get_current_page (FwView *self);
+void    fw_view_set_invert     (FwView     *self,
+                                gboolean    invert);
 
 G_END_DECLS

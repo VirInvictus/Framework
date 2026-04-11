@@ -15,6 +15,13 @@ typedef struct {
   guint            generation; /* generation when this surface was rendered */
 } CacheEntry;
 
+/* Tier 1: parsed page handles — lightweight backend objects (fz_page, ddjvu_page).
+ * Wide window (~50 pages), negligible RAM cost, eliminates disk I/O on render. */
+typedef struct {
+  gpointer handle;   /* backend page object from fw_document_open_page() */
+  guint    generation;
+} ParsedEntry;
+
 typedef struct {
   FwCache *cache;   /* weak — job checks if cache is still alive */
   int      page;
@@ -33,7 +40,8 @@ struct _FwCache {
   GObject        parent_instance;
 
   FwDocument    *document;    /* owned reference */
-  GHashTable    *pages;       /* int → CacheEntry* */
+  GHashTable    *pages;       /* int → CacheEntry* (Tier 2: rendered surfaces) */
+  GHashTable    *parsed;      /* int → ParsedEntry* (Tier 1: parsed page handles) */
   GThreadPool   *pool;
   GMutex         lock;
 
@@ -41,6 +49,7 @@ struct _FwCache {
   int            rotation;
   int            page_count;
   guint          generation;  /* bumped on invalidate to cancel stale jobs */
+  int            scale_factor; /* device pixel ratio for HiDPI rendering */
 
   /* Velocity and queuing */
   double         velocity;
@@ -64,6 +73,17 @@ cache_entry_free (CacheEntry *entry)
 {
   if (entry->surface)
     cairo_surface_destroy (entry->surface);
+  g_free (entry);
+}
+
+/* ParsedEntry free requires the document to close the page handle.
+ * Since we can't pass document into the GDestroyNotify, parsed entries
+ * are freed manually via parsed_entry_free_with_doc(). */
+static void
+parsed_entry_free_with_doc (ParsedEntry *entry, FwDocument *doc)
+{
+  if (entry->handle)
+    fw_document_close_page (doc, entry->handle);
   g_free (entry);
 }
 
@@ -112,10 +132,26 @@ render_worker (gpointer data, gpointer user_data)
   }
   g_mutex_unlock (&self->lock);
 
+  /* Check for a pre-loaded page handle in the parsed cache (Tier 1).
+   * If found, render from the handle — skips the page load I/O step. */
+  gpointer parsed_handle = NULL;
+  g_mutex_lock (&self->lock);
+  ParsedEntry *parsed = g_hash_table_lookup (self->parsed,
+                                              GINT_TO_POINTER (job->page));
+  if (parsed && parsed->handle)
+    parsed_handle = parsed->handle;
+  g_mutex_unlock (&self->lock);
+
+  double render_zoom = job->zoom * self->scale_factor;
+
   /* Render the page (this is the expensive part — runs unlocked) */
-  cairo_surface_t *surface =
-    fw_document_render_page (self->document, job->page,
-                             job->zoom, job->rotation);
+  cairo_surface_t *surface;
+  if (parsed_handle)
+    surface = fw_document_render_page_from_handle (
+      self->document, parsed_handle, render_zoom, job->rotation);
+  else
+    surface = fw_document_render_page (
+      self->document, job->page, render_zoom, job->rotation);
 
   /* Store result */
   g_mutex_lock (&self->lock);
@@ -187,9 +223,10 @@ fw_cache_new (FwDocument *document, GtkWidget *view_widget)
   g_return_val_if_fail (FW_IS_DOCUMENT (document), NULL);
 
   FwCache *self = g_object_new (FW_TYPE_CACHE, NULL);
-  self->document    = g_object_ref (document);
-  self->page_count  = fw_document_get_page_count (document);
-  self->view_widget = view_widget;  /* weak ref — outlives cache */
+  self->document     = g_object_ref (document);
+  self->page_count   = fw_document_get_page_count (document);
+  self->view_widget  = view_widget;  /* weak ref — outlives cache */
+  self->scale_factor = 1;
   return self;
 }
 
@@ -239,6 +276,17 @@ fw_cache_invalidate_all (FwCache *self)
   g_mutex_lock (&self->lock);
   self->generation++;
   g_hash_table_remove_all (self->pages);
+
+  /* Free all parsed page handles */
+  if (self->document) {
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init (&iter, self->parsed);
+    while (g_hash_table_iter_next (&iter, &key, &value))
+      parsed_entry_free_with_doc (value, self->document);
+    g_hash_table_remove_all (self->parsed);
+  }
+
   g_mutex_unlock (&self->lock);
 }
 
@@ -292,32 +340,72 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
 
   self->priority_len = idx;
 
-  /* Evict pages outside the window to free RAM — but only if they've
-   * already been replaced at the current generation. Keep stale surfaces
-   * so users see the old render instead of grey while re-rendering. */
+  /* Build keep-set from priority window */
   GHashTable *keep_set = g_hash_table_new (g_direct_hash, g_direct_equal);
   for (int i = 0; i < self->priority_len; i++)
     g_hash_table_add (keep_set, GINT_TO_POINTER (self->priority_order[i]));
 
-  GHashTableIter iter;
-  gpointer key, value;
-  GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
-  g_hash_table_iter_init (&iter, self->pages);
-  while (g_hash_table_iter_next (&iter, &key, &value)) {
-    if (!g_hash_table_contains (keep_set, key)) {
-      CacheEntry *entry = value;
-      /* Only evict if the surface is current-gen (already replaced)
-       * or if there's no surface at all */
-      if (!entry->surface || entry->generation == self->generation) {
+  /* ── Tier 1: Populate parsed page handles for the priority window ── */
+  for (int i = 0; i < self->priority_len; i++) {
+    int pg = self->priority_order[i];
+    if (!g_hash_table_contains (self->parsed, GINT_TO_POINTER (pg))) {
+      /* Pre-load this page handle (lightweight I/O, no pixel rendering) */
+      gpointer handle = fw_document_open_page (self->document, pg);
+      if (handle) {
+        ParsedEntry *pe = g_new0 (ParsedEntry, 1);
+        pe->handle     = handle;
+        pe->generation = self->generation;
+        g_hash_table_insert (self->parsed, GINT_TO_POINTER (pg), pe);
+      }
+    }
+  }
+
+  /* Evict parsed entries outside the priority window */
+  {
+    GHashTableIter iter;
+    gpointer key, value;
+    GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
+    g_hash_table_iter_init (&iter, self->parsed);
+    while (g_hash_table_iter_next (&iter, &key, &value)) {
+      if (!g_hash_table_contains (keep_set, key)) {
         int pg = GPOINTER_TO_INT (key);
         g_array_append_val (to_remove, pg);
       }
     }
+    for (guint i = 0; i < to_remove->len; i++) {
+      int pg = g_array_index (to_remove, int, i);
+      ParsedEntry *pe = g_hash_table_lookup (self->parsed, GINT_TO_POINTER (pg));
+      if (pe) {
+        parsed_entry_free_with_doc (pe, self->document);
+        g_hash_table_steal (self->parsed, GINT_TO_POINTER (pg));
+      }
+    }
+    g_array_unref (to_remove);
   }
-  for (guint i = 0; i < to_remove->len; i++)
-    g_hash_table_remove (self->pages,
-                          GINT_TO_POINTER (g_array_index (to_remove, int, i)));
-  g_array_unref (to_remove);
+
+  /* ── Tier 2: Evict rendered surfaces outside the window ── */
+  {
+    GHashTableIter iter;
+    gpointer key, value;
+    GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
+    g_hash_table_iter_init (&iter, self->pages);
+    while (g_hash_table_iter_next (&iter, &key, &value)) {
+      if (!g_hash_table_contains (keep_set, key)) {
+        CacheEntry *entry = value;
+        /* Only evict if the surface is current-gen (already replaced)
+         * or if there's no surface at all */
+        if (!entry->surface || entry->generation == self->generation) {
+          int pg = GPOINTER_TO_INT (key);
+          g_array_append_val (to_remove, pg);
+        }
+      }
+    }
+    for (guint i = 0; i < to_remove->len; i++)
+      g_hash_table_remove (self->pages,
+                            GINT_TO_POINTER (g_array_index (to_remove, int, i)));
+    g_array_unref (to_remove);
+  }
+
   g_hash_table_unref (keep_set);
 
   /* Submit renders for pages in the window */
@@ -350,6 +438,8 @@ fw_cache_set_velocity (FwCache *self, double velocity)
     if (new_state == FW_RENDER_STATE_SCRUBBING) {
       /* High-Velocity Abort: drop queued jobs instantly */
       self->generation++;
+      /* Notify backend to bail out of any in-progress render */
+      fw_document_cancel_render (self->document);
     } else {
       /* Submit jobs again if we dropped back to cruising or static */
       submit_next_jobs (self);
@@ -391,6 +481,21 @@ fw_cache_page_ready (FwCache *self, int page)
 }
 
 void
+fw_cache_set_scale_factor (FwCache *self, int scale_factor)
+{
+  g_return_if_fail (FW_IS_CACHE (self));
+  if (scale_factor < 1) scale_factor = 1;
+
+  g_mutex_lock (&self->lock);
+  if (self->scale_factor != scale_factor) {
+    self->scale_factor = scale_factor;
+    /* Invalidate all rendered surfaces — they're at the wrong resolution */
+    self->generation++;
+  }
+  g_mutex_unlock (&self->lock);
+}
+
+void
 fw_cache_stop (FwCache *self)
 {
   g_return_if_fail (FW_IS_CACHE (self));
@@ -415,6 +520,17 @@ fw_cache_dispose (GObject *object)
     self->pool = NULL;
   }
 
+  /* Free all parsed page handles before dropping the document */
+  if (self->parsed && self->document) {
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init (&iter, self->parsed);
+    while (g_hash_table_iter_next (&iter, &key, &value)) {
+      parsed_entry_free_with_doc (value, self->document);
+    }
+    g_hash_table_remove_all (self->parsed);
+  }
+
   g_clear_object (&self->document);
 
   G_OBJECT_CLASS (fw_cache_parent_class)->dispose (object);
@@ -426,6 +542,7 @@ fw_cache_finalize (GObject *object)
   FwCache *self = FW_CACHE (object);
 
   g_hash_table_unref (self->pages);
+  g_hash_table_unref (self->parsed);
   g_mutex_clear (&self->lock);
   g_free (self->priority_order);
 
@@ -449,6 +566,10 @@ fw_cache_init (FwCache *self)
                                         NULL,
                                         (GDestroyNotify) cache_entry_free);
 
+  /* Tier 1: parsed page handles. No GDestroyNotify because we need
+   * the document pointer to close handles — freed manually. */
+  self->parsed = g_hash_table_new (g_direct_hash, g_direct_equal);
+
   /* Thread pool: use number of processors, non-exclusive so threads
    * are shared across pools. */
   int n_threads = (int) g_get_num_processors ();
@@ -459,4 +580,5 @@ fw_cache_init (FwCache *self)
   self->max_jobs = n_threads;
   self->active_jobs = 0;
   self->render_state = FW_RENDER_STATE_STATIC;
+  self->scale_factor = 1;
 }

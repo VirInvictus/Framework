@@ -91,6 +91,24 @@ struct _FwDocumentInterface {
 
   GArray          *(*get_links)      (FwDocument   *self,
                                       int           page);
+
+  /* Page handle API — allows separating page loading (I/O) from rendering.
+   * Backends that support this return a lightweight parsed page object from
+   * open_page, which can be passed to render_page_from_handle to skip the
+   * load step. close_page releases the handle. */
+  gpointer         (*open_page)     (FwDocument   *self,
+                                      int           page);
+  void             (*close_page)    (FwDocument   *self,
+                                      gpointer      handle);
+  cairo_surface_t *(*render_page_from_handle)
+                                     (FwDocument   *self,
+                                      gpointer      handle,
+                                      double        zoom,
+                                      int           rotation);
+
+  /* Render cancellation — called when the cache aborts during high-velocity
+   * scrubbing. Backends can use this to bail out of in-progress renders. */
+  void             (*cancel_render) (FwDocument   *self);
 };
 
 /* Public API — delegates to interface vtable */
@@ -119,6 +137,18 @@ char            *fw_document_get_text       (FwDocument   *self,
                                              double        y1);
 GArray          *fw_document_get_links      (FwDocument   *self,
                                              int           page);
+
+/* Page handle API */
+gpointer         fw_document_open_page      (FwDocument   *self,
+                                             int           page);
+void             fw_document_close_page     (FwDocument   *self,
+                                             gpointer      handle);
+cairo_surface_t *fw_document_render_page_from_handle
+                                            (FwDocument   *self,
+                                             gpointer      handle,
+                                             double        zoom,
+                                             int           rotation);
+void             fw_document_cancel_render  (FwDocument   *self);
 
 /* ── Factory ──────────────────────────────────────────────────────── */
 

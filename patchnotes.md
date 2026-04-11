@@ -1,5 +1,40 @@
 # Framework — Patch Notes
 
+## v1.3.0 (2026-04-11)
+
+---
+
+### Two-Tier Cache Architecture
+Replaced the single surface cache with a two-tier system that separates parsed page objects from rendered pixel surfaces.
+- **Tier 1 (Parsed Window):** Pre-loads lightweight backend page objects (`fz_page` / `ddjvu_page`) for the entire priority window (~50 pages). Negligible RAM cost, eliminates disk I/O when scrolling into uncached regions.
+- **Tier 2 (Pixel Window):** Rendered `cairo_surface_t` surfaces, same as before but now fed by pre-loaded handles.
+- **Page Handle API:** New `fw_document_open_page()` / `close_page()` / `render_page_from_handle()` on the document interface. Backends implement the separation between page loading (I/O-bound) and rendering (CPU-bound).
+
+### MuPDF Parallel Rendering
+MuPDF rendering is no longer serialized through a single mutex.
+- **Cloned Contexts:** Up to 8 `fz_context` clones are created at document open, sharing the font/image store. Each render thread acquires its own context via round-robin.
+- **Page Load Serialization:** `fz_load_page()` still runs under the main context lock (required by MuPDF). Rendering from a pre-loaded handle runs on a cloned context without blocking other renders.
+- **Result:** On multi-core machines, multiple pages now render simultaneously.
+
+### DjVu Render Cancellation
+DjVu rendering now supports cooperative cancellation during high-velocity scrubbing.
+- **Cancel Flag:** When the velocity engine enters scrubbing state, `cancel_render()` sets a flag on the DjVu backend. The render function checks this flag before and after the expensive page decode step, bailing out immediately if set.
+- **Result:** Rapid scrolling through DjVu documents no longer locks the render mutex for the duration of abandoned page decodes.
+
+### Fast DjVu Page Probing
+DjVu page dimensions are now pre-cached at document open time, matching the PDF backend's behavior. Previously, every call to `get_page_size()` hit `ddjvu_document_get_pageinfo()`. Now a single loop at open time populates cached arrays, eliminating repeated I/O during layout computation.
+
+### Wayland Fractional Scaling
+Render resolution now accounts for the display's device pixel ratio.
+- **Scale Factor Awareness:** The cache multiplies the logical zoom by `gtk_widget_get_scale_factor()` when submitting render jobs. Text and graphics are rendered at native display resolution.
+- **Monitor Changes:** Moving a window between displays with different scale factors triggers automatic re-render at the correct resolution.
+
+### Invert Colors
+`Ctrl+I` now works. Color inversion is applied at the display stage — RGB channels are bitwise-inverted on the pixel data during snapshot, without re-rendering the underlying document surfaces. Toggling is instant with no cache invalidation.
+
+### Ref-Counted View Pointers
+`FwView` now holds proper GObject references to the document and cache objects via `g_set_object()`, preventing dangling pointer crashes on document swap.
+
 ## v1.2.0 (2026-04-11)
 
 ---

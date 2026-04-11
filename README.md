@@ -27,6 +27,10 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
 | **State persistence** | Saves page, scroll position, and zoom per document — reopens where you left off |
 | **Velocity Engine** | Dynamic cache management tracks scroll speed to pace rendering, abort stale jobs, and minimize memory footprint |
+| **Two-tier cache** | Parsed page objects cached separately from rendered surfaces — eliminates I/O on scroll, keeps RAM bounded |
+| **Parallel rendering** | MuPDF cloned contexts render multiple pages simultaneously on multi-core machines |
+| **HiDPI / fractional scaling** | Renders at native device pixel ratio for sharp text on Wayland with 150%/200% scaling |
+| **Invert colors** | Ctrl+I for instant display-stage color inversion — no re-render needed |
 
 ## Keyboard shortcuts
 
@@ -57,6 +61,7 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | Toggle sidebar | F9 |
 | Fullscreen | F11 |
 | Find | Ctrl+F |
+| Invert colors | Ctrl+I |
 
 ## Requirements
 

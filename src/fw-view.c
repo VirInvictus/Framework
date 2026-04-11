@@ -36,6 +36,9 @@ struct _FwView {
   /* Velocity tracking */
   double       last_scroll_y;
   gint64       last_frame_time;
+
+  /* Display options */
+  gboolean     invert_colors;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -283,7 +286,22 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
       cairo_surface_flush (surface);
       int stride = cairo_image_surface_get_stride (surface);
       unsigned char *data = cairo_image_surface_get_data (surface);
-      GBytes *bytes = g_bytes_new (data, (gsize) stride * (gsize) sh);
+      gsize data_size = (gsize) stride * (gsize) sh;
+
+      GBytes *bytes;
+      if (self->invert_colors) {
+        /* Invert RGB channels, preserve alpha. Data is BGRA premultiplied. */
+        unsigned char *inverted = g_memdup2 (data, data_size);
+        for (gsize p = 0; p < data_size; p += 4) {
+          inverted[p + 0] = 255 - inverted[p + 0]; /* B */
+          inverted[p + 1] = 255 - inverted[p + 1]; /* G */
+          inverted[p + 2] = 255 - inverted[p + 2]; /* R */
+          /* inverted[p + 3] unchanged — alpha */
+        }
+        bytes = g_bytes_new_take (inverted, data_size);
+      } else {
+        bytes = g_bytes_new (data, data_size);
+      }
 
       GdkTexture *texture = GDK_TEXTURE (
         gdk_memory_texture_new (sw, sh,
@@ -376,8 +394,8 @@ fw_view_set_document (FwView *self, FwDocument *document, FwCache *cache)
 {
   g_return_if_fail (FW_IS_VIEW (self));
 
-  self->document   = document;
-  self->cache      = cache;
+  g_set_object (&self->document, document);
+  g_set_object (&self->cache, cache);
   self->page_count = document ? fw_document_get_page_count (document) : 0;
 
   recompute_layout (self);
@@ -448,12 +466,25 @@ fw_view_get_current_page (FwView *self)
   return 0;
 }
 
+void
+fw_view_set_invert (FwView *self, gboolean invert)
+{
+  g_return_if_fail (FW_IS_VIEW (self));
+  if (self->invert_colors == invert)
+    return;
+  self->invert_colors = invert;
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
 static void
 fw_view_dispose (GObject *object)
 {
   FwView *self = FW_VIEW (object);
+
+  g_clear_object (&self->document);
+  g_clear_object (&self->cache);
 
   if (self->hadjustment) {
     g_signal_handlers_disconnect_by_func (self->hadjustment,

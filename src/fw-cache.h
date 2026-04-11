@@ -40,4 +40,7 @@ gboolean         fw_cache_page_ready    (FwCache         *self,
 
 void             fw_cache_stop          (FwCache         *self);
 
+void             fw_cache_set_scale_factor (FwCache      *self,
+                                            int           scale_factor);
+
 G_END_DECLS

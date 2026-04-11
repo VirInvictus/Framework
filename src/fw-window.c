@@ -44,6 +44,7 @@ struct _FwWindow {
   double                zoom;
   int                   rotation;
   int                   current_page;
+  gboolean              invert_colors;
   char                 *file_path;   /* absolute path of current document */
 
   /* Deferred restore */
@@ -244,8 +245,10 @@ static void act_go_to_page (GSimpleAction *a, GVariant *p, gpointer d)
 static void act_invert_colors (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
-  (void)d;
-  /* TODO: implement color inversion on rendered surfaces */
+  FwWindow *w = d;
+  w->invert_colors = !w->invert_colors;
+  if (w->view)
+    fw_view_set_invert (w->view, w->invert_colors);
 }
 
 static void act_print (GSimpleAction *a, GVariant *p, gpointer d)
@@ -349,6 +352,23 @@ on_key_pressed (GtkEventControllerKey *controller,
   default:
     return FALSE;
   }
+}
+
+/* ── Scale factor change ─────────────────────────────────────────── */
+
+static void
+on_scale_factor_changed (GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+  (void) pspec;
+  FwWindow *self = FW_WINDOW (object);
+  (void) user_data;
+
+  if (!self->cache)
+    return;
+
+  int sf = gtk_widget_get_scale_factor (GTK_WIDGET (self));
+  fw_cache_set_scale_factor (self->cache, sf);
+  fw_cache_start (self->cache, self->zoom, self->rotation);
 }
 
 /* ── Close handler ───────────────────────────────────────────────── */
@@ -575,6 +595,11 @@ fw_window_constructed (GObject *object)
   /* Save document state before the window is destroyed */
   g_signal_connect (self, "close-request",
                     G_CALLBACK (on_close_request), self);
+
+  /* Update render resolution when moving between monitors with different
+   * scale factors (e.g., 1x laptop → 2x external display) */
+  g_signal_connect (self, "notify::scale-factor",
+                    G_CALLBACK (on_scale_factor_changed), self);
 }
 
 /* ── Deferred fit-width via tick callback ─────────────────────────── */
@@ -673,6 +698,8 @@ fw_window_open_file (FwWindow *self, const char *path)
 
   /* Configure view */
   self->cache = fw_cache_new (self->document, GTK_WIDGET (self->view));
+  fw_cache_set_scale_factor (self->cache,
+    gtk_widget_get_scale_factor (GTK_WIDGET (self)));
   fw_view_set_document (self->view, self->document, self->cache);
 
   /* Apply saved zoom or default to fit-width */

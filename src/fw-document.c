@@ -146,6 +146,49 @@ fw_document_get_links (FwDocument *self, int page)
   return FW_DOCUMENT_GET_IFACE (self)->get_links (self, page);
 }
 
+/* ── Page handle API ─────────────────────────────────────────────── */
+
+gpointer
+fw_document_open_page (FwDocument *self, int page)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), NULL);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->open_page)
+    return iface->open_page (self, page);
+  return NULL;
+}
+
+void
+fw_document_close_page (FwDocument *self, gpointer handle)
+{
+  g_return_if_fail (FW_IS_DOCUMENT (self));
+  if (!handle) return;
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->close_page)
+    iface->close_page (self, handle);
+}
+
+cairo_surface_t *
+fw_document_render_page_from_handle (FwDocument *self, gpointer handle,
+                                     double zoom, int rotation)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), NULL);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->render_page_from_handle && handle)
+    return iface->render_page_from_handle (self, handle, zoom, rotation);
+  /* Fallback: not available */
+  return NULL;
+}
+
+void
+fw_document_cancel_render (FwDocument *self)
+{
+  g_return_if_fail (FW_IS_DOCUMENT (self));
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->cancel_render)
+    iface->cancel_render (self);
+}
+
 /* ── Factory — pick backend by file extension ─────────────────────── */
 
 FwDocument *
