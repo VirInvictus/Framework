@@ -27,6 +27,7 @@ framework_sources = files(
   'fw-sidebar.c',
   'fw-search.c',
   'fw-state.c',
+  'fw-debug.c',
 )
 
 framework_deps = [

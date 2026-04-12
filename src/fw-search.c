@@ -10,7 +10,7 @@
 struct _FwSearch {
   GObject      parent_instance;
 
-  FwDocument  *document;  /* weak */
+  FwDocument  *document;  /* owned ref */
   GArray      *hits;      /* FwSearchHit[] across all pages */
   int          current;   /* index into hits, or -1 */
 };
@@ -27,7 +27,7 @@ void
 fw_search_set_document (FwSearch *self, FwDocument *document)
 {
   g_return_if_fail (FW_IS_SEARCH (self));
-  self->document = document;
+  g_set_object (&self->document, document);
 
   if (self->hits) {
     g_array_unref (self->hits);
@@ -100,6 +100,14 @@ fw_search_get_current (FwSearch *self)
 }
 
 static void
+fw_search_dispose (GObject *object)
+{
+  FwSearch *self = FW_SEARCH (object);
+  g_clear_object (&self->document);
+  G_OBJECT_CLASS (fw_search_parent_class)->dispose (object);
+}
+
+static void
 fw_search_finalize (GObject *object)
 {
   FwSearch *self = FW_SEARCH (object);
@@ -111,6 +119,7 @@ fw_search_finalize (GObject *object)
 static void
 fw_search_class_init (FwSearchClass *klass)
 {
+  G_OBJECT_CLASS (klass)->dispose  = fw_search_dispose;
   G_OBJECT_CLASS (klass)->finalize = fw_search_finalize;
 }
 

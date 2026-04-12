@@ -6,6 +6,7 @@
 #include "fw-document.h"
 #include "fw-document-pdf.h"
 #include "fw-document-djvu.h"
+#include "fw-debug.h"
 
 #include <gio/gio.h>
 #include <string.h>
@@ -66,6 +67,16 @@ fw_link_free (FwLink *link)
     return;
   g_free (link->uri);
   g_free (link);
+}
+
+/* GArray clear function for arrays of FwLink*.
+ * g_array_set_clear_func passes a pointer TO the element — since elements
+ * are FwLink*, the callback receives FwLink**. */
+void
+fw_link_free_indirect (gpointer data)
+{
+  FwLink **pp = data;
+  fw_link_free (*pp);
 }
 
 /* ── GInterface boilerplate ───────────────────────────────────────── */
@@ -216,10 +227,16 @@ fw_document_new_for_path (const char *path, GError **error)
     return NULL;
   }
 
+  FW_TRACE_DOC ("opening '%s' with %s backend", path,
+                g_ascii_strcasecmp (dot, ".pdf") == 0 ? "PDF" : "DjVu");
+
   if (!fw_document_open (doc, path, error)) {
+    FW_TRACE_DOC ("open FAILED: %s", (*error)->message);
     g_object_unref (doc);
     return NULL;
   }
 
+  FW_TRACE_DOC ("opened '%s': %d pages", path,
+                fw_document_get_page_count (doc));
   return doc;
 }

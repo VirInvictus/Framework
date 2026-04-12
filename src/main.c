@@ -5,6 +5,7 @@
 
 #include "fw-config.h"
 #include "fw-application.h"
+#include "fw-debug.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +20,8 @@ main (int argc, char *argv[])
       return 0;
     }
   }
+
+  fw_debug_init ();
 
   g_autoptr (FwApplication) app = fw_application_new ();
   return g_application_run (G_APPLICATION (app), argc, argv);

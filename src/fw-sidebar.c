@@ -19,6 +19,13 @@ enum {
   N_COLS,
 };
 
+enum {
+  SIGNAL_PAGE_REQUESTED,
+  N_SIGNALS,
+};
+
+static guint signals[N_SIGNALS];
+
 /* ── Populate tree store from TOC nodes ───────────────────────────── */
 
 static void
@@ -139,6 +146,34 @@ fw_sidebar_class_init (FwSidebarClass *klass)
   widget_class->snapshot      = fw_sidebar_snapshot;
   widget_class->measure       = fw_sidebar_measure;
   widget_class->size_allocate = fw_sidebar_size_allocate;
+
+  signals[SIGNAL_PAGE_REQUESTED] =
+    g_signal_new ("page-requested",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL,
+                  G_TYPE_NONE, 1, G_TYPE_INT);
+}
+
+static void
+on_row_activated (GtkTreeView       *tree_view,
+                  GtkTreePath       *path,
+                  GtkTreeViewColumn *column,
+                  gpointer           user_data)
+{
+  (void) column;
+  FwSidebar *self = FW_SIDEBAR (user_data);
+  GtkTreeModel *model = gtk_tree_view_get_model (tree_view);
+  GtkTreeIter iter;
+
+  if (!gtk_tree_model_get_iter (model, &iter, path))
+    return;
+
+  int page = -1;
+  gtk_tree_model_get (model, &iter, COL_PAGE, &page, -1);
+
+  if (page >= 0)
+    g_signal_emit (self, signals[SIGNAL_PAGE_REQUESTED], 0, page);
 }
 
 static void
@@ -152,6 +187,9 @@ fw_sidebar_init (FwSidebar *self)
   GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes (
     "Title", renderer, "text", COL_TITLE, NULL);
   gtk_tree_view_append_column (self->tree_view, col);
+
+  g_signal_connect (self->tree_view, "row-activated",
+                    G_CALLBACK (on_row_activated), self);
 
   gtk_widget_set_parent (GTK_WIDGET (self->tree_view), GTK_WIDGET (self));
   gtk_widget_set_visible (GTK_WIDGET (self->tree_view), FALSE);

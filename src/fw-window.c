@@ -11,6 +11,7 @@
 #include "fw-cache.h"
 #include "fw-document.h"
 #include "fw-state.h"
+#include "fw-debug.h"
 #include <gdk/gdk.h>
 
 struct _FwWindow {
@@ -72,6 +73,7 @@ set_zoom (FwWindow *self, double zoom)
 {
   if (zoom < 0.1) zoom = 0.1;
   if (zoom > 10.0) zoom = 10.0;
+  FW_TRACE_WINDOW ("set_zoom: %.2f", zoom);
   self->zoom = zoom;
   update_zoom_entry (self);
 
@@ -202,6 +204,17 @@ sidebar_clicked (GtkButton *button, gpointer user_data)
   FwWindow *self = FW_WINDOW (user_data);
   gboolean visible = adw_overlay_split_view_get_show_sidebar (self->split_view);
   adw_overlay_split_view_set_show_sidebar (self->split_view, !visible);
+}
+
+/* ── Sidebar TOC navigation ───────────────────────────────────────── */
+
+static void
+on_sidebar_page_requested (FwSidebar *sidebar, int page, gpointer user_data)
+{
+  (void) sidebar;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->document && page >= 0)
+    go_to_page (self, page);
 }
 
 /* ── Window actions ───────────────────────────────────────────────── */
@@ -397,7 +410,7 @@ fw_window_constructed (GObject *object)
 
   /* Left: sidebar toggle */
   self->sidebar_button = GTK_BUTTON (gtk_button_new_from_icon_name (
-    "view-sidebar-symbolic"));
+    "sidebar-show-symbolic"));
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->sidebar_button),
                                "Toggle Sidebar (F9)");
   g_signal_connect (self->sidebar_button, "clicked",
@@ -521,6 +534,8 @@ fw_window_constructed (GObject *object)
 
   /* Sidebar */
   self->sidebar = fw_sidebar_new ();
+  g_signal_connect (self->sidebar, "page-requested",
+                    G_CALLBACK (on_sidebar_page_requested), self);
   GtkScrolledWindow *sidebar_scroll = GTK_SCROLLED_WINDOW (
     gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (sidebar_scroll,
@@ -663,11 +678,15 @@ fw_window_open_file (FwWindow *self, const char *path)
   g_return_if_fail (FW_IS_WINDOW (self));
   g_return_if_fail (path != NULL);
 
+  FW_TRACE_WINDOW ("open_file: '%s'", path);
+
   /* Save state of previous document before switching */
   fw_window_save_state (self);
 
   /* Clean up previous document */
   if (self->cache) {
+    FW_TRACE_MEM ("closing previous doc: cache=%p doc=%p",
+                  (void *) self->cache, (void *) self->document);
     fw_cache_stop (self->cache);
     g_clear_object (&self->cache);
   }
@@ -702,15 +721,19 @@ fw_window_open_file (FwWindow *self, const char *path)
     gtk_widget_get_scale_factor (GTK_WIDGET (self)));
   fw_view_set_document (self->view, self->document, self->cache);
 
-  /* Apply saved zoom or default to fit-width */
+  /* Apply saved zoom or default to fit-width.
+   * set_zoom() already calls fw_cache_start() internally — do NOT call
+   * fw_cache_start() again here.  A redundant call bumps the generation
+   * counter, making the workers that set_zoom() just submitted stale.
+   * For DjVu (serialized rendering), this means the first visible pages
+   * sit in the "stale" queue and never produce surfaces until the user
+   * scrolls, which is the "pages don't render on open" bug. */
   if (saved) {
     self->rotation = saved->rotation;
     set_zoom (self, saved->zoom_level);
-    fw_cache_start (self->cache, self->zoom, self->rotation);
     self->current_page = saved->page;
   } else {
     set_zoom (self, 1.0);
-    fw_cache_start (self->cache, self->zoom, self->rotation);
     self->current_page = 0;
   }
 
@@ -730,6 +753,10 @@ fw_window_open_file (FwWindow *self, const char *path)
     gtk_widget_add_tick_callback (GTK_WIDGET (self->scroll),
                                   apply_fit_width_tick, self, NULL);
   }
+
+  FW_TRACE_WINDOW ("open_file done: zoom=%.2f page=%d restore=%s",
+                    self->zoom, self->current_page,
+                    self->_restore_pending ? "yes" : "no");
 
   /* Load TOC into sidebar */
   FwTocNode *toc = fw_document_get_toc (self->document);
@@ -775,10 +802,20 @@ fw_window_dispose (GObject *object)
 
   fw_window_save_state (self);
 
+  /* Disconnect view from document/cache FIRST — the view holds refs to both,
+   * and GTK widget teardown order is unpredictable. Without this, the cache
+   * refcount never reaches zero during window dispose. */
+  if (self->view)
+    fw_view_set_document (self->view, NULL, NULL);
+
   if (self->cache) {
+    FW_TRACE_MEM ("window dispose: stopping cache=%p", (void *) self->cache);
     fw_cache_stop (self->cache);
     g_clear_object (&self->cache);
   }
+  FW_TRACE_MEM ("window dispose: clearing doc=%p path='%s'",
+                (void *) self->document,
+                self->file_path ? self->file_path : "(null)");
   g_clear_object (&self->document);
   g_clear_pointer (&self->file_path, g_free);
 

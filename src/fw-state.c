@@ -133,6 +133,10 @@ fw_state_prune (void)
 
   g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
 
+  /* Collect keys to remove — we must not modify the object while iterating
+   * over its member list, as json_object_remove_member invalidates it. */
+  GList *to_remove = NULL;
+
   for (GList *l = members; l; l = l->next) {
     const char *key = l->data;
     JsonObject *entry = json_object_get_object_member (obj, key);
@@ -140,27 +144,28 @@ fw_state_prune (void)
       "last_opened", NULL);
 
     if (!ts) {
-      json_object_remove_member (obj, key);
-      count--;
-      changed = TRUE;
+      to_remove = g_list_prepend (to_remove, (gpointer) key);
       continue;
     }
 
     g_autoptr (GDateTime) opened = g_date_time_new_from_iso8601 (ts, NULL);
     if (!opened) {
-      json_object_remove_member (obj, key);
-      count--;
-      changed = TRUE;
+      to_remove = g_list_prepend (to_remove, (gpointer) key);
       continue;
     }
 
     GTimeSpan diff = g_date_time_difference (now, opened);
-    if (diff > (GTimeSpan) MAX_AGE_DAYS * G_TIME_SPAN_DAY) {
-      json_object_remove_member (obj, key);
-      count--;
-      changed = TRUE;
-    }
+    if (diff > (GTimeSpan) MAX_AGE_DAYS * G_TIME_SPAN_DAY)
+      to_remove = g_list_prepend (to_remove, (gpointer) key);
   }
+
+  for (GList *l = to_remove; l; l = l->next) {
+    json_object_remove_member (obj, (const char *) l->data);
+    count--;
+    changed = TRUE;
+  }
+
+  g_list_free (to_remove);
 
   /* TODO: LRU eviction if count > MAX_ENTRIES */
   (void) count;

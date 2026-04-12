@@ -43,6 +43,7 @@ FwLink *fw_link_new_internal (double x0, double y0, double x1, double y1,
 FwLink *fw_link_new_external (double x0, double y0, double x1, double y1,
                               const char *uri);
 void    fw_link_free         (FwLink *link);
+void    fw_link_free_indirect (gpointer data);  /* for g_array_set_clear_func */
 
 /* ── Search hit ───────────────────────────────────────────────────── */
 

@@ -22,7 +22,7 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | Feature | Description |
 |---------|-------------|
 | **MuPDF backend** | Fast PDF rendering via libmupdf with per-thread context safety |
-| **DjVuLibre backend** | Full DjVu/DjV support via ddjvuapi |
+| **DjVuLibre backend** | Full DjVu/DjV support via ddjvuapi with zero-copy rendering into cairo surfaces |
 | **Pre-cache engine** | Thread pool renders pages asynchronously with priority ordering — visible pages first, then forward, then backward |
 | **Fit-width default** | Pages scale to viewport width on open, regardless of source dimensions |
 | **Continuous scroll** | All pages stacked vertically with smooth kinetic scrolling |
@@ -30,9 +30,9 @@ I was essentially looking for a SumatraPDF-like client for Linux. I was frustrat
 | **Search** | Full-text search across all pages (Ctrl+F) |
 | **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
 | **State persistence** | Saves page, scroll position, and zoom per document — reopens where you left off |
-| **Velocity Engine** | Dynamic cache management tracks scroll speed to pace rendering, abort stale jobs, and minimize memory footprint |
+| **Velocity Engine** | Dynamic cache management tracks scroll speed to throttle render jobs, shrink the priority window, and abort stale work — keeps CPU quiet during fast scrolling |
 | **Two-tier cache** | Parsed page objects cached separately from rendered surfaces — eliminates I/O on scroll, keeps RAM bounded |
-| **Parallel rendering** | MuPDF cloned contexts render multiple pages simultaneously on multi-core machines |
+| **Parallel rendering** | Independent MuPDF instances render multiple pages simultaneously on multi-core machines |
 | **HiDPI / fractional scaling** | Renders at native device pixel ratio for sharp text on Wayland with 150%/200% scaling |
 | **Invert colors** | Ctrl+I for instant display-stage color inversion — no re-render needed |
 

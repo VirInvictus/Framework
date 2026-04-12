@@ -8,6 +8,7 @@
  */
 
 #include "fw-view.h"
+#include "fw-debug.h"
 
 #define PAGE_GAP 8
 
@@ -299,8 +300,12 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
           /* inverted[p + 3] unchanged — alpha */
         }
         bytes = g_bytes_new_take (inverted, data_size);
+        cairo_surface_destroy (surface);
       } else {
-        bytes = g_bytes_new (data, data_size);
+        /* Zero-copy: let GBytes reference the surface data directly.
+         * The surface ref keeps the pixel buffer alive until GBytes is freed. */
+        bytes = g_bytes_new_with_free_func (data, data_size,
+                  (GDestroyNotify) cairo_surface_destroy, surface);
       }
 
       GdkTexture *texture = GDK_TEXTURE (
@@ -311,7 +316,6 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
       gtk_snapshot_append_texture (snapshot, texture, &rect);
       g_object_unref (texture);
-      cairo_surface_destroy (surface);
     } else {
       graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
                                                   (float) pw, (float) ph);
@@ -398,6 +402,7 @@ fw_view_set_document (FwView *self, FwDocument *document, FwCache *cache)
   g_set_object (&self->cache, cache);
   self->page_count = document ? fw_document_get_page_count (document) : 0;
 
+  FW_TRACE_VIEW ("set_document: pages=%d", self->page_count);
   recompute_layout (self);
   update_cache_priority (self);
 }
@@ -406,6 +411,7 @@ void
 fw_view_set_zoom (FwView *self, double zoom)
 {
   g_return_if_fail (FW_IS_VIEW (self));
+  FW_TRACE_VIEW ("set_zoom: %.2f", zoom);
   self->zoom = zoom;
   recompute_layout (self);
 }

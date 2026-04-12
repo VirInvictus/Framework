@@ -10,6 +10,7 @@
  */
 
 #include "fw-document-pdf.h"
+#include "fw-debug.h"
 
 #include <gio/gio.h>
 #include <mupdf/fitz.h>
@@ -17,33 +18,23 @@
 #include <stdint.h>
 #include <string.h>
 
-#define MAX_RENDER_CONTEXTS 8
+#define MAX_RENDER_INSTANCES 8
 
-/* ── MuPDF threading locks ───────────────────────────────────────── */
-/* MuPDF requires a fz_locks_context when contexts are cloned and used
- * from multiple threads. Without it, the shared store (font/image cache)
- * is accessed without synchronization, causing crashes.
+/* ── Parallel rendering via independent document instances ────────── */
+/* MuPDF's fz_context and fz_document are NOT thread-safe. Cloned contexts
+ * share a font/image store, but fz_page and fz_image objects lazily read
+ * from PDF streams that are owned by the document — concurrent reads from
+ * multiple threads corrupt state (even through display lists).
  *
- * FZ_LOCK_MAX is typically 4 (ALLOC, FREETYPE, GLYPHCACHE, COLORSPACE).
- * We back each lock slot with a GMutex. */
+ * The correct multi-threading approach: open the same file N times, each
+ * with its own fz_context and fz_document. Each render thread picks an
+ * instance and works completely independently — no shared state at all. */
 
 typedef struct {
-  GMutex mutexes[FZ_LOCK_MAX];
-} FzLockData;
-
-static void
-fz_lock_cb (void *user, int lock)
-{
-  FzLockData *data = user;
-  g_mutex_lock (&data->mutexes[lock]);
-}
-
-static void
-fz_unlock_cb (void *user, int lock)
-{
-  FzLockData *data = user;
-  g_mutex_unlock (&data->mutexes[lock]);
-}
+  fz_context  *ctx;
+  fz_document *doc;
+  GMutex       lock;
+} RenderInstance;
 
 struct _FwDocumentPdf {
   GObject       parent_instance;
@@ -54,17 +45,11 @@ struct _FwDocumentPdf {
   int           page_count;
   GMutex        lock;         /* serializes main context access (page load, TOC, etc.) */
 
-  /* MuPDF store locking — required for thread-safe access to the shared
-   * font/image store when using cloned contexts */
-  FzLockData   *lock_data;
-  fz_locks_context fz_locks;
-
-  /* Cloned contexts for parallel rendering — each has its own exception stack
-   * but shares the font/image store with the main context */
-  fz_context   *render_ctx[MAX_RENDER_CONTEXTS];
-  GMutex        render_lock[MAX_RENDER_CONTEXTS];
-  int           n_render_ctx;
-  volatile int  next_render_ctx;  /* round-robin index */
+  /* Independent render instances — each opens the file separately so there
+   * is zero shared state between render threads */
+  RenderInstance render[MAX_RENDER_INSTANCES];
+  int            n_render;
+  volatile int   next_render;  /* round-robin index */
 
   /* Page sizes cached at open time to avoid repeated fz_load_page calls */
   double       *page_widths;   /* in points */
@@ -163,21 +148,8 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
 
-  /* Set up MuPDF store locks for thread-safe cloned context access */
-  self->lock_data = g_new0 (FzLockData, 1);
-  for (int i = 0; i < FZ_LOCK_MAX; i++)
-    g_mutex_init (&self->lock_data->mutexes[i]);
-
-  self->fz_locks.user   = self->lock_data;
-  self->fz_locks.lock   = fz_lock_cb;
-  self->fz_locks.unlock = fz_unlock_cb;
-
-  fz_context *ctx = fz_new_context (NULL, &self->fz_locks, FZ_STORE_DEFAULT);
+  fz_context *ctx = fz_new_context (NULL, NULL, 64 << 20);
   if (!ctx) {
-    for (int i = 0; i < FZ_LOCK_MAX; i++)
-      g_mutex_clear (&self->lock_data->mutexes[i]);
-    g_free (self->lock_data);
-    self->lock_data = NULL;
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Failed to create MuPDF context");
     return FALSE;
@@ -202,33 +174,46 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
   if (failed) {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                  "MuPDF: %s", errmsg ? errmsg : "unknown error");
-    /* Clean up any partial state */
     if (self->doc) {
       fz_drop_document (ctx, self->doc);
       self->doc = NULL;
     }
     fz_drop_context (ctx);
-    for (int i = 0; i < FZ_LOCK_MAX; i++)
-      g_mutex_clear (&self->lock_data->mutexes[i]);
-    g_clear_pointer (&self->lock_data, g_free);
     return FALSE;
   }
 
   self->ctx  = ctx;
   self->path = g_strdup (path);
+  FW_TRACE_PDF ("opened '%s': %d pages", path, self->page_count);
 
-  /* Create cloned contexts for parallel rendering.
-   * Each clone shares the font/image store but has its own exception stack,
-   * allowing N pages to render simultaneously instead of serializing. */
+  /* Create independent render instances — each opens the file separately
+   * with its own fz_context and fz_document. No shared state between
+   * render threads means no synchronization issues, even for PDFs with
+   * JPEG2000 images or complex color spaces. */
   int n_threads = (int) g_get_num_processors ();
   if (n_threads < 2) n_threads = 2;
-  if (n_threads > MAX_RENDER_CONTEXTS) n_threads = MAX_RENDER_CONTEXTS;
-  self->n_render_ctx = n_threads;
-  self->next_render_ctx = 0;
+  if (n_threads > MAX_RENDER_INSTANCES) n_threads = MAX_RENDER_INSTANCES;
+  self->n_render = n_threads;
+  self->next_render = 0;
 
-  for (int i = 0; i < self->n_render_ctx; i++) {
-    self->render_ctx[i] = fz_clone_context (ctx);
-    g_mutex_init (&self->render_lock[i]);
+  for (int i = 0; i < self->n_render; i++) {
+    self->render[i].ctx = fz_new_context (NULL, NULL, 64 << 20);
+    if (self->render[i].ctx) {
+      fz_set_warning_callback (self->render[i].ctx, pdf_warn_handler, NULL);
+      fz_set_error_callback (self->render[i].ctx, pdf_error_handler, NULL);
+      fz_register_document_handlers (self->render[i].ctx);
+      fz_try (self->render[i].ctx) {
+        self->render[i].doc = fz_open_document (self->render[i].ctx, path);
+      }
+      fz_catch (self->render[i].ctx) {
+        g_warning ("MuPDF: render instance %d failed to open: %s",
+                   i, fz_caught_message (self->render[i].ctx));
+        fz_drop_context (self->render[i].ctx);
+        self->render[i].ctx = NULL;
+        self->render[i].doc = NULL;
+      }
+    }
+    g_mutex_init (&self->render[i].lock);
   }
 
   /* Pre-cache all page sizes using the fast PDF-specific API.
@@ -273,16 +258,21 @@ static void
 pdf_close (FwDocument *doc)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  FW_TRACE_PDF ("close: '%s'", self->path ? self->path : "(null)");
 
-  /* Drop cloned render contexts first */
-  for (int i = 0; i < self->n_render_ctx; i++) {
-    if (self->render_ctx[i]) {
-      fz_drop_context (self->render_ctx[i]);
-      self->render_ctx[i] = NULL;
-      g_mutex_clear (&self->render_lock[i]);
+  /* Drop independent render instances first */
+  for (int i = 0; i < self->n_render; i++) {
+    if (self->render[i].doc) {
+      fz_drop_document (self->render[i].ctx, self->render[i].doc);
+      self->render[i].doc = NULL;
     }
+    if (self->render[i].ctx) {
+      fz_drop_context (self->render[i].ctx);
+      self->render[i].ctx = NULL;
+    }
+    g_mutex_clear (&self->render[i].lock);
   }
-  self->n_render_ctx = 0;
+  self->n_render = 0;
 
   if (self->doc) {
     fz_drop_document (self->ctx, self->doc);
@@ -296,13 +286,6 @@ pdf_close (FwDocument *doc)
   g_clear_pointer (&self->page_widths, g_free);
   g_clear_pointer (&self->page_heights, g_free);
   self->page_count = 0;
-
-  /* Clean up MuPDF store locks */
-  if (self->lock_data) {
-    for (int i = 0; i < FZ_LOCK_MAX; i++)
-      g_mutex_clear (&self->lock_data->mutexes[i]);
-    g_clear_pointer (&self->lock_data, g_free);
-  }
 }
 
 static int
@@ -331,35 +314,71 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   cairo_surface_t *surface = NULL;
-  fz_page *pg = NULL;
-  fz_pixmap *pix = NULL;
+  FW_TRACE_PDF ("render_page start: page=%d zoom=%.2f rot=%d", page, zoom, rotation);
+  volatile fz_page *pg = NULL;
+  volatile fz_pixmap *pix = NULL;
 
-  g_mutex_lock (&self->lock);
+  /* Grab an independent render instance via round-robin.
+   * Each instance has its own context + document — fully thread-safe.
+   * Cast to unsigned before modulo to avoid negative indices on int overflow. */
+  int slot = (int) ((unsigned int) g_atomic_int_add (&self->next_render, 1) % (unsigned int) self->n_render);
+  RenderInstance *inst = &self->render[slot];
 
-  fz_try (self->ctx) {
-    pg = fz_load_page (self->ctx, self->doc, page);
+  if (!inst->ctx || !inst->doc) {
+    /* Instance failed to open — fall back to main context */
+    g_mutex_lock (&self->lock);
+    fz_try (self->ctx) {
+      pg = fz_load_page (self->ctx, self->doc, page);
+      fz_matrix ctm = build_transform (zoom, rotation);
+      pix = fz_new_pixmap_from_page (self->ctx, (fz_page *) pg, ctm,
+                                      fz_device_rgb (self->ctx), 0);
+    }
+    fz_always (self->ctx) {
+      fz_drop_page (self->ctx, (fz_page *) pg);
+    }
+    fz_catch (self->ctx) {
+      g_warning ("MuPDF: failed to render page %d: %s",
+                 page, fz_caught_message (self->ctx));
+    }
+    g_mutex_unlock (&self->lock);
+
+    if (pix) {
+      surface = pixmap_to_cairo_surface ((fz_pixmap *) pix);
+      g_mutex_lock (&self->lock);
+      fz_drop_pixmap (self->ctx, (fz_pixmap *) pix);
+      g_mutex_unlock (&self->lock);
+    }
+    FW_TRACE_PDF ("render_page done (fallback): page=%d surface=%p", page, (void *) surface);
+    return surface;
+  }
+
+  g_mutex_lock (&inst->lock);
+
+  fz_try (inst->ctx) {
+    pg = fz_load_page (inst->ctx, inst->doc, page);
     fz_matrix ctm = build_transform (zoom, rotation);
-    pix = fz_new_pixmap_from_page (self->ctx, pg, ctm,
-                                    fz_device_rgb (self->ctx), 0);
+    pix = fz_new_pixmap_from_page (inst->ctx, (fz_page *) pg, ctm,
+                                    fz_device_rgb (inst->ctx), 0);
   }
-  fz_always (self->ctx) {
-    fz_drop_page (self->ctx, pg);
+  fz_always (inst->ctx) {
+    fz_drop_page (inst->ctx, (fz_page *) pg);
   }
-  fz_catch (self->ctx) {
+  fz_catch (inst->ctx) {
     g_warning ("MuPDF: failed to render page %d: %s",
-               page, fz_caught_message (self->ctx));
+               page, fz_caught_message (inst->ctx));
   }
 
-  g_mutex_unlock (&self->lock);
+  g_mutex_unlock (&inst->lock);
 
   if (pix) {
-    surface = pixmap_to_cairo_surface (pix);
-    
-    g_mutex_lock (&self->lock);
-    fz_drop_pixmap (self->ctx, pix);
-    g_mutex_unlock (&self->lock);
+    surface = pixmap_to_cairo_surface ((fz_pixmap *) pix);
+
+    g_mutex_lock (&inst->lock);
+    fz_drop_pixmap (inst->ctx, (fz_pixmap *) pix);
+    g_mutex_unlock (&inst->lock);
   }
 
+  FW_TRACE_PDF ("render_page done: page=%d slot=%d surface=%p", page, slot, (void *) surface);
   return surface;
 }
 
@@ -510,7 +529,7 @@ pdf_get_links (FwDocument *doc, int page)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   GArray *links = g_array_new (FALSE, FALSE, sizeof (FwLink *));
-  g_array_set_clear_func (links, (GDestroyNotify) fw_link_free);
+  g_array_set_clear_func (links, (GDestroyNotify) fw_link_free_indirect);
   fz_page *pg = NULL;
   fz_link *fz_links = NULL;
 
@@ -554,95 +573,9 @@ pdf_get_links (FwDocument *doc, int page)
 }
 
 /* ── Page handle API ─────────────────────────────────────────────── */
-
-static gpointer
-pdf_open_page (FwDocument *doc, int page)
-{
-  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
-  fz_display_list *list = NULL;
-
-  g_mutex_lock (&self->lock);
-  fz_try (self->ctx) {
-    /* Load the page and flatten it into a display list under the main lock.
-     * Display lists are self-contained — they capture all page content without
-     * referencing back to the pdf_document. This makes them safe to render
-     * from any thread without touching shared document state. */
-    fz_page *pg = fz_load_page (self->ctx, self->doc, page);
-    fz_try (self->ctx) {
-      list = fz_new_display_list_from_page (self->ctx, pg);
-    }
-    fz_always (self->ctx) {
-      fz_drop_page (self->ctx, pg);
-    }
-    fz_catch (self->ctx) {
-      fz_rethrow (self->ctx);
-    }
-  }
-  fz_catch (self->ctx) {
-    g_warning ("MuPDF: failed to load page %d: %s",
-               page, fz_caught_message (self->ctx));
-    list = NULL;
-  }
-  g_mutex_unlock (&self->lock);
-
-  return list;
-}
-
-static void
-pdf_close_page (FwDocument *doc, gpointer handle)
-{
-  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
-  fz_display_list *list = handle;
-
-  g_mutex_lock (&self->lock);
-  fz_drop_display_list (self->ctx, list);
-  g_mutex_unlock (&self->lock);
-}
-
-static cairo_surface_t *
-pdf_render_page_from_handle (FwDocument *doc, gpointer handle,
-                             double zoom, int rotation)
-{
-  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
-  fz_display_list *list = handle;
-  cairo_surface_t *surface = NULL;
-  volatile fz_pixmap *pix = NULL;
-
-  if (!list || self->n_render_ctx == 0)
-    return pdf_render_page (doc, 0, zoom, rotation);  /* fallback */
-
-  /* Acquire a render context via round-robin.
-   * Display lists are immutable after creation — rendering from one
-   * does not access the pdf_document, so multiple threads can render
-   * different display lists (or even the same one) in parallel. */
-  int slot = g_atomic_int_add (&self->next_render_ctx, 1) % self->n_render_ctx;
-  fz_context *rctx = self->render_ctx[slot];
-
-  g_mutex_lock (&self->render_lock[slot]);
-
-  fz_try (rctx) {
-    fz_matrix ctm = build_transform (zoom, rotation);
-    pix = fz_new_pixmap_from_display_list (rctx, list, ctm,
-                                            fz_device_rgb (rctx), 0);
-  }
-  fz_catch (rctx) {
-    g_warning ("MuPDF: failed to render page from handle: %s",
-               fz_caught_message (rctx));
-  }
-
-  g_mutex_unlock (&self->render_lock[slot]);
-
-  if (pix) {
-    surface = pixmap_to_cairo_surface ((fz_pixmap *) pix);
-
-    /* Drop pixmap under a render context lock */
-    g_mutex_lock (&self->render_lock[slot]);
-    fz_drop_pixmap (rctx, (fz_pixmap *) pix);
-    g_mutex_unlock (&self->render_lock[slot]);
-  }
-
-  return surface;
-}
+/* PDF rendering uses independent document instances (see pdf_render_page).
+ * The page handle API is not used — return NULL so the cache falls back
+ * to fw_document_render_page which dispatches to the parallel instances. */
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
@@ -687,10 +620,9 @@ fw_document_pdf_iface_init (FwDocumentInterface *iface)
   iface->search         = pdf_search;
   iface->get_text       = pdf_get_text;
   iface->get_links      = pdf_get_links;
-  iface->open_page      = pdf_open_page;
-  iface->close_page     = pdf_close_page;
-  iface->render_page_from_handle = pdf_render_page_from_handle;
-  /* cancel_render = NULL — MuPDF render operations are short and atomic */
+  /* Page handle API intentionally NULL — PDF uses independent render instances
+   * in pdf_render_page() for true parallel rendering. The cache falls through
+   * to fw_document_render_page() which dispatches here. */
 }
 
 FwDocumentPdf *

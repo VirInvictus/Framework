@@ -4,6 +4,7 @@
  */
 
 #include "fw-document-djvu.h"
+#include "fw-debug.h"
 
 #include <gio/gio.h>
 #include <libdjvu/ddjvuapi.h>
@@ -20,6 +21,7 @@ struct _FwDocumentDjvu {
   int                page_count;
   GMutex             render_lock;  /* DjVuLibre is not thread-safe */
   volatile gboolean  cancel_flag;  /* checked by render to bail out early */
+  ddjvu_format_t    *render_fmt;   /* cached RGBMASK32 format for cairo ARGB32 */
 
   /* Page sizes cached at open time (in points, 72 DPI) */
   double            *page_widths;
@@ -53,16 +55,23 @@ djvu_drain_messages (ddjvu_context_t *ctx)
     ddjvu_message_pop (ctx);
 }
 
-/* Convert a DjVuLibre rendered buffer (BGR packed) to a cairo ARGB32 surface. */
+/* Render a DjVu page directly into a cairo ARGB32 surface.
+ *
+ * Uses DDJVU_FORMAT_RGBMASK32 with masks matching cairo's native ARGB32
+ * layout (0x00RRGGBB).  DjVuLibre writes 32-bit pixels directly into the
+ * cairo buffer — no temporary allocation, no pixel-by-pixel conversion.
+ * The alpha channel (always opaque) is filled in a fast OR pass that runs
+ * OUTSIDE the render lock. */
 static cairo_surface_t *
-djvu_render_to_cairo (ddjvu_context_t *ctx G_GNUC_UNUSED, ddjvu_page_t *page,
-                      int w, int h)
+djvu_render_to_cairo (ddjvu_format_t *fmt, ddjvu_page_t *page,
+                      int w, int h, gboolean *need_alpha)
 {
   cairo_surface_t *surface =
     cairo_image_surface_create (CAIRO_FORMAT_ARGB32, w, h);
 
   if (cairo_surface_status (surface) != CAIRO_STATUS_SUCCESS) {
     cairo_surface_destroy (surface);
+    *need_alpha = FALSE;
     return NULL;
   }
 
@@ -71,48 +80,44 @@ djvu_render_to_cairo (ddjvu_context_t *ctx G_GNUC_UNUSED, ddjvu_page_t *page,
   unsigned char *cairo_data = cairo_image_surface_get_data (surface);
   int cairo_stride = cairo_image_surface_get_stride (surface);
 
-  /* Render into a temporary RGB buffer */
-  unsigned int row_size = (unsigned int) w * 3;
-  /* Pad row_size to 4-byte alignment */
-  unsigned int padded_row = (row_size + 3) & ~3u;
-  g_autofree unsigned char *buf = g_malloc (padded_row * (unsigned int) h);
-
-  ddjvu_format_t *fmt = ddjvu_format_create (DDJVU_FORMAT_RGB24, 0, NULL);
-  ddjvu_format_set_row_order (fmt, 1);  /* top-to-bottom */
-
-  ddjvu_rect_t rrect = { 0, 0, (unsigned int) w, (unsigned int) h };
-  ddjvu_rect_t prect = { 0, 0, (unsigned int) w, (unsigned int) h };
+  ddjvu_rect_t rect = { 0, 0, (unsigned int) w, (unsigned int) h };
 
   int ok = ddjvu_page_render (page, DDJVU_RENDER_COLOR,
-                               &prect, &rrect, fmt,
-                               padded_row, (char *) buf);
-
-  ddjvu_format_release (fmt);
+                               &rect, &rect, fmt,
+                               (unsigned long) cairo_stride,
+                               (char *) cairo_data);
 
   if (!ok) {
-    /* Render failed — return white surface */
+    /* Render failed — return white opaque surface */
     memset (cairo_data, 0xFF, (size_t) cairo_stride * (size_t) h);
     cairo_surface_mark_dirty (surface);
+    *need_alpha = FALSE;
     return surface;
   }
 
-  /* Convert RGB24 → ARGB32 (pre-multiplied, alpha=255) */
-  for (int y = 0; y < h; y++) {
-    const unsigned char *src = buf + y * padded_row;
-    uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
+  /* Alpha will be filled outside the lock for less contention */
+  *need_alpha = TRUE;
+  return surface;
+}
 
-    for (int x = 0; x < w; x++) {
-      unsigned char r = src[0];
-      unsigned char g = src[1];
-      unsigned char b = src[2];
-      dst[x] = (255u << 24) | ((uint32_t) r << 16) |
-               ((uint32_t) g << 8) | (uint32_t) b;
-      src += 3;
-    }
+/* Set alpha to 0xFF on every pixel.  DjVuLibre's RGBMASK32 leaves the
+ * high byte as 0x00 — we OR in the alpha.  This is fast and trivially
+ * vectorized by the compiler. */
+static void
+djvu_fill_alpha (cairo_surface_t *surface)
+{
+  unsigned char *data = cairo_image_surface_get_data (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  int h = cairo_image_surface_get_height (surface);
+  int w = cairo_image_surface_get_width (surface);
+
+  for (int y = 0; y < h; y++) {
+    uint32_t *row = (uint32_t *) (data + y * stride);
+    for (int x = 0; x < w; x++)
+      row[x] |= 0xFF000000u;
   }
 
   cairo_surface_mark_dirty (surface);
-  return surface;
 }
 
 /* ── Interface implementation ─────────────────────────────────────── */
@@ -156,6 +161,16 @@ djvu_open (FwDocument *doc, const char *path, GError **error)
 
   self->page_count = ddjvu_document_get_pagenum (self->djvu_doc);
   self->path = g_strdup (path);
+  FW_TRACE_DJVU ("opened '%s': %d pages", path, self->page_count);
+
+  /* Create a reusable render format that matches cairo's ARGB32 layout.
+   * RGBMASK32 renders 32-bit pixels with caller-specified channel masks,
+   * letting DjVuLibre write directly into the cairo surface buffer. */
+  {
+    unsigned int masks[3] = { 0x00FF0000, 0x0000FF00, 0x000000FF };
+    self->render_fmt = ddjvu_format_create (DDJVU_FORMAT_RGBMASK32, 3, masks);
+    ddjvu_format_set_row_order (self->render_fmt, 1);  /* top-to-bottom */
+  }
 
   /* Pre-cache all page dimensions to avoid repeated ddjvu_document_get_pageinfo
    * calls during layout. Matches the PDF backend's fast probing strategy. */
@@ -184,7 +199,12 @@ static void
 djvu_close (FwDocument *doc)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
+  FW_TRACE_DJVU ("close: '%s'", self->path ? self->path : "(null)");
 
+  if (self->render_fmt) {
+    ddjvu_format_release (self->render_fmt);
+    self->render_fmt = NULL;
+  }
   if (self->djvu_doc) {
     ddjvu_document_release (self->djvu_doc);
     self->djvu_doc = NULL;
@@ -259,19 +279,24 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   cairo_surface_t *surface = NULL;
 
+  FW_TRACE_DJVU ("render_page start: page=%d zoom=%.2f rot=%d", page, zoom, rotation);
   g_mutex_lock (&self->render_lock);
 
-  /* Check cancel flag before starting expensive decode */
+  /* Check cancel flag before starting expensive decode.
+   * Always clear the flag so the next render attempt can proceed —
+   * without this, the flag stays stuck TRUE forever. */
   if (g_atomic_int_get (&self->cancel_flag)) {
+    g_atomic_int_set (&self->cancel_flag, FALSE);
     g_mutex_unlock (&self->render_lock);
+    FW_TRACE_DJVU ("render_page cancelled (pre-decode): page=%d", page);
     return NULL;
   }
-  /* Clear cancel flag — this render is wanted */
   g_atomic_int_set (&self->cancel_flag, FALSE);
 
   ddjvu_page_t *pg = ddjvu_page_create_by_pageno (self->djvu_doc, page);
   if (!pg) {
     g_mutex_unlock (&self->render_lock);
+    FW_TRACE_DJVU ("render_page FAILED (create): page=%d", page);
     return NULL;
   }
 
@@ -282,6 +307,7 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   if (g_atomic_int_get (&self->cancel_flag)) {
     ddjvu_page_release (pg);
     g_mutex_unlock (&self->render_lock);
+    FW_TRACE_DJVU ("render_page cancelled (post-decode): page=%d", page);
     return NULL;
   }
 
@@ -289,6 +315,7 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
     g_warning ("DjVu: decoding error on page %d", page);
     ddjvu_page_release (pg);
     g_mutex_unlock (&self->render_lock);
+    FW_TRACE_DJVU ("render_page FAILED (decode error): page=%d", page);
     return NULL;
   }
 
@@ -307,10 +334,17 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   if (w < 1) w = 1;
   if (h < 1) h = 1;
 
-  surface = djvu_render_to_cairo (self->djvu_ctx, pg, w, h);
+  gboolean need_alpha = FALSE;
+  surface = djvu_render_to_cairo (self->render_fmt, pg, w, h, &need_alpha);
   ddjvu_page_release (pg);
   g_mutex_unlock (&self->render_lock);
 
+  /* Alpha fill and rotation run outside the lock — no DjVuLibre calls */
+  if (surface && need_alpha)
+    djvu_fill_alpha (surface);
+
+  FW_TRACE_DJVU ("render_page done: page=%d %dx%d surface=%p",
+                  page, w, h, (void *) surface);
   return djvu_apply_rotation (surface, w, h, rotation);
 }
 
@@ -488,7 +522,7 @@ djvu_get_links (FwDocument *doc, int page)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   GArray *links = g_array_new (FALSE, FALSE, sizeof (FwLink *));
-  g_array_set_clear_func (links, (GDestroyNotify) fw_link_free);
+  g_array_set_clear_func (links, (GDestroyNotify) fw_link_free_indirect);
 
   miniexp_t annotations = ddjvu_document_get_pageanno (self->djvu_doc, page);
   if (annotations == miniexp_dummy)
@@ -564,6 +598,7 @@ djvu_open_page (FwDocument *doc, int page)
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   ddjvu_page_t *pg = NULL;
 
+  FW_TRACE_DJVU ("open_page: page=%d", page);
   g_mutex_lock (&self->render_lock);
 
   pg = ddjvu_page_create_by_pageno (self->djvu_doc, page);
@@ -575,20 +610,29 @@ djvu_open_page (FwDocument *doc, int page)
       g_warning ("DjVu: decoding error on page %d", page);
       ddjvu_page_release (pg);
       pg = NULL;
+      FW_TRACE_DJVU ("open_page FAILED (decode error): page=%d", page);
     }
   }
 
   g_mutex_unlock (&self->render_lock);
+  FW_TRACE_DJVU ("open_page done: page=%d handle=%p", page, (void *) pg);
   return pg;
 }
 
 static void
 djvu_close_page (FwDocument *doc, gpointer handle)
 {
-  (void) doc;
+  FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   ddjvu_page_t *pg = handle;
-  if (pg)
+
+  FW_TRACE_DJVU ("close_page: handle=%p", (void *) pg);
+  if (pg) {
+    /* Must hold render_lock — ddjvu_page_release touches context state
+     * that is not thread-safe. */
+    g_mutex_lock (&self->render_lock);
     ddjvu_page_release (pg);
+    g_mutex_unlock (&self->render_lock);
+  }
 }
 
 static cairo_surface_t *
@@ -602,12 +646,18 @@ djvu_render_page_from_handle (FwDocument *doc, gpointer handle,
   if (!pg)
     return NULL;
 
+  FW_TRACE_DJVU ("render_from_handle start: handle=%p zoom=%.2f rot=%d",
+                  (void *) pg, zoom, rotation);
   g_mutex_lock (&self->render_lock);
 
   if (g_atomic_int_get (&self->cancel_flag)) {
+    g_atomic_int_set (&self->cancel_flag, FALSE);
     g_mutex_unlock (&self->render_lock);
+    FW_TRACE_DJVU ("render_from_handle cancelled: handle=%p", (void *) pg);
     return NULL;
   }
+
+  g_atomic_int_set (&self->cancel_flag, FALSE);
 
   int dpi = ddjvu_page_get_resolution (pg);
   if (dpi <= 0) dpi = 300;
@@ -622,9 +672,16 @@ djvu_render_page_from_handle (FwDocument *doc, gpointer handle,
   if (w < 1) w = 1;
   if (h < 1) h = 1;
 
-  surface = djvu_render_to_cairo (self->djvu_ctx, pg, w, h);
+  gboolean need_alpha = FALSE;
+  surface = djvu_render_to_cairo (self->render_fmt, pg, w, h, &need_alpha);
   g_mutex_unlock (&self->render_lock);
 
+  /* Alpha fill and rotation run outside the lock */
+  if (surface && need_alpha)
+    djvu_fill_alpha (surface);
+
+  FW_TRACE_DJVU ("render_from_handle done: handle=%p %dx%d surface=%p",
+                  (void *) pg, w, h, (void *) surface);
   return djvu_apply_rotation (surface, w, h, rotation);
 }
 
@@ -632,6 +689,7 @@ static void
 djvu_cancel_render (FwDocument *doc)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
+  FW_TRACE_DJVU ("cancel_render");
   g_atomic_int_set (&self->cancel_flag, TRUE);
 }
 

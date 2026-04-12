@@ -18,4 +18,7 @@ FwSidebar *fw_sidebar_new     (void);
 void       fw_sidebar_set_toc (FwSidebar       *self,
                                const FwTocNode *toc);
 
+/* Signal: "page-requested" — emitted when user clicks a TOC entry.
+ * Handler signature: void handler (FwSidebar *sidebar, int page, gpointer data); */
+
 G_END_DECLS
