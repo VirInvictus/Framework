@@ -1,40 +1,49 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="logo.svg">
-    <img src="logo.svg" alt="Framework" width="420">
-  </picture>
+  <img src="logo.svg" alt="Framework" width="420">
 </p>
+
 <p align="center">
   <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-libadwaita-4a86cf" alt="GTK4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
   <a href="https://ko-fi.com/vrnvctss"><img src="https://img.shields.io/badge/support-Ko--fi-ff5f5f?logo=kofi" alt="Ko-fi"></a>
 </p>
 
-A fast, native GNOME document viewer built on MuPDF and DjVuLibre. Opens PDFs and DjVu files with aggressive pre-caching, a clean libadwaita UI, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer.
+---
+
+# Framework
+
+A fast, native GNOME document viewer built on MuPDF and DjVuLibre. Framework is engineered for performance, utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
-I was essentially looking for a SumatraPDF-like client for Linux. I was frustrated with clients that used libPoppler and every muPDF client lacked any UI whatsoever and relied on keyboard-shortcuts. I wanted something in-between, as I was using Okular in a Gnome environment because it was the only one that took everything in stride. I wanted a Gnome solution. This is that.
+Linux document viewers often fall into two categories: feature-heavy clients (like Okular) that bring extensive dependencies to GNOME, or minimal MuPDF wrappers that lack a functional UI. Framework fills the gap by providing a native, high-performance GNOME solution that prioritizes rendering speed and kinetic scrolling without the bloat of an editor.
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| **MuPDF backend** | Fast PDF rendering via libmupdf with per-thread context safety |
-| **DjVuLibre backend** | Full DjVu/DjV support via ddjvuapi with zero-copy rendering into cairo surfaces |
-| **Pre-cache engine** | Thread pool renders pages asynchronously with priority ordering — visible pages first, then forward, then backward |
-| **Fit-width default** | Pages scale to viewport width on open, regardless of source dimensions |
-| **Continuous scroll** | All pages stacked vertically with smooth kinetic scrolling |
-| **TOC sidebar** | Expandable tree view populated from document outline, toggle with F9 |
-| **Search** | Full-text search across all pages (Ctrl+F) |
-| **Keyboard-first** | Full shortcut parity with SumatraPDF (see below) |
-| **State persistence** | Saves page, scroll position, and zoom per document — reopens where you left off |
-| **Velocity Engine** | Dynamic cache management tracks scroll speed to throttle render jobs, shrink the priority window, and abort stale work — keeps CPU quiet during fast scrolling |
-| **Two-tier cache** | Parsed page objects cached separately from rendered surfaces — eliminates I/O on scroll, keeps RAM bounded |
-| **Parallel rendering** | Independent MuPDF instances render multiple pages simultaneously on multi-core machines |
-| **HiDPI / fractional scaling** | Renders at native device pixel ratio for sharp text on Wayland with 150%/200% scaling |
-| **Invert colors** | Ctrl+I for instant display-stage color inversion — no re-render needed |
+| **Velocity Engine** | Dynamic cache management that throttles render jobs based on scroll speed. |
+| **Two-Tier Cache** | Separates parsed page objects from rendered surfaces to minimize I/O. |
+| **Parallel Rendering** | Independent MuPDF instances render pages across multiple CPU cores. |
+| **Zero-Copy DjVu** | Full DjVuLibre support with zero-copy rendering into Cairo surfaces. |
+| **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland. |
+
+## Development & Build
+
+### Requirements
+- `gtk4` (4.16+), `libadwaita` (1.7+)
+- `mupdf` (1.24+), `djvulibre` (3.5.28+)
+- `meson` (1.4+)
+
+### Build Pipeline
+```bash
+meson setup builddir
+meson compile -C builddir
+```
+
+## What Framework is not
+
+Framework is strictly a **viewer**. It is not an editor (no annotations), not a library manager, and not an image viewer. It focuses on doing one thing exceptionally well: opening and displaying documents.
 
 ## Keyboard shortcuts
 
