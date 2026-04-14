@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="420" height="120" viewBox="0 0 420 120">
+  <style>
+    .logo-text { fill: #1a1a1a; }
+    @media (prefers-color-scheme: dark) {
+      .logo-text { fill: #f0f0f0; }
+    }
+  </style>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#3584e4"/>
@@ -42,6 +48,6 @@
 
   <!-- Text: "Framework" -->
   <text x="140" y="72" font-family="Inter, Cantarell, sans-serif"
-        font-size="46" font-weight="700" fill="#1a1a1a"
+        font-size="46" font-weight="700" class="logo-text"
         letter-spacing="-1">Framework</text>
 </svg>
