@@ -223,7 +223,7 @@ static void act_zoom_in    (GSimpleAction *a, GVariant *p, gpointer d) { (void)a
 static void act_zoom_out   (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, w->zoom - 0.1); }
 static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; set_zoom(d, 1.0); }
 static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); }
-static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; (void)d; /* TODO: fit-page */ }
+static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
 static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; go_to_page(w, w->current_page + 1); }
 static void act_prev_page  (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; go_to_page(w, w->current_page - 1); }
 static void act_first_page (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; go_to_page(d, 0); }
@@ -264,11 +264,56 @@ static void act_invert_colors (GSimpleAction *a, GVariant *p, gpointer d)
     fw_view_set_invert (w->view, w->invert_colors);
 }
 
+static void
+set_rotation (FwWindow *self, int rotation)
+{
+  rotation = ((rotation % 360) + 360) % 360;
+  FW_TRACE_WINDOW ("set_rotation: %d", rotation);
+  self->rotation = rotation;
+
+  if (self->cache)
+    fw_cache_start (self->cache, self->zoom, self->rotation);
+
+  if (self->view)
+    fw_view_set_rotation (self->view, rotation);
+}
+
+static void act_rotate_cw (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  set_rotation (w, w->rotation + 90);
+}
+
+static void act_rotate_ccw (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  set_rotation (w, w->rotation - 90);
+}
+
 static void act_print (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   (void)d;
   /* TODO: implement printing via GtkPrintOperation */
+}
+
+static void act_copy (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  if (!w->view)
+    return;
+  const char *text = fw_view_get_selected_text (w->view);
+  FW_TRACE_WINDOW ("copy: text=%s len=%d",
+                    text ? "yes" : "no",
+                    text ? (int) strlen (text) : 0);
+  if (text && text[0]) {
+    GdkDisplay *display = gtk_widget_get_display (GTK_WIDGET (w));
+    GdkClipboard *clipboard = gdk_display_get_clipboard (display);
+    gdk_clipboard_set_text (clipboard, text);
+  }
 }
 
 static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
@@ -317,7 +362,18 @@ on_scroll (GtkEventControllerScroll *controller,
     }
     return TRUE;
   }
-  
+
+  /* Scroll damping: consume the event and apply a controlled step size.
+   * This bypasses GTK's kinetic scrolling amplification, giving us direct
+   * control over max scroll velocity. The velocity engine still tracks
+   * speed via the view's tick callback. */
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (vadj) {
+    double step = dy * SCROLL_STEP;
+    gtk_adjustment_set_value (vadj, gtk_adjustment_get_value (vadj) + step);
+    return TRUE;
+  }
+
   return FALSE;
 }
 
@@ -581,6 +637,9 @@ fw_window_constructed (GObject *object)
     { .name = "find",          .activate = act_find },
     { .name = "go-to-page",    .activate = act_go_to_page },
     { .name = "invert-colors", .activate = act_invert_colors },
+    { .name = "rotate-cw",     .activate = act_rotate_cw },
+    { .name = "rotate-ccw",    .activate = act_rotate_ccw },
+    { .name = "copy",          .activate = act_copy },
     { .name = "print",         .activate = act_print },
     { .name = "about",         .activate = act_about },
   };

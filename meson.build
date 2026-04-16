@@ -1,5 +1,5 @@
 project('framework', 'c',
-  version: '1.3.3',
+  version: '1.4.0',
   meson_version: '>= 1.4',
   default_options: [
     'c_std=c17',

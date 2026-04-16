@@ -135,6 +135,9 @@ fw_application_startup (GApplication *app)
     { "win.find",            { "<Control>f", NULL } },
     { "win.go-to-page",      { "<Control>g", NULL } },
     { "win.invert-colors",   { "<Control>i", NULL } },
+    { "win.rotate-cw",       { "<Control><Shift>plus", NULL } },
+    { "win.rotate-ccw",      { "<Control><Shift>minus", NULL } },
+    { "win.copy",            { "<Control>c", NULL } },
     { "win.print",           { "<Control>p", NULL } },
   };
   for (size_t i = 0; i < G_N_ELEMENTS (shortcuts); i++)

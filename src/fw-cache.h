@@ -38,6 +38,9 @@ cairo_surface_t *fw_cache_get_page      (FwCache         *self,
 gboolean         fw_cache_page_ready    (FwCache         *self,
                                          int              page);
 
+cairo_surface_t *fw_cache_get_prev_page (FwCache         *self,
+                                         int              page);
+
 void             fw_cache_stop          (FwCache         *self);
 
 void             fw_cache_set_scale_factor (FwCache      *self,

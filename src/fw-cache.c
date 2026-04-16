@@ -11,9 +11,10 @@
 #include "fw-debug.h"
 
 typedef struct {
-  cairo_surface_t *surface;    /* NULL if not yet rendered */
-  gboolean         rendering;  /* TRUE if a job is in the pool for this page */
-  guint            render_gen; /* render params generation when this surface was created */
+  cairo_surface_t *surface;      /* NULL if not yet rendered */
+  cairo_surface_t *prev_surface; /* previous-gen surface for zoom placeholder */
+  gboolean         rendering;    /* TRUE if a job is in the pool for this page */
+  guint            render_gen;   /* render params generation when this surface was created */
 } CacheEntry;
 
 /* Tier 1: parsed page handles — lightweight backend objects (fz_page, ddjvu_page).
@@ -81,6 +82,8 @@ cache_entry_free (CacheEntry *entry)
 {
   if (entry->surface)
     cairo_surface_destroy (entry->surface);
+  if (entry->prev_surface)
+    cairo_surface_destroy (entry->prev_surface);
   g_free (entry);
 }
 
@@ -175,6 +178,7 @@ render_worker (gpointer data, gpointer user_data)
 
   /* If no cached handle, create one now (off the main thread) */
   if (!parsed_handle) {
+    FW_TRACE_CACHE ("io: open_page %d (cache miss)", job->page);
     gpointer new_handle = fw_document_open_page (self->document, job->page);
     if (new_handle) {
       g_mutex_lock (&self->lock);
@@ -217,6 +221,11 @@ render_worker (gpointer data, gpointer user_data)
      * for display since the render parameters haven't changed. */
     FW_TRACE_CACHE ("worker done: page=%d surface=%p", job->page, (void *) surface);
     CacheEntry *entry = get_or_create_entry (self, job->page);
+    /* Fresh surface at current generation — drop any stale placeholder */
+    if (entry->prev_surface) {
+      cairo_surface_destroy (entry->prev_surface);
+      entry->prev_surface = NULL;
+    }
     if (entry->surface)
       cairo_surface_destroy (entry->surface);
     entry->surface    = surface;
@@ -317,13 +326,22 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
   self->cancel_gen++;
 
   /* Do NOT clear existing cache — keep old surfaces visible while new
-   * ones render. Mark all entries as needing re-render. */
+   * ones render. Move current surfaces to prev_surface so they serve as
+   * scaled placeholders during the re-render transition. */
   GHashTableIter iter;
   gpointer key, value;
   g_hash_table_iter_init (&iter, self->pages);
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     CacheEntry *entry = value;
     entry->rendering = FALSE;  /* allow re-submission */
+    /* Preserve the old surface as a zoom transition placeholder */
+    if (entry->surface && entry->render_gen != self->render_gen) {
+      if (entry->prev_surface)
+        cairo_surface_destroy (entry->prev_surface);
+      entry->prev_surface = entry->surface;
+      entry->surface = NULL;
+      FW_TRACE_MEM ("prev_surface stash: page=%d", GPOINTER_TO_INT (key));
+    }
   }
 
   /* Submit only pages in the priority window.  If no priority has been
@@ -604,6 +622,22 @@ fw_cache_page_ready (FwCache *self, int page)
   g_mutex_unlock (&self->lock);
 
   return ready;
+}
+
+cairo_surface_t *
+fw_cache_get_prev_page (FwCache *self, int page)
+{
+  g_return_val_if_fail (FW_IS_CACHE (self), NULL);
+
+  g_mutex_lock (&self->lock);
+  CacheEntry *entry = g_hash_table_lookup (self->pages,
+                                            GINT_TO_POINTER (page));
+  cairo_surface_t *surface = NULL;
+  if (entry && entry->prev_surface)
+    surface = cairo_surface_reference (entry->prev_surface);
+  g_mutex_unlock (&self->lock);
+
+  return surface;
 }
 
 void

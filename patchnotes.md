@@ -1,5 +1,45 @@
 # Framework — Patch Notes
 
+## v1.4.0 (2026-04-16)
+
+---
+
+### GPU Color Inversion
+Replaced the per-frame `g_memdup2` pixel inversion loop with `gtk_snapshot_push_color_matrix()`. Color inversion now applies a 4x4 matrix on the GPU — zero memory allocation, zero pixel copying. At 60fps with 5 visible pages, this eliminates ~30-60 MB/s of wasted allocations that the old path produced. Both the normal and inverted rendering paths are now fully zero-copy.
+
+### Velocity EMA Smoothing
+The scroll velocity tracker now uses an exponential moving average (`0.7 * old + 0.3 * new`) instead of raw per-frame `dy/dt`. Single-frame spikes from mouse wheel clicks or trackpad jitter no longer trigger the scrubbing abort state. Genuine fast scrolling still activates scrubbing correctly — the EMA responds within 2-3 frames.
+
+### Scroll Position Preservation
+Zooming in or out no longer jumps to a random position. Before each zoom change, the view records the current page and fractional offset within that page. After the layout recomputes at the new zoom level, the scroll position is restored to the same page and fraction. Sub-page precision is maintained across arbitrary zoom changes.
+
+### Fit-Page Zoom (Ctrl+2)
+Implemented `fw_view_fit_page_zoom()` which calculates `min(viewport_w / max_page_w, viewport_h / max_page_h)` across all pages. The entire page fits within the viewport without scrolling. Accounts for rotation — at 90/270 degrees, width and height are swapped before the calculation.
+
+### Rotation (Ctrl+Shift+Plus/Minus)
+Document rotation in 90-degree increments. `Ctrl+Shift+Plus` rotates clockwise, `Ctrl+Shift+Minus` rotates counter-clockwise. The view layout swaps page width and height at 90/270 degrees. The cache re-renders all visible pages at the new rotation. Both MuPDF and DjVuLibre backends already supported rotation in their render paths — this release wires it through the UI layer with proper layout recomputation. Rotation state is saved and restored per-document.
+
+### Stale Surface Placeholder
+Zoom transitions no longer flash gray placeholders. When the render generation changes (zoom, rotation, or scale factor), existing surfaces are moved to a `prev_surface` slot in the cache entry. The view renders these scaled-to-fit as placeholders until the sharp re-render arrives. The result is slightly blurry content during the transition instead of a blank gray rectangle. Previous-generation surfaces are freed as soon as the new render completes.
+
+### Scroll Damping
+Scroll wheel events are now intercepted and applied with a controlled step size (60px per tick), bypassing GTK's kinetic scrolling amplification. This bounds the maximum achievable scroll velocity, reducing the frequency of scrubbing abort triggers and giving the render pipeline more time to keep up. The velocity engine still tracks actual scroll speed via the frame clock tick callback.
+
+### Redundant Redraw Guard
+Added a `redraw_pending` flag to the view widget. When the scroll adjustment fires `value-changed` rapidly (every scroll tick), redundant `gtk_widget_queue_draw()` calls are suppressed. The flag is cleared at the start of each `snapshot` call. The render worker's idle-based redraw scheduling is unaffected — it already self-rate-limits via the GLib idle mechanism.
+
+### Text Selection and Copy (Ctrl+C)
+Click-drag on a page selects text. A `GtkGestureDrag` on the view widget maps mouse coordinates to document-space points via the page layout's centering and zoom transforms. The selection is rendered as a semi-transparent blue overlay (`rgba(0.2, 0.4, 0.8, 0.3)`) painted after the page texture in the snapshot. On drag end, `fw_document_get_text()` extracts the text within the selection rectangle. `Ctrl+C` copies the selected text to the system clipboard via `gdk_clipboard_set_text()`. Selection is single-page only in this release.
+
+### Dynamic Cursors
+The mouse cursor changes based on what it's hovering over. A `GtkEventControllerMotion` on the view maps the pointer position to document coordinates and hit-tests against link rectangles. The cursor shows a pointing hand over links and a text I-beam over page content. Link rectangles are cached per-page and invalidated on document change.
+
+### Link Click Navigation
+Clicking a link navigates. Internal links (to other pages in the document) call `fw_view_go_to_page()`. External links (URLs) launch the default browser via `GtkUriLauncher`. The click gesture is registered before the drag gesture — when a link is hit, the click claims the event sequence so text selection doesn't start. When no link is hit, the event falls through to the drag gesture for text selection.
+
+### Debug Tracing Expansion
+Added structured trace coverage for all new code paths: scroll position preservation (`view` domain), text selection drag lifecycle (`view`), link click events (`view`), cache I/O page opens (`cache`), and `prev_surface` stash/free events (`mem`). All new traces follow the existing zero-overhead pattern — a single `G_UNLIKELY` atomic check when `FW_DEBUG` is not set.
+
 ## v1.3.3 (2026-04-12)
 
 ---
