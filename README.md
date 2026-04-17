@@ -127,6 +127,10 @@ One document per window. Multiple files open multiple windows.
 - **Not a browser.** No tabs, no multi-document within a single window
 - **Not an image viewer.** No JPEG, PNG, TIFF, SVG support
 
+## Acknowledgements
+
+Framework's render pipeline borrows techniques from [zathura](https://pwmt.org/projects/zathura/), [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/), and [zathura-djvu](https://pwmt.org/projects/zathura-djvu/) — whose minimalist, zero-copy approach to driving MuPDF and DjVuLibre directly into cairo surfaces informed our own. Thanks to the [MuPDF](https://mupdf.com/) and [DjVuLibre](http://djvu.sourceforge.net/) teams for the rendering engines that make this viewer possible.
+
 ## Support
 
 If this saved you time, consider [buying me a coffee](https://ko-fi.com/vrnvctss).
