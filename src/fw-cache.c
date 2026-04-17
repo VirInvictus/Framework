@@ -13,9 +13,26 @@
 typedef struct {
   cairo_surface_t *surface;      /* NULL if not yet rendered */
   cairo_surface_t *prev_surface; /* previous-gen surface for zoom placeholder */
+  GdkTexture      *texture;      /* cached GPU texture wrapping surface */
+  GdkTexture      *prev_texture; /* cached texture for prev_surface */
   gboolean         rendering;    /* TRUE if a job is in the pool for this page */
   guint            render_gen;   /* render params generation when this surface was created */
 } CacheEntry;
+
+/* Persistent low-resolution preview. Rendered once at open time (or first
+ * access), never evicted. Serves as an always-available placeholder during
+ * fast scroll and zoom transitions. */
+typedef struct {
+  cairo_surface_t *surface;
+  GdkTexture      *texture;
+  gboolean         rendering;
+  gboolean         failed;       /* render attempted and failed — don't retry */
+} ThumbEntry;
+
+/* Target thumbnail width in pixels. At 150px wide × ~195px tall with 4 bytes
+ * per pixel, each thumbnail is ~120KB. A 1000-page doc costs ~120MB — still
+ * much less than the full cache tier, and gives instant visual feedback. */
+#define THUMB_WIDTH 150.0
 
 /* Tier 1: parsed page handles — lightweight backend objects (fz_page, ddjvu_page).
  * Wide window (~50 pages), negligible RAM cost, eliminates disk I/O on render. */
@@ -45,7 +62,9 @@ struct _FwCache {
   FwDocument    *document;    /* owned reference */
   GHashTable    *pages;       /* int → CacheEntry* (Tier 2: rendered surfaces) */
   GHashTable    *parsed;      /* int → ParsedEntry* (Tier 1: parsed page handles) */
+  GHashTable    *thumbs;      /* int → ThumbEntry* (Tier 0: persistent previews) */
   GThreadPool   *pool;
+  GThreadPool   *thumb_pool;  /* separate low-priority pool for thumbnail renders */
   GMutex         lock;
 
   double         zoom;
@@ -80,11 +99,56 @@ G_DEFINE_FINAL_TYPE (FwCache, fw_cache, G_TYPE_OBJECT)
 static void
 cache_entry_free (CacheEntry *entry)
 {
+  /* Drop texture BEFORE surface — the texture holds a reference to the
+   * surface's pixel buffer via GBytes. Surface destruction after last
+   * texture reference is released is safe. */
+  if (entry->texture)
+    g_object_unref (entry->texture);
+  if (entry->prev_texture)
+    g_object_unref (entry->prev_texture);
   if (entry->surface)
     cairo_surface_destroy (entry->surface);
   if (entry->prev_surface)
     cairo_surface_destroy (entry->prev_surface);
   g_free (entry);
+}
+
+static void
+thumb_entry_free (ThumbEntry *entry)
+{
+  if (entry->texture)
+    g_object_unref (entry->texture);
+  if (entry->surface)
+    cairo_surface_destroy (entry->surface);
+  g_free (entry);
+}
+
+/* Build a GdkTexture that zero-copies the cairo surface's pixel buffer.
+ * The surface reference passed to GBytes keeps pixels alive until the
+ * texture is destroyed. */
+static GdkTexture *
+texture_from_surface (cairo_surface_t *surface)
+{
+  if (!surface)
+    return NULL;
+
+  cairo_surface_flush (surface);
+  int sw = cairo_image_surface_get_width (surface);
+  int sh = cairo_image_surface_get_height (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  unsigned char *data = cairo_image_surface_get_data (surface);
+  gsize data_size = (gsize) stride * (gsize) sh;
+
+  cairo_surface_reference (surface);  /* GBytes holds this */
+  GBytes *bytes = g_bytes_new_with_free_func (
+    data, data_size, (GDestroyNotify) cairo_surface_destroy, surface);
+
+  GdkTexture *tex = GDK_TEXTURE (
+    gdk_memory_texture_new (sw, sh,
+                            GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
+                            bytes, (gsize) stride));
+  g_bytes_unref (bytes);
+  return tex;
 }
 
 /* ParsedEntry free requires the document to close the page handle.
@@ -133,6 +197,58 @@ safe_queue_draw (gpointer user_data)
 /* ── Thread pool worker ───────────────────────────────────────────── */
 
 static void submit_next_jobs (FwCache *self);
+
+/* ── Thumbnail worker ─────────────────────────────────────────────── */
+
+typedef struct {
+  FwCache *cache;
+  int      page;
+  double   zoom;
+} ThumbJob;
+
+static void
+thumb_worker (gpointer data, gpointer user_data)
+{
+  (void) user_data;
+  ThumbJob *job = data;
+  FwCache *self = job->cache;
+
+  g_mutex_lock (&self->lock);
+  if (self->stopping) {
+    g_mutex_unlock (&self->lock);
+    g_free (job);
+    return;
+  }
+  g_mutex_unlock (&self->lock);
+
+  FW_TRACE_CACHE ("thumb render: page=%d zoom=%.3f", job->page, job->zoom);
+  cairo_surface_t *surface = fw_document_render_page (
+    self->document, job->page, job->zoom, 0);
+
+  g_mutex_lock (&self->lock);
+  ThumbEntry *te = g_hash_table_lookup (self->thumbs, GINT_TO_POINTER (job->page));
+  if (!te) {
+    /* thumbs table was cleared while we rendered */
+    if (surface) cairo_surface_destroy (surface);
+    g_mutex_unlock (&self->lock);
+    g_free (job);
+    return;
+  }
+
+  if (surface) {
+    te->surface = surface;
+    te->texture = texture_from_surface (surface);
+    te->rendering = FALSE;
+    FW_TRACE_MEM ("thumb stored: page=%d surface=%p", job->page, (void *) surface);
+    if (self->view_widget)
+      g_idle_add (safe_queue_draw, g_object_ref (self->view_widget));
+  } else {
+    te->rendering = FALSE;
+    te->failed = TRUE;
+  }
+  g_mutex_unlock (&self->lock);
+  g_free (job);
+}
 
 static void
 render_worker (gpointer data, gpointer user_data)
@@ -222,13 +338,23 @@ render_worker (gpointer data, gpointer user_data)
     FW_TRACE_CACHE ("worker done: page=%d surface=%p", job->page, (void *) surface);
     CacheEntry *entry = get_or_create_entry (self, job->page);
     /* Fresh surface at current generation — drop any stale placeholder */
+    if (entry->prev_texture) {
+      g_object_unref (entry->prev_texture);
+      entry->prev_texture = NULL;
+    }
     if (entry->prev_surface) {
       cairo_surface_destroy (entry->prev_surface);
       entry->prev_surface = NULL;
     }
+    /* Replace current surface and its cached texture */
+    if (entry->texture) {
+      g_object_unref (entry->texture);
+      entry->texture = NULL;
+    }
     if (entry->surface)
       cairo_surface_destroy (entry->surface);
     entry->surface    = surface;
+    entry->texture    = texture_from_surface (surface);
     entry->rendering  = FALSE;
     entry->render_gen = job->render_gen;
 
@@ -334,12 +460,18 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     CacheEntry *entry = value;
     entry->rendering = FALSE;  /* allow re-submission */
-    /* Preserve the old surface as a zoom transition placeholder */
+    /* Preserve the old surface and texture as a zoom transition placeholder */
     if (entry->surface && entry->render_gen != self->render_gen) {
+      if (entry->prev_texture) {
+        g_object_unref (entry->prev_texture);
+        entry->prev_texture = NULL;
+      }
       if (entry->prev_surface)
         cairo_surface_destroy (entry->prev_surface);
       entry->prev_surface = entry->surface;
+      entry->prev_texture = entry->texture;
       entry->surface = NULL;
+      entry->texture = NULL;
       FW_TRACE_MEM ("prev_surface stash: page=%d", GPOINTER_TO_INT (key));
     }
   }
@@ -640,6 +772,77 @@ fw_cache_get_prev_page (FwCache *self, int page)
   return surface;
 }
 
+GdkTexture *
+fw_cache_get_texture (FwCache *self, int page)
+{
+  g_return_val_if_fail (FW_IS_CACHE (self), NULL);
+
+  g_mutex_lock (&self->lock);
+  CacheEntry *entry = g_hash_table_lookup (self->pages,
+                                            GINT_TO_POINTER (page));
+  /* Prefer current-gen texture, fall back to prev-gen texture for zoom
+   * placeholder. Returns a borrowed reference — caller must not unref. */
+  GdkTexture *tex = NULL;
+  if (entry) {
+    if (entry->texture && entry->render_gen == self->render_gen)
+      tex = entry->texture;
+    else if (entry->prev_texture)
+      tex = entry->prev_texture;
+  }
+  g_mutex_unlock (&self->lock);
+  return tex;
+}
+
+GdkTexture *
+fw_cache_get_thumbnail (FwCache *self, int page, double page_w, double page_h)
+{
+  g_return_val_if_fail (FW_IS_CACHE (self), NULL);
+
+  if (self->stopping)
+    return NULL;
+  if (page < 0 || page >= self->page_count)
+    return NULL;
+  if (page_w <= 0 || page_h <= 0)
+    return NULL;
+
+  g_mutex_lock (&self->lock);
+  ThumbEntry *te = g_hash_table_lookup (self->thumbs, GINT_TO_POINTER (page));
+
+  if (te && te->texture) {
+    GdkTexture *tex = te->texture;
+    g_mutex_unlock (&self->lock);
+    return tex;
+  }
+
+  if (te && (te->rendering || te->failed)) {
+    g_mutex_unlock (&self->lock);
+    return NULL;
+  }
+
+  /* Create entry and kick off a thumbnail render */
+  if (!te) {
+    te = g_new0 (ThumbEntry, 1);
+    g_hash_table_insert (self->thumbs, GINT_TO_POINTER (page), te);
+  }
+  te->rendering = TRUE;
+
+  double zoom = THUMB_WIDTH / page_w;
+  if (zoom <= 0 || zoom > 1.0) zoom = 0.25;
+
+  ThumbJob *job = g_new0 (ThumbJob, 1);
+  job->cache = self;
+  job->page  = page;
+  job->zoom  = zoom;
+
+  if (self->thumb_pool)
+    g_thread_pool_push (self->thumb_pool, job, NULL);
+  else
+    g_free (job);
+
+  g_mutex_unlock (&self->lock);
+  return NULL;
+}
+
 void
 fw_cache_set_scale_factor (FwCache *self, int scale_factor)
 {
@@ -688,6 +891,10 @@ fw_cache_dispose (GObject *object)
     g_thread_pool_free (self->pool, TRUE, TRUE);
     self->pool = NULL;
   }
+  if (self->thumb_pool) {
+    g_thread_pool_free (self->thumb_pool, TRUE, TRUE);
+    self->thumb_pool = NULL;
+  }
 
   /* Free all parsed page handles before dropping the document */
   FW_TRACE_MEM ("cache dispose: parsed=%u surfaces=%u doc=%p",
@@ -721,6 +928,7 @@ fw_cache_finalize (GObject *object)
 
   g_hash_table_unref (self->pages);
   g_hash_table_unref (self->parsed);
+  g_hash_table_unref (self->thumbs);
   g_mutex_clear (&self->lock);
   g_free (self->priority_order);
 
@@ -748,6 +956,11 @@ fw_cache_init (FwCache *self)
    * the document pointer to close handles — freed manually. */
   self->parsed = g_hash_table_new (g_direct_hash, g_direct_equal);
 
+  /* Tier 0: persistent low-resolution previews */
+  self->thumbs = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                         NULL,
+                                         (GDestroyNotify) thumb_entry_free);
+
   /* Thread pool: use number of processors, non-exclusive so threads
    * are shared across pools. */
   int n_threads = (int) g_get_num_processors ();
@@ -755,6 +968,9 @@ fw_cache_init (FwCache *self)
   if (n_threads > 8) n_threads = 8;
 
   self->pool = g_thread_pool_new (render_worker, NULL, n_threads, FALSE, NULL);
+  /* Single dedicated thread for thumbnails — background priority, never
+   * competes with the main render pool. */
+  self->thumb_pool = g_thread_pool_new (thumb_worker, NULL, 1, FALSE, NULL);
   self->max_jobs = n_threads;
   self->active_jobs = 0;
   self->render_state = FW_RENDER_STATE_STATIC;

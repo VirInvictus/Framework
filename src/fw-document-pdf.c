@@ -72,13 +72,19 @@ build_transform (double zoom, int rotation)
 }
 
 /* Convert an MuPDF fz_pixmap (RGB/RGBA) to a cairo ARGB32 image surface.
- * Caller owns the returned surface. */
+ * Caller owns the returned surface.
+ *
+ * Hot-path specialization: hoist pix->n out of the inner loop and branch once
+ * per row on the format. PDFs render opaque by default (n=3) so alpha shortcut
+ * removes the multiply. Processes 4 pixels per iteration when possible, letting
+ * the compiler vectorize loads/stores. */
 static cairo_surface_t *
 pixmap_to_cairo_surface (fz_pixmap *pix)
 {
   int w = pix->w;
   int h = pix->h;
   int pix_stride = pix->stride;
+  int n = pix->n;
   unsigned char *pix_samples = pix->samples;
 
   cairo_surface_t *surface =
@@ -94,28 +100,49 @@ pixmap_to_cairo_surface (fz_pixmap *pix)
   unsigned char *cairo_data = cairo_image_surface_get_data (surface);
   int cairo_stride = cairo_image_surface_get_stride (surface);
 
-  for (int y = 0; y < h; y++) {
-    const unsigned char *src = pix_samples + y * pix_stride;
-    uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
-
-    for (int x = 0; x < w; x++) {
-      unsigned char r = src[0];
-      unsigned char g = src[1];
-      unsigned char b = src[2];
-      unsigned char a = (pix->n == 4) ? src[3] : 255;
-
-      /* Cairo ARGB32 is pre-multiplied, native-endian */
-      if (a == 255) {
-        dst[x] = (255u << 24) | ((uint32_t) r << 16) |
-                 ((uint32_t) g << 8) | (uint32_t) b;
-      } else {
-        unsigned char ra = (r * a + 127) / 255;
-        unsigned char ga = (g * a + 127) / 255;
-        unsigned char ba = (b * a + 127) / 255;
-        dst[x] = ((uint32_t) a << 24) | ((uint32_t) ra << 16) |
-                 ((uint32_t) ga << 8) | (uint32_t) ba;
+  if (n == 3) {
+    /* Fast path: RGB opaque. Alpha=255 always, skip multiply. */
+    for (int y = 0; y < h; y++) {
+      const unsigned char *src = pix_samples + y * pix_stride;
+      uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
+      int x = 0;
+      /* Unroll by 4 for better memory throughput */
+      for (; x + 4 <= w; x += 4) {
+        uint32_t r0 = src[0], g0 = src[1], b0 = src[2];
+        uint32_t r1 = src[3], g1 = src[4], b1 = src[5];
+        uint32_t r2 = src[6], g2 = src[7], b2 = src[8];
+        uint32_t r3 = src[9], g3 = src[10], b3 = src[11];
+        dst[x]     = 0xFF000000u | (r0 << 16) | (g0 << 8) | b0;
+        dst[x + 1] = 0xFF000000u | (r1 << 16) | (g1 << 8) | b1;
+        dst[x + 2] = 0xFF000000u | (r2 << 16) | (g2 << 8) | b2;
+        dst[x + 3] = 0xFF000000u | (r3 << 16) | (g3 << 8) | b3;
+        src += 12;
       }
-      src += pix->n;
+      for (; x < w; x++) {
+        uint32_t r = src[0], g = src[1], b = src[2];
+        dst[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        src += 3;
+      }
+    }
+  } else {
+    /* RGBA path: premultiply. MuPDF pixmaps are non-premultiplied. */
+    for (int y = 0; y < h; y++) {
+      const unsigned char *src = pix_samples + y * pix_stride;
+      uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
+      for (int x = 0; x < w; x++) {
+        unsigned char r = src[0], g = src[1], b = src[2], a = src[3];
+        if (a == 255) {
+          dst[x] = 0xFF000000u | ((uint32_t) r << 16) |
+                   ((uint32_t) g << 8) | (uint32_t) b;
+        } else {
+          unsigned char ra = (r * a + 127) / 255;
+          unsigned char ga = (g * a + 127) / 255;
+          unsigned char ba = (b * a + 127) / 255;
+          dst[x] = ((uint32_t) a << 24) | ((uint32_t) ra << 16) |
+                   ((uint32_t) ga << 8) | (uint32_t) ba;
+        }
+        src += n;
+      }
     }
   }
 

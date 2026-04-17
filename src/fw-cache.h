@@ -41,6 +41,20 @@ gboolean         fw_cache_page_ready    (FwCache         *self,
 cairo_surface_t *fw_cache_get_prev_page (FwCache         *self,
                                          int              page);
 
+/* Get cached GdkTexture for a page — reused across frames so we don't
+ * allocate a new texture wrapper every snapshot(). Returns a borrowed
+ * reference (do not unref). Returns NULL if surface isn't rendered. */
+GdkTexture      *fw_cache_get_texture    (FwCache         *self,
+                                          int              page);
+
+/* Get a persistent low-resolution thumbnail for the given page. Thumbnails
+ * are rendered lazily at fixed size and kept for the life of the cache —
+ * they serve as always-available placeholders during fast scroll. */
+GdkTexture      *fw_cache_get_thumbnail  (FwCache         *self,
+                                          int              page,
+                                          double           page_w,
+                                          double           page_h);
+
 void             fw_cache_stop          (FwCache         *self);
 
 void             fw_cache_set_scale_factor (FwCache      *self,

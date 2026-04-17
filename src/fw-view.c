@@ -301,33 +301,26 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
       x = (self->max_width - pw) / 2.0 - scroll_x;
     double y = py - scroll_y;
 
-    cairo_surface_t *surface = fw_cache_get_page (self->cache, i);
+    graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
+                                                (float) pw, (float) ph);
 
-    if (surface) {
-      int sw = cairo_image_surface_get_width (surface);
-      int sh = cairo_image_surface_get_height (surface);
+    /* Textures are cached in CacheEntry and reused across frames —
+     * zero per-frame allocation. fw_cache_get_texture also falls back
+     * to the prev-gen texture for zoom transitions. */
+    GdkTexture *texture = fw_cache_get_texture (self->cache, i);
 
-      graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
-                                                  (float) pw, (float) ph);
+    if (!texture) {
+      /* No full-res texture yet. Request a thumbnail — renders lazily in
+       * the background. If available, use it as a scaled placeholder. */
+      double doc_w, doc_h;
+      fw_document_get_page_size (self->document, i, &doc_w, &doc_h);
+      if (self->rotation == 90 || self->rotation == 270) {
+        double tmp = doc_w; doc_w = doc_h; doc_h = tmp;
+      }
+      texture = fw_cache_get_thumbnail (self->cache, i, doc_w, doc_h);
+    }
 
-      cairo_surface_flush (surface);
-      int stride = cairo_image_surface_get_stride (surface);
-      unsigned char *data = cairo_image_surface_get_data (surface);
-      gsize data_size = (gsize) stride * (gsize) sh;
-
-      /* Zero-copy: let GBytes reference the surface data directly.
-       * The surface ref keeps the pixel buffer alive until GBytes is freed. */
-      GBytes *bytes = g_bytes_new_with_free_func (data, data_size,
-                        (GDestroyNotify) cairo_surface_destroy, surface);
-
-      GdkTexture *texture = GDK_TEXTURE (
-        gdk_memory_texture_new (sw, sh,
-                                GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
-                                bytes, (gsize) stride));
-      g_bytes_unref (bytes);
-
-      /* Color inversion via GPU color matrix — zero pixel manipulation.
-       * Push before texture, pop after. No-op when not inverted. */
+    if (texture) {
       if (self->invert_colors) {
         graphene_matrix_t color_matrix;
         graphene_matrix_init_from_float (&color_matrix,
@@ -346,57 +339,10 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
       if (self->invert_colors)
         gtk_snapshot_pop (snapshot);
-
-      g_object_unref (texture);
+      /* texture is borrowed from the cache — do not unref */
     } else {
-      /* No current-gen surface — try the previous-gen surface as a scaled
-       * placeholder.  GTK handles the scaling in gtk_snapshot_append_texture,
-       * so the user sees slightly blurry content instead of a gray flash. */
-      cairo_surface_t *prev = fw_cache_get_prev_page (self->cache, i);
-      if (prev) {
-        int sw = cairo_image_surface_get_width (prev);
-        int sh = cairo_image_surface_get_height (prev);
-
-        graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
-                                                    (float) pw, (float) ph);
-        cairo_surface_flush (prev);
-        int stride = cairo_image_surface_get_stride (prev);
-        unsigned char *data = cairo_image_surface_get_data (prev);
-        gsize data_size = (gsize) stride * (gsize) sh;
-        GBytes *bytes = g_bytes_new_with_free_func (data, data_size,
-                          (GDestroyNotify) cairo_surface_destroy, prev);
-        GdkTexture *texture = GDK_TEXTURE (
-          gdk_memory_texture_new (sw, sh,
-                                  GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
-                                  bytes, (gsize) stride));
-        g_bytes_unref (bytes);
-
-        if (self->invert_colors) {
-          graphene_matrix_t color_matrix;
-          graphene_matrix_init_from_float (&color_matrix,
-            (const float[16]) {
-              -1,  0,  0,  0,
-               0, -1,  0,  0,
-               0,  0, -1,  0,
-               0,  0,  0,  1,
-            });
-          graphene_vec4_t color_offset;
-          graphene_vec4_init (&color_offset, 1.0f, 1.0f, 1.0f, 0.0f);
-          gtk_snapshot_push_color_matrix (snapshot, &color_matrix, &color_offset);
-        }
-
-        gtk_snapshot_append_texture (snapshot, texture, &rect);
-
-        if (self->invert_colors)
-          gtk_snapshot_pop (snapshot);
-
-        g_object_unref (texture);
-      } else {
-        graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
-                                                    (float) pw, (float) ph);
-        GdkRGBA gray = { 0.92f, 0.92f, 0.92f, 1.0f };
-        gtk_snapshot_append_color (snapshot, &gray, &rect);
-      }
+      GdkRGBA gray = { 0.92f, 0.92f, 0.92f, 1.0f };
+      gtk_snapshot_append_color (snapshot, &gray, &rect);
     }
 
     /* Paint text selection overlay on the selected page */

@@ -49,22 +49,26 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **Wayland Fractional Scaling** — Multiply MuPDF render resolution by the GTK widget scale factor. No blurry text on 150% scaling.
 - [x] **Backend Parity** — Standardize DJVU & PDF interactions so the UI doesn't care what format is loaded.
 - [x] **Invert Colors (Dark Mode)** — Bitwise NOT on RGB channels of rendered surfaces (Ctrl+I).
+- [x] **Persistent Thumbnail Tier** — Lazy low-resolution previews cached for the life of the document, used as placeholders during fast scroll and zoom transitions (v1.5).
+- [x] **Per-Frame Texture Cache** — Cache `GdkTexture` in `CacheEntry` so snapshot doesn't re-allocate wrappers every frame (v1.5).
+- [x] **Hot-Path Pixmap Conversion** — Hoist branches and unroll the 4-pixel inner loop in the MuPDF → cairo pixel shuffle (v1.5).
+- [x] **Scroll Velocity Cap** — Bound per-event scroll distance so sustained fast scrolling cannot outpace the render pipeline (v1.5).
 
 ## Phase 3: Spatial Navigation
 *How the user moves around the document. It must feel physical and precise.*
 
 - [x] **Ctrl+Scroll Wheel Zoom** — Anchor zoom to the pointer coordinates, not the viewport center.
-- [ ] **Fit-Page & Fit-Width** — (Ctrl+1, Ctrl+2). Re-calculate bounding boxes on widget resize allocations.
-- [ ] **Rotation** — (Ctrl+Shift+Plus/Minus). 90-degree increments, invalidating and re-rendering the Cairo cache.
-- [ ] **Scroll Position Precision** — Restore sub-page scroll coordinates accurately across zoom level changes.
+- [x] **Fit-Page & Fit-Width** — (Ctrl+1, Ctrl+2). Re-calculate bounding boxes on widget resize allocations.
+- [x] **Rotation** — (Ctrl+Shift+Plus/Minus). 90-degree increments, invalidating and re-rendering the Cairo cache.
+- [x] **Scroll Position Precision** — Restore sub-page scroll coordinates accurately across zoom level changes.
 
 ## Phase 4: Text & Geometry
 *Extracting data from the render without locking the UI thread.*
 
-- [ ] **Text Selection** — Click-drag to select text using backend `get_text` with rectangle calculations.
-- [ ] **Selection Overlay** — Paint a semi-transparent blue GTK overlay over the selected region (avoid re-rendering the base PDF).
-- [ ] **Copy to Clipboard** — Pipe selected text directly to `GdkClipboard` (Ctrl+C).
-- [ ] **Dynamic Cursors** — I-beam over selectable text, pointer hand over link areas.
+- [x] **Text Selection** — Click-drag to select text using backend `get_text` with rectangle calculations.
+- [x] **Selection Overlay** — Paint a semi-transparent blue GTK overlay over the selected region (avoid re-rendering the base PDF).
+- [x] **Copy to Clipboard** — Pipe selected text directly to `GdkClipboard` (Ctrl+C).
+- [x] **Dynamic Cursors** — I-beam over selectable text, pointer hand over link areas.
 
 ## Phase 5: Search & Illumination
 *Finding data fast.*
@@ -79,7 +83,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 
 - [ ] **Sidebar TOC Highlight** — Track the current page and highlight the active section in the sidebar during scrolling.
 - [ ] **Sidebar Click Navigation** — Clicking a TOC entry jumps immediately to the target page.
-- [ ] **Internal Link Jumps** — Clicking a linked footnote or index item navigates to the target page.
+- [x] **Internal Link Jumps** — Clicking a linked footnote or index item navigates to the target page.
 - [ ] **Navigation Stack (History)** — Alt+Left / Alt+Right to go back/forward after jumping via links or TOC.
 
 ## Phase 7: Format Expansion
@@ -87,7 +91,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 
 - [ ] **Comic Books (CBZ/CBR)** — Wire up the archive backend for graphic novels.
 - [ ] **EPUB / XPS Support** — Hook up the remaining MuPDF format parsers.
-- [ ] **External Links** — Open web URLs in default browser via `g_app_info_launch_default_for_uri`.
+- [x] **External Links** — Open web URLs in default browser via `GtkUriLauncher`.
 
 ## Phase 8: Desktop Symbiosis
 *Making it a native, well-behaved GTK citizen.*

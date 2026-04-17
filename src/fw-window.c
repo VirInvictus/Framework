@@ -337,7 +337,13 @@ static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
 
 /* ── Arrow key scrolling & Ctrl+Scroll zoom ─────────────────────── */
 
-#define SCROLL_STEP 60
+#define SCROLL_STEP        50.0
+/* Hard cap on single-event scroll distance. Without this, a fast wheel flick
+ * (high delta) or amplified trackpad event can blow past multiple pages in
+ * one frame — faster than the cache can render, producing the "stuck in
+ * pre-cache" gray flashes. Capping at ~1.5 lines of text keeps scroll
+ * velocity bounded so the cache can keep up. */
+#define SCROLL_MAX_STEP    120.0
 
 static gboolean
 on_scroll (GtkEventControllerScroll *controller,
@@ -363,18 +369,19 @@ on_scroll (GtkEventControllerScroll *controller,
     return TRUE;
   }
 
-  /* Scroll damping: consume the event and apply a controlled step size.
-   * This bypasses GTK's kinetic scrolling amplification, giving us direct
-   * control over max scroll velocity. The velocity engine still tracks
-   * speed via the view's tick callback. */
+  /* Scroll damping: consume the event and apply a capped step. Bypasses
+   * GTK's kinetic scrolling (which can amplify wheel events unpredictably)
+   * and enforces a maximum per-event movement so the cache can keep up. */
   GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
-  if (vadj) {
-    double step = dy * SCROLL_STEP;
-    gtk_adjustment_set_value (vadj, gtk_adjustment_get_value (vadj) + step);
-    return TRUE;
-  }
+  if (!vadj)
+    return FALSE;
 
-  return FALSE;
+  double step = dy * SCROLL_STEP;
+  if (step > SCROLL_MAX_STEP) step = SCROLL_MAX_STEP;
+  if (step < -SCROLL_MAX_STEP) step = -SCROLL_MAX_STEP;
+
+  gtk_adjustment_set_value (vadj, gtk_adjustment_get_value (vadj) + step);
+  return TRUE;
 }
 
 static gboolean
