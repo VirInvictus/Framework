@@ -53,6 +53,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **Per-Frame Texture Cache** — Cache `GdkTexture` in `CacheEntry` so snapshot doesn't re-allocate wrappers every frame (v1.5).
 - [x] **Hot-Path Pixmap Conversion** — Hoist branches and unroll the 4-pixel inner loop in the MuPDF → cairo pixel shuffle (v1.5).
 - [x] **Scroll Velocity Cap** — Bound per-event scroll distance so sustained fast scrolling cannot outpace the render pipeline (v1.5).
+- [x] **Zero-Copy MuPDF Render** — Use `fz_device_bgr` + `fz_new_pixmap_with_bbox_and_data` to render directly into the cairo ARGB32 buffer. No intermediate pixmap, no channel shuffle, no scalar loop (v1.6, technique from zathura-pdf-mupdf).
 
 ## Phase 3: Spatial Navigation
 *How the user moves around the document. It must feel physical and precise.*

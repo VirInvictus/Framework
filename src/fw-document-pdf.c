@@ -71,79 +71,76 @@ build_transform (double zoom, int rotation)
   return m;
 }
 
-/* Convert an MuPDF fz_pixmap (RGB/RGBA) to a cairo ARGB32 image surface.
- * Caller owns the returned surface.
+/* Render a page directly into a cairo ARGB32 surface with zero pixel copying.
  *
- * Hot-path specialization: hoist pix->n out of the inner loop and branch once
- * per row on the format. PDFs render opaque by default (n=3) so alpha shortcut
- * removes the multiply. Processes 4 pixels per iteration when possible, letting
- * the compiler vectorize loads/stores. */
+ * MuPDF's BGR colorspace + alpha=1 produces 32-bit pixels in B,G,R,A byte
+ * order — which on little-endian systems is exactly cairo's ARGB32 layout.
+ * By passing the cairo surface's own pixel buffer as the pixmap backing,
+ * MuPDF's draw device writes rendered pixels straight into the final buffer
+ * with no intermediate allocation, no channel shuffle, no alpha premultiply
+ * loop.  This is the same technique zathura-pdf-mupdf uses.
+ *
+ * For ARGB32, `cairo_format_stride_for_width` returns `4*w` (always 4-byte
+ * aligned for any width), so cairo's stride and MuPDF's tight stride match.
+ *
+ * Called with inst->lock held. */
 static cairo_surface_t *
-pixmap_to_cairo_surface (fz_pixmap *pix)
+render_page_direct (fz_context *ctx, fz_page *page,
+                    double zoom, int rotation)
 {
-  int w = pix->w;
-  int h = pix->h;
-  int pix_stride = pix->stride;
-  int n = pix->n;
-  unsigned char *pix_samples = pix->samples;
+  fz_rect bbox = fz_bound_page (ctx, page);
+  fz_matrix m = build_transform (zoom, rotation);
+  fz_rect transformed = fz_transform_rect (bbox, m);
+  fz_irect pixel_rect = fz_round_rect (transformed);
+
+  int w = pixel_rect.x1 - pixel_rect.x0;
+  int h = pixel_rect.y1 - pixel_rect.y0;
+  if (w < 1 || h < 1)
+    return NULL;
 
   cairo_surface_t *surface =
     cairo_image_surface_create (CAIRO_FORMAT_ARGB32, w, h);
-
   if (cairo_surface_status (surface) != CAIRO_STATUS_SUCCESS) {
     cairo_surface_destroy (surface);
     return NULL;
   }
 
   cairo_surface_flush (surface);
+  unsigned char *samples = cairo_image_surface_get_data (surface);
 
-  unsigned char *cairo_data = cairo_image_surface_get_data (surface);
-  int cairo_stride = cairo_image_surface_get_stride (surface);
+  /* Translate so the rendered page lands at (0,0) in the pixel buffer. */
+  fz_matrix draw_m = fz_concat (m,
+    fz_translate (-transformed.x0, -transformed.y0));
 
-  if (n == 3) {
-    /* Fast path: RGB opaque. Alpha=255 always, skip multiply. */
-    for (int y = 0; y < h; y++) {
-      const unsigned char *src = pix_samples + y * pix_stride;
-      uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
-      int x = 0;
-      /* Unroll by 4 for better memory throughput */
-      for (; x + 4 <= w; x += 4) {
-        uint32_t r0 = src[0], g0 = src[1], b0 = src[2];
-        uint32_t r1 = src[3], g1 = src[4], b1 = src[5];
-        uint32_t r2 = src[6], g2 = src[7], b2 = src[8];
-        uint32_t r3 = src[9], g3 = src[10], b3 = src[11];
-        dst[x]     = 0xFF000000u | (r0 << 16) | (g0 << 8) | b0;
-        dst[x + 1] = 0xFF000000u | (r1 << 16) | (g1 << 8) | b1;
-        dst[x + 2] = 0xFF000000u | (r2 << 16) | (g2 << 8) | b2;
-        dst[x + 3] = 0xFF000000u | (r3 << 16) | (g3 << 8) | b3;
-        src += 12;
-      }
-      for (; x < w; x++) {
-        uint32_t r = src[0], g = src[1], b = src[2];
-        dst[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
-        src += 3;
-      }
-    }
-  } else {
-    /* RGBA path: premultiply. MuPDF pixmaps are non-premultiplied. */
-    for (int y = 0; y < h; y++) {
-      const unsigned char *src = pix_samples + y * pix_stride;
-      uint32_t *dst = (uint32_t *) (cairo_data + y * cairo_stride);
-      for (int x = 0; x < w; x++) {
-        unsigned char r = src[0], g = src[1], b = src[2], a = src[3];
-        if (a == 255) {
-          dst[x] = 0xFF000000u | ((uint32_t) r << 16) |
-                   ((uint32_t) g << 8) | (uint32_t) b;
-        } else {
-          unsigned char ra = (r * a + 127) / 255;
-          unsigned char ga = (g * a + 127) / 255;
-          unsigned char ba = (b * a + 127) / 255;
-          dst[x] = ((uint32_t) a << 24) | ((uint32_t) ra << 16) |
-                   ((uint32_t) ga << 8) | (uint32_t) ba;
-        }
-        src += n;
-      }
-    }
+  fz_irect pix_bbox = { .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
+  volatile fz_pixmap *pix = NULL;
+  volatile fz_device *dev = NULL;
+
+  fz_try (ctx) {
+    /* Build a pixmap wrapping the cairo surface buffer. BGR + alpha=1 gives
+     * B,G,R,A bytes = cairo ARGB32 on little-endian. */
+    pix = fz_new_pixmap_with_bbox_and_data (ctx,
+            fz_device_bgr (ctx),
+            pix_bbox,
+            NULL, 1, samples);
+    /* Fill with opaque white before rendering — matches zathura's behaviour
+     * and avoids transparent edges on pages that don't cover the full bbox. */
+    fz_clear_pixmap_with_value (ctx, (fz_pixmap *) pix, 0xFF);
+
+    dev = fz_new_draw_device (ctx, fz_identity, (fz_pixmap *) pix);
+    fz_run_page (ctx, page, (fz_device *) dev, draw_m, NULL);
+    fz_close_device (ctx, (fz_device *) dev);
+  }
+  fz_always (ctx) {
+    fz_drop_device (ctx, (fz_device *) dev);
+    /* Drop the pixmap — it doesn't own the samples buffer (we passed it in)
+     * so this just frees the pixmap struct, not the cairo buffer. */
+    fz_drop_pixmap (ctx, (fz_pixmap *) pix);
+  }
+  fz_catch (ctx) {
+    g_warning ("MuPDF: render failed: %s", fz_caught_message (ctx));
+    cairo_surface_destroy (surface);
+    return NULL;
   }
 
   cairo_surface_mark_dirty (surface);
@@ -342,8 +339,6 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   cairo_surface_t *surface = NULL;
   FW_TRACE_PDF ("render_page start: page=%d zoom=%.2f rot=%d", page, zoom, rotation);
-  volatile fz_page *pg = NULL;
-  volatile fz_pixmap *pix = NULL;
 
   /* Grab an independent render instance via round-robin.
    * Each instance has its own context + document — fully thread-safe.
@@ -351,61 +346,36 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
   int slot = (int) ((unsigned int) g_atomic_int_add (&self->next_render, 1) % (unsigned int) self->n_render);
   RenderInstance *inst = &self->render[slot];
 
-  if (!inst->ctx || !inst->doc) {
-    /* Instance failed to open — fall back to main context */
-    g_mutex_lock (&self->lock);
-    fz_try (self->ctx) {
-      pg = fz_load_page (self->ctx, self->doc, page);
-      fz_matrix ctm = build_transform (zoom, rotation);
-      pix = fz_new_pixmap_from_page (self->ctx, (fz_page *) pg, ctm,
-                                      fz_device_rgb (self->ctx), 0);
+  fz_context  *ctx = (inst->ctx && inst->doc) ? inst->ctx : self->ctx;
+  fz_document *pdf = (inst->ctx && inst->doc) ? inst->doc : self->doc;
+  GMutex      *lock = (inst->ctx && inst->doc) ? &inst->lock : &self->lock;
+
+  g_mutex_lock (lock);
+
+  volatile fz_page *pg = NULL;
+  fz_try (ctx) {
+    pg = fz_load_page (ctx, pdf, page);
+  }
+  fz_catch (ctx) {
+    g_warning ("MuPDF: failed to load page %d: %s",
+               page, fz_caught_message (ctx));
+  }
+
+  if (pg) {
+    /* Direct render into a fresh cairo surface — zero pixel copying. */
+    surface = render_page_direct (ctx, (fz_page *) pg, zoom, rotation);
+    fz_try (ctx) {
+      fz_drop_page (ctx, (fz_page *) pg);
     }
-    fz_always (self->ctx) {
-      fz_drop_page (self->ctx, (fz_page *) pg);
+    fz_catch (ctx) {
+      /* best-effort drop */
     }
-    fz_catch (self->ctx) {
-      g_warning ("MuPDF: failed to render page %d: %s",
-                 page, fz_caught_message (self->ctx));
-    }
-    g_mutex_unlock (&self->lock);
-
-    if (pix) {
-      surface = pixmap_to_cairo_surface ((fz_pixmap *) pix);
-      g_mutex_lock (&self->lock);
-      fz_drop_pixmap (self->ctx, (fz_pixmap *) pix);
-      g_mutex_unlock (&self->lock);
-    }
-    FW_TRACE_PDF ("render_page done (fallback): page=%d surface=%p", page, (void *) surface);
-    return surface;
   }
 
-  g_mutex_lock (&inst->lock);
+  g_mutex_unlock (lock);
 
-  fz_try (inst->ctx) {
-    pg = fz_load_page (inst->ctx, inst->doc, page);
-    fz_matrix ctm = build_transform (zoom, rotation);
-    pix = fz_new_pixmap_from_page (inst->ctx, (fz_page *) pg, ctm,
-                                    fz_device_rgb (inst->ctx), 0);
-  }
-  fz_always (inst->ctx) {
-    fz_drop_page (inst->ctx, (fz_page *) pg);
-  }
-  fz_catch (inst->ctx) {
-    g_warning ("MuPDF: failed to render page %d: %s",
-               page, fz_caught_message (inst->ctx));
-  }
-
-  g_mutex_unlock (&inst->lock);
-
-  if (pix) {
-    surface = pixmap_to_cairo_surface ((fz_pixmap *) pix);
-
-    g_mutex_lock (&inst->lock);
-    fz_drop_pixmap (inst->ctx, (fz_pixmap *) pix);
-    g_mutex_unlock (&inst->lock);
-  }
-
-  FW_TRACE_PDF ("render_page done: page=%d slot=%d surface=%p", page, slot, (void *) surface);
+  FW_TRACE_PDF ("render_page done: page=%d slot=%d surface=%p",
+                page, slot, (void *) surface);
   return surface;
 }
 
