@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 gtk_dep = dependency('gtk4', version: '>= 4.16')
 adw_dep = dependency('libadwaita-1', version: '>= 1.7')
 cairo_dep = dependency('cairo', version: '>= 1.18')

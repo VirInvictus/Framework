@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 desktop_file = i18n.merge_file(
   input: 'com.github.vrnvctss.framework.desktop.in',
   output: 'com.github.vrnvctss.framework.desktop',

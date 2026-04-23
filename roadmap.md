@@ -1,5 +1,7 @@
 # Framework — Roadmap
 
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 What's done, what's next, what's deferred. Sequenced for maximum performance and a strictly defined 1.0 Wayland/Linux release.
 
 ---

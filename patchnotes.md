@@ -1,5 +1,7 @@
 # Framework — Patch Notes
 
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 ## v1.6.0 (2026-04-17)
 
 ---

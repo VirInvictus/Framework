@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 project('framework', 'c',
   version: '1.6.0',
   meson_version: '>= 1.4',

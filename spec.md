@@ -1,12 +1,17 @@
 # Framework — Application Specification
 
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 **Version:** 1.0  
 **Target:** GNOME 50+, GTK4/libadwaita  
 **Language:** C (C17)  
 **Build System:** Meson  
-**License:** TBD (recommend GPLv3 for GNOME ecosystem alignment)
+**License:** GNU GPL v3.0 or later (to align with the GNOME ecosystem)
 
 ---
+
+## Influence
+Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performance, minimal UI, and a strict focus on being a viewer rather than an editor. It aims to be the "SumatraPDF for GNOME".
 
 ## 1. Mission Statement
 

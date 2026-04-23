@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 <p align="center">
   <img src="logo.svg" alt="Framework" width="420">
 </p>
@@ -135,7 +137,19 @@ One document per window. Multiple files open multiple windows.
 
 ## Acknowledgements
 
-Framework's render pipeline borrows techniques from [zathura](https://pwmt.org/projects/zathura/), [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/), and [zathura-djvu](https://pwmt.org/projects/zathura-djvu/) — whose minimalist, zero-copy approach to driving MuPDF and DjVuLibre directly into cairo surfaces informed our own. Thanks to the [MuPDF](https://mupdf.com/) and [DjVuLibre](http://djvu.sourceforge.net/) teams for the rendering engines that make this viewer possible.
+Framework's render pipeline borrows techniques from [zathura](https://pwmt.org/projects/zathura/), [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/), and [zathura-djvu](https://pwmt.org/projects/zathura-djvu/) — whose minimalist, zero-copy approach to driving MuPDF and DjVuLibre directly into cairo surfaces informed our own. 
+
+A special thank you goes to [SumatraPDF](https://www.sumatrapdfreader.org/) for being a major influence. Its uncompromising focus on performance, simplicity, and a "just a viewer" philosophy is the spiritual foundation of this project.
+
+Thanks to the [MuPDF](https://mupdf.com/) and [DjVuLibre](http://djvu.sourceforge.net/) teams for the rendering engines that make this viewer possible.
+
+We also rely on the following excellent software:
+- [GTK](https://www.gtk.org/) and [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) for the user interface.
+- [Cairo](https://www.cairographics.org/) for high-quality surface management.
+- [GLib](https://docs.gtk.org/glib/) for core data structures and threading primitives.
+- [JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/) for state serialization.
+
+Finally, thanks to the [GNOME](https://www.gnome.org/) contributors for providing such a robust developer platform.
 
 ## Support
 
