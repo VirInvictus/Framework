@@ -155,4 +155,5 @@ Finally, thanks to the [GNOME](https://www.gnome.org/) contributors for providin
 
 ## Support
 
+Support me by donating bitcoin (even a coffee would help):  
 bc1qkge6zr45tzqfwfmvma2ylumt6mg7wlwmhr05yv
