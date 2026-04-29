@@ -155,4 +155,4 @@ Finally, thanks to the [GNOME](https://www.gnome.org/) contributors for providin
 
 ## Support
 
-If this saved you time, consider [buying me a coffee](https://ko-fi.com/vrnvctss).
+bc1qkge6zr45tzqfwfmvma2ylumt6mg7wlwmhr05yv
