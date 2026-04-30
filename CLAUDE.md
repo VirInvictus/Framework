@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Framework is a native GNOME multi-format document viewer (PDF, DjVu, CBZ, CBR, XPS, EPUB, FB2, MOBI) — C17, GTK4/libadwaita, Meson — with a velocity-driven pre-cache engine. Project version lives in `meson.build` (currently 0.11.0 — pre-1.0; see the v0.6.0 patchnote for why we backed off the earlier 1.x line). `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
+Framework is a native GNOME multi-format document viewer (PDF, DjVu, CBZ, CB7, CBT, CBR, XPS, EPUB, FB2, MOBI) — C17, GTK4/libadwaita, Meson — with a velocity-driven pre-cache engine. Project version lives in `meson.build` (currently 0.21.0 — pre-1.0; see the v0.6.0 patchnote for why we backed off the earlier 1.x line). `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
 
 ## Build & run
 
@@ -16,6 +16,27 @@ meson compile -C builddir          # or: ninja -C builddir
 ```
 
 For a single-file rebuild during iteration: `ninja -C builddir src/framework.p/<file>.c.o`. There is no test target — verification is by running the binary against real documents.
+
+**GSettings in dev runs.** As of v0.14.0 the binary calls `g_settings_new(APP_ID)`, which looks up the schema from the system schema dir by default. The dev build's compiled schema lives at `builddir/data/gschemas.compiled`. Either set `GSETTINGS_SCHEMA_DIR=builddir/data` per invocation, or use `meson devenv -C builddir` to open a subshell where the right env vars are set. Without one of these the binary aborts on launch with `Settings schema 'io.github.virinvictus.framework' is not installed`. The Flatpak build is unaffected — the schema gets installed and compiled into `/app/share/glib-2.0/schemas/`.
+
+**Stress harness and sanitizers (v0.15+).** The `tests/` tree is gated by `-Dstress=true` and built off by default. To enable:
+
+```sh
+meson setup builddir -Dstress=true
+meson compile -C builddir
+GSETTINGS_SCHEMA_DIR=builddir/data ./builddir/tests/stress/stress-scrub <pdf>
+```
+
+Sanitizer builds use the `-Dsanitize=` array option (choices: `address`, `undefined`, `leak`, `thread`). ASan works out of the box on Brandon's Fedora; `undefined`/`leak`/`thread` require `sudo dnf install libubsan liblsan libtsan` first.
+
+```sh
+meson configure builddir -Dsanitize=address
+meson compile -C builddir
+GSETTINGS_SCHEMA_DIR=builddir/data ./builddir/tests/stress/stress-scrub <pdf>
+# revert: meson configure builddir -Dsanitize=
+```
+
+The src layer is now a `framework-core` static library plus a thin `framework` executable. Tests link against `framework_lib_dep` to reach internal symbols. `meson test -C builddir` runs registered targets; `stress-scrub` is registered with a 60 s timeout against the Effective Java sample.
 
 ## Runtime debug tracing
 
@@ -43,8 +64,8 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 
 **Layered around an abstract document interface:**
 
-- `FwDocument` (interface, `src/fw-document.h`) — vtable with `open`/`close`, `get_page_count`, `get_page_size`, `render_page`, `get_toc`, `search`, `get_text`, `get_links`, plus the page-handle API (`open_page`/`close_page`/`render_page_from_handle`) that lets the cache separate parsing from rendering, and `cancel_render` for scrubbing aborts.
-- `FwDocumentPdf` (`fw-document-pdf.c`) — MuPDF backend. Despite the name, this handles **every** MuPDF-supported format: PDF, CBZ, CB7, CBT, XPS, EPUB, FB2, MOBI. The `pdf_open` path calls `fz_register_document_handlers` + `fz_open_document`, which dispatch internally by content. Reflowable formats (EPUB / FB2 / MOBI) get an `fz_layout_document(600, 900, 11)` pass per render-instance open. Type name stayed `FwDocumentPdf` to avoid a churn-only rename; treat it as "the MuPDF backend."
+- `FwDocument` (interface, `src/fw-document.h`) — vtable with `open`/`close`, `get_page_count`, `get_page_size`, `render_page`, `get_toc`, `search`, `get_text`, `get_links`, the page-handle API (`open_page`/`close_page`/`render_page_from_handle`) that lets the cache separate parsing from rendering, `cancel_render` for scrubbing aborts, `get_attachments`/`save_attachment` (PDF /EmbeddedFiles), `get_metadata` (Document Properties dialog), `select_at` + `get_selection_quads` (smart text selection — backed by the per-page cached `fz_stext_page`).
+- `FwDocumentPdf` (`fw-document-pdf.c`) — MuPDF backend. Despite the name, this handles **every** MuPDF-supported format: PDF, CBZ, CB7, CBT, XPS, EPUB, FB2, MOBI. The `pdf_open` path calls `fz_register_document_handlers` + `fz_open_document`, which dispatch internally by content. Reflowable formats (EPUB / FB2 / MOBI) get an `fz_layout_document(600, 900, 11)` pass per render-instance open. Type name stayed `FwDocumentPdf` to avoid a churn-only rename; treat it as "the MuPDF backend." Carries two backend-internal caches: `active_cookies[]` for in-flight `fz_cookie` cancellation (Phase 11 Tier 1, v0.17), and `stext_cache` for per-page structured text reused by selection and search (Phase 11 Tier 1, v0.18).
 - `FwDocumentDjvu` (`fw-document-djvu.c`) — DjVuLibre backend.
 - `FwDocumentCbr` (`fw-document-cbr.c`) — RAR/7z/tar comics via libarchive. Single-mutex per archive (libarchive isn't thread-safe per-reader). Render path: extract entry bytes → `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (zero-copy). Page sizes default to page 0's dimensions, get corrected per-page on first render.
 - `fw_document_new_for_path` is the factory; backend is chosen by extension. PDF + ZIP-comic archives + XPS + reflowable formats → MuPDF backend; `.djvu`/`.djv` → DjVu backend; `.cbr` → libarchive backend.
@@ -52,9 +73,10 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 **The Velocity-Driven Cache (`fw-cache.c`) is the core performance differentiator** — read it before changing anything in the render path. Three tiers and a state machine:
 
 - **Tier 0 — Thumbnails:** persistent 150px-wide previews, lazy-rendered on a separate low-priority `GThreadPool`, never evicted. Always-available placeholders during fast scroll.
-- **Tier 1 — Parsed handles:** lightweight `fz_page`/`ddjvu_page` objects (~50-page window), no pixels. Eliminates I/O on render.
-- **Tier 2 — Rendered surfaces:** `cairo_surface_t` + cached `GdkTexture` keyed by page. Strict eviction.
-- **Render states** driven by `dy/dt` from `gtk_widget_add_tick_callback`: `STATIC` (render visible + small lookahead, idle the pool), `CRUISING` (drip-feed forward, drop backward), `SCRUBBING` (abort queue via `cancel_gen` bump, paint placeholders). View invalidation (zoom/rotation/scale) bumps `render_gen` so stale jobs become no-ops.
+- **Tier 1 — Parsed handles:** lightweight `fz_page`/`ddjvu_page` objects, populated lazily by render workers, evicted with the priority window. No pixels. Eliminates I/O on render.
+- **Tier 2 — Rendered surfaces:** `cairo_surface_t` + cached `GdkTexture` keyed by page. **Bytes-aware cap (v0.16)**: `total_cached_bytes` is tracked live; eviction fires only when over `byte_cap` (default 512 MB, override via `FW_CACHE_BYTES_CAP_MB`). Outside-priority pages stay cached for fast scroll-back when there's headroom; visible/priority pages are never evicted.
+- **Render states** driven by `dy/dt` from `gtk_widget_add_tick_callback`: `STATIC` and `CRUISING` use a symmetric ±10 priority window (v0.14); `SCRUBBING` aborts the queue via `cancel_gen` bump and triggers `fz_cookie`-based mid-render abort on PDF (v0.17), painting thumbnail placeholders. View invalidation (zoom/rotation/scale) bumps `render_gen` so stale jobs become no-ops.
+- **Pool dispatch (v0.14):** `g_thread_pool_set_sort_function` reorders queued jobs by `last_view_time` so the most-recently-prioritized page runs next, regardless of when its job was pushed. Newly-visible pages skip ahead of stale queued jobs.
 
 **Threading rules — load-bearing, do not violate:**
 
@@ -65,7 +87,7 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 
 **View pipeline (`fw-view.c`, custom `GtkWidget`):** determines visible pages from scroll position, asks `FwCache` for surfaces, paints via `gtk_snapshot_append_texture` (cache hit) or grey placeholder + thumbnail (miss). Search highlights and selection rectangles are overlay layers, not re-renders. Wayland fractional scaling: render resolution is multiplied by widget scale factor (`fw_cache_set_scale_factor`) — don't paint upscaled bitmaps.
 
-**Other modules:** `fw-application.c` (single-instance `AdwApplication`, file-open dispatch), `fw-window.c` (header bar, actions, keybindings, search-bar UI, navigation history — two `GArray<NavEntry>` stacks pushed only on explicit jumps: TOC click, page-entry edit, internal link click; print operation; embedded-file extraction with sanitized output paths), `fw-sidebar.c` (`GtkListView` + `GtkTreeListModel` + `FwTocItem` GObject; `fw_sidebar_set_current_page` walks the underlying `FwTocItem` tree, expands ancestor `GtkTreeListRow`s, then selects the row in the flat model), `fw-search.c` (async find controller — runs the page-by-page scan on a worker thread, posts hits back via `g_idle_add_full`, emits `hits-changed` / `current-changed` / `search-finished` signals; the view subscribes to repaint highlights and reveal the active hit), `fw-state.c` (per-document JSON state in `$XDG_DATA_HOME/framework/state.json`, LRU-pruned).
+**Other modules:** `fw-application.c` (single-instance `AdwApplication`, file-open dispatch), `fw-window.c` (header bar, actions, keybindings, search-bar UI, navigation history with two `GArray<NavEntry>` stacks pushed only on explicit jumps; print operation; embedded-file extraction with sanitized output paths; Document Properties + Keyboard Shortcuts dialogs; `AdwToastOverlay` wrapping the content tree; `GFileMonitor`-backed auto-reload that saves state, re-opens the document, and toasts on every `CHANGES_DONE_HINT`), `fw-sidebar.c` (`GtkListView` + `GtkTreeListModel` + `FwTocItem` GObject; `fw_sidebar_set_current_page` walks the underlying `FwTocItem` tree, expands ancestor `GtkTreeListRow`s, then selects the row in the flat model), `fw-search.c` (async find controller — runs the page-by-page scan on a worker thread, posts hits back via `g_idle_add_full`, emits `hits-changed` / `current-changed` / `search-finished` signals; the view subscribes to repaint highlights and reveal the active hit), `fw-state.c` (per-document JSON state in `$XDG_DATA_HOME/framework/state.json`, LRU-pruned).
 
 **`FwView` signals:** `page-jumped(int dest_page)` fires only on explicit navigation (currently just internal link clicks). Plain scroll, search-hit reveal, and `fw_view_go_to_page` from the window do *not* emit it. The window subscribes to push the previous viewport onto its history stack.
 
@@ -74,7 +96,7 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 - **GObject prefix `Fw`**, function prefix `fw_`, file prefix `fw-`, GType macros `FW_TYPE_*`. New source files go in `src/` and must be added to the `framework_sources` list in `src/meson.build` — there is no glob.
 - C17, `warning_level=2`. Match existing style (4-space C indent in this tree, GNU-flavored function-name-on-its-own-line for definitions). No new dependencies without asking — the dep set in `src/meson.build` is deliberate.
 - **MuPDF pkg-config is broken** (often emits an empty `-I`). The build uses `cc.find_library('mupdf')` + optional `mupdf-third` directly via `declare_dependency`. Don't switch to `dependency('mupdf')`.
-- App ID is `com.github.vrnvctss.framework`; the GSettings schema, desktop file, and metainfo all live under that ID in `data/`. Schema must be installed/compiled (`gnome.compile_schemas`) before settings reads work — `meson compile` handles this in-tree.
+- App ID is `io.github.virinvictus.framework`; the GSettings schema, desktop file, and metainfo all live under that ID in `data/`. Schema must be installed/compiled (`gnome.compile_schemas`) before settings reads work — `meson compile` handles this in-tree.
 - This project is GPL-3.0-or-later. Every source file carries an `SPDX-License-Identifier` header — keep it on new files.
 
 ## Scope discipline

@@ -57,6 +57,19 @@ typedef struct {
 void fw_attachment_free          (FwAttachment *a);
 void fw_attachment_free_indirect (gpointer      data);  /* for g_array set_clear_func */
 
+/* ── Selection granularity ───────────────────────────────────────── */
+
+typedef enum {
+  FW_SELECT_WORD,
+  FW_SELECT_LINE,
+} FwSelectGranularity;
+
+/* ── Page-coordinate rectangle (points) ──────────────────────────── */
+
+typedef struct {
+  double x0, y0, x1, y1;
+} FwRect;
+
 /* ── Search hit ───────────────────────────────────────────────────── */
 
 typedef struct {
@@ -134,6 +147,44 @@ struct _FwDocumentInterface {
                                         FwAttachment *attachment,
                                         const char   *output_path,
                                         GError      **error);
+
+  /* Document metadata. Returns a GHashTable<gchar*, gchar*> of free-form
+   * key/value pairs (both owned by the table; destroy with
+   * g_hash_table_unref). NULL when the backend exposes no metadata.
+   * Canonical keys when present: "title", "author", "subject", "keywords",
+   * "creator", "producer", "creation-date", "modification-date", "format",
+   * "encryption". Dates are pre-formatted human-readable strings. */
+  GHashTable      *(*get_metadata)     (FwDocument   *self);
+
+  /* Snap a click point to a word- or line-sized selection rectangle.
+   * Returns TRUE on success and writes the snapped page-coordinate
+   * bounding box (in points) to the out parameters; returns FALSE if
+   * the click missed all glyphs or the backend doesn't support
+   * structured-text snap (DjVu, CBR — fall back to drag selection).
+   * Backed by the cached fz_stext_page from Phase 11 Tier 1, so the
+   * call is constant-time after first text access on a page. */
+  gboolean         (*select_at)        (FwDocument   *self,
+                                         int           page,
+                                         double        x,
+                                         double        y,
+                                         FwSelectGranularity gran,
+                                         double       *out_x0,
+                                         double       *out_y0,
+                                         double       *out_x1,
+                                         double       *out_y1);
+
+  /* Compute per-line highlight rectangles for a text selection from
+   * point (x0,y0) to point (x1,y1), following reading order. Returns a
+   * GArray of FwRect (page-point coordinates). The caller frees with
+   * g_array_unref. NULL means the backend doesn't support stext-based
+   * selection (DjVu, CBR — view falls back to drawing the bounding
+   * rectangle). Backed by the same cached fz_stext_page as select_at. */
+  GArray          *(*get_selection_quads) (FwDocument *self,
+                                            int         page,
+                                            double      x0,
+                                            double      y0,
+                                            double      x1,
+                                            double      y1);
 };
 
 /* Public API — delegates to interface vtable */
@@ -179,6 +230,22 @@ gboolean         fw_document_save_attachment(FwDocument   *self,
                                              FwAttachment *attachment,
                                              const char   *output_path,
                                              GError      **error);
+GHashTable      *fw_document_get_metadata   (FwDocument   *self);
+gboolean         fw_document_select_at      (FwDocument   *self,
+                                             int           page,
+                                             double        x,
+                                             double        y,
+                                             FwSelectGranularity gran,
+                                             double       *out_x0,
+                                             double       *out_y0,
+                                             double       *out_x1,
+                                             double       *out_y1);
+GArray          *fw_document_get_selection_quads (FwDocument *self,
+                                                   int         page,
+                                                   double      x0,
+                                                   double      y0,
+                                                   double      x1,
+                                                   double      y1);
 
 /* ── Factory ──────────────────────────────────────────────────────── */
 

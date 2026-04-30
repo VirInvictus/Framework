@@ -26,12 +26,16 @@ Linux document viewers often fall into two categories: feature-heavy clients (li
 
 | Feature | Description |
 |---------|-------------|
-| **Velocity Engine** | Dynamic cache management that throttles render jobs based on scroll speed. |
-| **Three-Tier Cache** | Persistent thumbnails, parsed page handles, and rendered surfaces — each evicted independently. |
-| **Parallel Rendering** | Independent MuPDF instances render pages across multiple CPU cores. |
-| **Zero-Copy DjVu** | Full DjVuLibre support with zero-copy rendering into Cairo surfaces. |
-| **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland. |
-| **Async Search** | Background-thread find that highlights matches and surfaces results as they're found, even on 1000-page textbooks. |
+| **Velocity Engine** | Render queue dispatch driven by scroll velocity, with mid-render `fz_cookie` abort on PDFs so workers can bail in milliseconds when the user has already moved on. |
+| **Three-Tier Cache** | Persistent thumbnails, parsed page handles, and rendered surfaces with bytes-aware eviction (default 512 MB cap, tunable via `FW_CACHE_BYTES_CAP_MB`). |
+| **Sort-Function Priority Dispatch** | `g_thread_pool_set_sort_function` reorders the render queue by `last_view_time` so the most recently prioritized page runs next. The viewport always wins. |
+| **Parallel Rendering** | Eight independent MuPDF instances render pages across multiple CPU cores with zero shared state. |
+| **Zero-Copy Render** | MuPDF and DjVuLibre both write rendered pixels straight into the cairo surface buffer — no intermediate pixmap, no channel shuffle. |
+| **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland fractional scaling. |
+| **Async Search with Cached Stext** | Page-by-page scan on a worker thread, surface hits as found. The 5-figure-page-textbook case warms once (~330 ms) and serves every subsequent search from cached structured text in tens of ms. |
+| **Smart Text Selection** | Double-click selects a word, triple-click selects a line. Drag selection follows reading order across line wraps with per-line highlight rectangles. |
+| **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
+| **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 
 ## Screenshot
 
@@ -141,6 +145,18 @@ meson setup builddir
 meson compile -C builddir
 ```
 
+### Flatpak (sandboxed)
+
+A Flatpak manifest at the project root builds Framework against `org.gnome.Platform//50` with bundled MuPDF and DjVuLibre. Install locally with:
+
+```bash
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
+flatpak-builder --user --install --force-clean build-flatpak io.github.virinvictus.framework.yml
+flatpak run io.github.virinvictus.framework
+```
+
+The sandbox has no network access, no broad filesystem access, and uses the Document portal for arbitrary file picks — `xdg-documents`, `xdg-download`, and `xdg-desktop` are reachable directly for command-line invocations.
+
 ## Usage
 
 ```bash
@@ -177,7 +193,11 @@ Sumatra's "just a viewer" philosophy &mdash; uncompromising performance, no edit
 
 - **Engine abstraction layer** (`src/EngineBase.h`, `EngineMupdf.cpp`) &mdash; the shape of our `FwDocument` interface follows the same pattern.
 - **Render-cache state machine** (`src/RenderCache.cpp`) &mdash; per-thread `curReqs[]` with abort cookies, semaphore-driven worker dispatch, and the "promote duplicate request to head of queue" trick informed `fw-cache.c`.
-- **Scheduled borrows** (roadmap Phase 11): in-flight render cancellation via `fz_cookie`; bytes-aware bitmap cache cap; tile-rendering as a high-zoom fallback; opportunistic per-page text extraction during render; double-click word selection (`TextSelection.cpp` `SelectWordAt`).
+- **In-flight render cancellation via `fz_cookie`** (shipped in v0.17.0; see `src/fw-document-pdf.c:pdf_cancel_render`) &mdash; per-render `fz_cookie` published under a separate `cookies_lock` mutex so cancel never blocks on the worker; `fz_run_page` sees `cookie->abort = 1` and bails at its next checkpoint. Pattern from `EngineMupdf.cpp:3178`.
+- **Bytes-aware cache cap** (shipped in v0.16.0; see `src/fw-cache.c`) &mdash; `total_cached_bytes` tracking + 512 MB default `byte_cap` with `FW_CACHE_BYTES_CAP_MB` override, replacing the page-count window. Pattern from `RenderCache.cpp:178` (`FreeIfFull`).
+- **Auto-reload on file change** (shipped in v0.21.0; see `src/fw-window.c`) &mdash; `GFileMonitor`-driven swap with state-restore, the LaTeX/Typst killer feature. Conceptual pattern from Sumatra's `FileWatcher.cpp` reimagined in GIO idioms.
+- **Smart text selection** (shipped in v0.19/v0.20; see `src/fw-document-pdf.c:pdf_select_at` and `pdf_get_selection_quads`) &mdash; double-click word, triple-click line, per-line drag highlights via `fz_snap_selection` + `fz_highlight_selection`. Pattern adapted from `TextSelection.cpp` `FindClosestGlyph` / `SelectWordAt`.
+- **Scheduled borrows** (roadmap Phase 11+): tile-rendering as a high-zoom fallback; opportunistic per-page text extraction during render (the v0.18 stext cache populates lazily, not during render).
 
 ### [Zathura](https://pwmt.org/projects/zathura/) and [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/) &mdash; *render pipeline*
 Copyright © 2009–2024 pwmt.org. Licensed [Zlib](https://github.com/pwmt/zathura/blob/develop/LICENSE).
@@ -185,8 +205,8 @@ Copyright © 2009–2024 pwmt.org. Licensed [Zlib](https://github.com/pwmt/zathu
 zathura's zero-copy `MuPDF`&rarr;`cairo` pipeline is the textbook minimalist implementation. Specific techniques in Framework today and planned:
 
 - **Zero-copy MuPDF render** (shipped in v1.6.0 as the v1.6 *Zero-Copy MuPDF Render* patch note; see `src/fw-document-pdf.c:render_page_direct`) &mdash; constructs the MuPDF pixmap *around* the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr`, eliminating the channel-shuffle loop entirely. Borrowed verbatim in pattern from `zathura-pdf-mupdf/render.c`.
-- **Cached `fz_stext_page` per parsed page** (planned, roadmap Phase 11) &mdash; build the structured-text page once at parse time, reuse for both selection and search. Pattern from `zathura-pdf-mupdf/page.c`.
-- **`g_thread_pool_set_sort_function` priority dispatch** (planned) &mdash; let the pool itself reorder pending jobs by `last_view_time` instead of walking a priority list. Pattern from `zathura/render.c:94`.
+- **Cached `fz_stext_page` per page** (shipped in v0.18.0; see `src/fw-document-pdf.c:pdf_get_or_extract_stext`) &mdash; lazy per-document cache, populated on first text-related call. Search across 901 pages: 332 ms cold &rarr; 48 ms warm (6.85&times; speedup). Pattern from `zathura-pdf-mupdf/page.c`.
+- **`g_thread_pool_set_sort_function` priority dispatch** (shipped in v0.14.0; see `src/fw-cache.c:render_job_compare`) &mdash; the pool reorders queued jobs by `last_view_time` so the most recently prioritized page runs next. Pattern from `zathura/render.c:94`.
 - **Hue-preserving recolor** (planned) &mdash; the `colorumax` HSL pipeline that preserves diagram color cues during dark-mode inversion, instead of a destructive bitwise-NOT. Pattern from `zathura/render.c`.
 
 ### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions and async search*
@@ -195,7 +215,7 @@ Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/bl
 Sioyek's PDF renderer is the most carefully tuned single-document Linux MuPDF reader we found.
 
 - **Closest-zoom fallback during transitions** (planned, roadmap Phase 11) &mdash; when the requested zoom level isn't ready, return the nearest-zoom rendered surface and scale it for display while the exact render proceeds. Pattern from `pdf_renderer.cpp:try_closest_rendered_page`.
-- **Async, progressive search worker** (planned) &mdash; dedicated thread that scans page-by-page using cached structured text, emitting progress every N pages. Pattern from `pdf_renderer.cpp:run_search`.
+- **Async, progressive search worker** (shipped in v0.7.0; see `src/fw-search.c`) &mdash; dedicated worker thread that scans page-by-page and posts hits back to the main loop via signals as they're found, with generation-counter cancellation when the query changes. Pattern from `pdf_renderer.cpp:run_search` (which emits `search_advance` every 16 pages).
 - **Slice-based rendering for huge pages** (planned, fallback only) &mdash; render in N&times;M slices when a single surface would exceed a memory threshold. Pattern from Sioyek's `(num_h_slices, num_v_slices)` per request.
 - **Hybrid threading model** (under evaluation) &mdash; one parent `fz_context`, per-thread `fz_clone_context`, per-(thread, path) `fz_document` &mdash; sits between Sumatra's full-clone and Framework's 8-instance model on the memory/parallelism curve.
 

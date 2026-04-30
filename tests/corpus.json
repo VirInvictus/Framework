@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Canonical test corpus for Framework's stress and benchmark suite.",
+    "Paths are relative to FW_TEST_CORPUS_ROOT (default: /home/bdkl/docs/Calibre Library).",
+    "Tags drive which samples each stress/bench target picks up.",
+    "Tags: large = >500 pages, scanned = image-heavy, djvu, comic, reflow = epub/mobi/fb2."
+  ],
+  "default_root": "/home/bdkl/docs/Calibre Library",
+  "samples": [
+    {
+      "path": "Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf",
+      "tags": ["large", "textbook", "pdf"]
+    },
+    {
+      "path": "Imre Lakatos/Proofs and Refutations_ The Logic of Mathematical Discovery (1006)/Proofs and Refutations_ The Logic of Mathe - Imre Lakatos.djvu",
+      "tags": ["djvu", "scanned"]
+    },
+    {
+      "path": "Andrew Hunt/The Pragmatic Programmer_ your journey to mastery, 20th Anniversary Edition, 2nd Edition (8)/The Pragmatic Programmer_ your journey to - Andrew Hunt.pdf",
+      "tags": ["pdf", "textbook"]
+    },
+    {
+      "path": "Troy Denning/The Verdant Passage (2)/The Verdant Passage - Troy Denning.epub",
+      "tags": ["reflow", "epub"]
+    }
+  ]
+}

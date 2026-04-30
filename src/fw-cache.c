@@ -10,13 +10,17 @@
 #include "fw-cache.h"
 #include "fw-debug.h"
 
+#include <stdlib.h>
+
 typedef struct {
-  cairo_surface_t *surface;      /* NULL if not yet rendered */
-  cairo_surface_t *prev_surface; /* previous-gen surface for zoom placeholder */
-  GdkTexture      *texture;      /* cached GPU texture wrapping surface */
-  GdkTexture      *prev_texture; /* cached texture for prev_surface */
-  gboolean         rendering;    /* TRUE if a job is in the pool for this page */
-  guint            render_gen;   /* render params generation when this surface was created */
+  cairo_surface_t *surface;        /* NULL if not yet rendered */
+  cairo_surface_t *prev_surface;   /* previous-gen surface for zoom placeholder */
+  GdkTexture      *texture;        /* cached GPU texture wrapping surface */
+  GdkTexture      *prev_texture;   /* cached texture for prev_surface */
+  gboolean         rendering;      /* TRUE if a job is in the pool for this page */
+  guint            render_gen;     /* render params generation when this surface was created */
+  gsize            size_bytes;     /* stride*height of `surface`, 0 if NULL */
+  gsize            prev_size_bytes;/* stride*height of `prev_surface`, 0 if NULL */
 } CacheEntry;
 
 /* Persistent low-resolution preview. Rendered once at open time (or first
@@ -48,6 +52,7 @@ typedef struct {
   int      rotation;
   guint    render_gen; /* render params generation at time of job creation */
   guint    cancel_gen; /* cancel generation at time of job creation */
+  gint64   last_view_time; /* monotonic µs at job creation — sort key for the pool */
 } RenderJob;
 
 typedef enum {
@@ -90,18 +95,49 @@ struct _FwCache {
 
   /* Throttle: avoid rebuilding priority on every scroll tick */
   gint64         last_priority_time;  /* monotonic µs of last set_priority */
+
+  /* Bytes-aware Tier 2 cap (Phase 11 Tier 1). Replaces the v1.3.3 fixed
+   * 30-page eviction bound — page-count caps mis-fit by orders of
+   * magnitude when surface size varies (a 10-page comic at fit-page is
+   * ~30 MB; a poster at 400% zoom is ~30 MB *per page*). Eviction only
+   * fires when total_cached_bytes > byte_cap, and prefers pages outside
+   * the priority window. Pages in the priority window are never evicted
+   * — for absurd zooms that exceed cap with just the visible band,
+   * slicing (Phase 11 Tier 2) is the proper fix. */
+  gsize          total_cached_bytes;
+  gsize          byte_cap;
 };
 
 G_DEFINE_FINAL_TYPE (FwCache, fw_cache, G_TYPE_OBJECT)
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
+/* Total byte cost of a cairo image surface — stride covers row alignment
+ * (cairo aligns to 4-byte boundaries for ARGB32, so stride may exceed
+ * 4*width by a few bytes per row). Returns 0 for NULL or non-image
+ * surfaces. */
+static gsize
+surface_byte_size (cairo_surface_t *s)
+{
+  if (!s) return 0;
+  if (cairo_surface_get_type (s) != CAIRO_SURFACE_TYPE_IMAGE) return 0;
+  int stride = cairo_image_surface_get_stride (s);
+  int height = cairo_image_surface_get_height (s);
+  if (stride <= 0 || height <= 0) return 0;
+  return (gsize) stride * (gsize) height;
+}
+
 static void
 cache_entry_free (CacheEntry *entry)
 {
   /* Drop texture BEFORE surface — the texture holds a reference to the
    * surface's pixel buffer via GBytes. Surface destruction after last
-   * texture reference is released is safe. */
+   * texture reference is released is safe.
+   *
+   * NOTE: this function does NOT update FwCache->total_cached_bytes —
+   * it has no access to self. Callers that explicitly remove entries
+   * from self->pages must subtract entry->size_bytes + entry->prev_size_bytes
+   * BEFORE the remove. The dispose path resets total_cached_bytes to 0. */
   if (entry->texture)
     g_object_unref (entry->texture);
   if (entry->prev_texture)
@@ -174,10 +210,18 @@ get_or_create_entry (FwCache *self, int page)
   return entry;
 }
 
-/* Max pages to keep in memory: visible + buffer ahead/behind.
- * At fit-width on 1920px, a typical page surface is ~3-6 MB.
- * 50 pages ≈ 150-300 MB — comfortable on 16 GB RAM. */
-#define CACHE_WINDOW 30
+/* Tier 2 byte cap. Total surface + prev_surface bytes across all cached
+ * pages. When exceeded, eviction drops outside-priority pages by oldest
+ * cache-table-iteration order until under cap. Sized for a typical
+ * 16 GB Linux laptop running with several other GUI apps; a comic at
+ * fit-width fits ~25 pages here, a textbook at fit-width fits ~150. */
+#define CACHE_BYTES_CAP_DEFAULT (512u * 1024u * 1024u)
+
+/* Upper bound on the priority_order array. Priority is visible (~1-3
+ * pages) plus NEAR_RANGE forward and NEAR_RANGE backward — fixed at
+ * compile time, so the array can be sized once per `fw_cache_set_priority`
+ * call. 64 is generous safety margin against unusual viewport sizes. */
+#define MAX_PRIORITY_PAGES 64
 
 /* ── Redraw helper ───────────────────────────────────────────────── */
 
@@ -197,6 +241,21 @@ safe_queue_draw (gpointer user_data)
 /* ── Thread pool worker ───────────────────────────────────────────── */
 
 static void submit_next_jobs (FwCache *self);
+
+/* GThreadPool sort comparator. Higher last_view_time runs first — newly
+ * pushed jobs (current viewport) jump to the front of the queue ahead of
+ * older queued jobs from a previous priority list. Pure GLib pattern from
+ * zathura's render.c. */
+static gint
+render_job_compare (gconstpointer a, gconstpointer b, gpointer user_data)
+{
+  (void) user_data;
+  const RenderJob *ja = a;
+  const RenderJob *jb = b;
+  if (jb->last_view_time > ja->last_view_time) return  1;
+  if (jb->last_view_time < ja->last_view_time) return -1;
+  return 0;
+}
 
 /* ── Thumbnail worker ─────────────────────────────────────────────── */
 
@@ -346,6 +405,8 @@ render_worker (gpointer data, gpointer user_data)
       cairo_surface_destroy (entry->prev_surface);
       entry->prev_surface = NULL;
     }
+    self->total_cached_bytes -= entry->prev_size_bytes;
+    entry->prev_size_bytes = 0;
     /* Replace current surface and its cached texture */
     if (entry->texture) {
       g_object_unref (entry->texture);
@@ -353,8 +414,11 @@ render_worker (gpointer data, gpointer user_data)
     }
     if (entry->surface)
       cairo_surface_destroy (entry->surface);
+    self->total_cached_bytes -= entry->size_bytes;
     entry->surface    = surface;
     entry->texture    = texture_from_surface (surface);
+    entry->size_bytes = surface_byte_size (surface);
+    self->total_cached_bytes += entry->size_bytes;
     entry->rendering  = FALSE;
     entry->render_gen = job->render_gen;
 
@@ -387,37 +451,33 @@ submit_next_jobs (FwCache *self)
   if (self->stopping || self->render_state == FW_RENDER_STATE_SCRUBBING)
     return;
 
-  /* Limit concurrency based on render state: cruising gets fewer slots
-   * to avoid burning CPU on pages that will scroll away before use. */
-  int job_limit = self->max_jobs;
-  if (self->render_state == FW_RENDER_STATE_CRUISING)
-    job_limit = 2;
+  /* Push every unrendered in-window page at once. The pool's sort function
+   * (render_job_compare) reorders by last_view_time so the most-recently-
+   * prioritized page runs next; the pool's own worker count caps concurrency.
+   * Earlier indices in priority_order have a slightly later timestamp so
+   * visible pages still beat near-buffer pages within a single push. */
+  gint64 base_time = g_get_monotonic_time ();
+  for (int i = 0; i < self->priority_len; i++) {
+    int pg = self->priority_order[i];
+    CacheEntry *entry = get_or_create_entry (self, pg);
+    if (entry->rendering)
+      continue;
+    if (entry->surface && entry->render_gen == self->render_gen)
+      continue;
 
-  while (self->active_jobs < job_limit) {
-    int page_to_submit = -1;
-    for (int i = 0; i < self->priority_len; i++) {
-      int pg = self->priority_order[i];
-      CacheEntry *entry = get_or_create_entry (self, pg);
-      if (!entry->rendering && (!entry->surface || entry->render_gen != self->render_gen)) {
-        page_to_submit = pg;
-        break;
-      }
-    }
-
-    if (page_to_submit == -1)
-      break;
-
-    CacheEntry *entry = get_or_create_entry (self, page_to_submit);
     entry->rendering = TRUE;
     self->active_jobs++;
 
     RenderJob *job = g_new0 (RenderJob, 1);
-    job->cache      = self;
-    job->page       = page_to_submit;
-    job->zoom       = self->zoom;
-    job->rotation   = self->rotation;
-    job->render_gen = self->render_gen;
-    job->cancel_gen = self->cancel_gen;
+    job->cache          = self;
+    job->page           = pg;
+    job->zoom           = self->zoom;
+    job->rotation       = self->rotation;
+    job->render_gen     = self->render_gen;
+    job->cancel_gen     = self->cancel_gen;
+    /* Subtract the index so earlier-in-priority pages have a later effective
+     * timestamp than later-in-priority pages submitted in this same call. */
+    job->last_view_time = base_time - i;
 
     g_thread_pool_push (self->pool, job, NULL);
   }
@@ -468,10 +528,13 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
       }
       if (entry->prev_surface)
         cairo_surface_destroy (entry->prev_surface);
-      entry->prev_surface = entry->surface;
-      entry->prev_texture = entry->texture;
-      entry->surface = NULL;
-      entry->texture = NULL;
+      self->total_cached_bytes -= entry->prev_size_bytes;
+      entry->prev_surface     = entry->surface;
+      entry->prev_texture     = entry->texture;
+      entry->prev_size_bytes  = entry->size_bytes;
+      entry->surface     = NULL;
+      entry->texture     = NULL;
+      entry->size_bytes  = 0;
       FW_TRACE_MEM ("prev_surface stash: page=%d", GPOINTER_TO_INT (key));
     }
   }
@@ -507,6 +570,7 @@ fw_cache_invalidate_all (FwCache *self)
   self->render_gen++;
   self->cancel_gen++;
   g_hash_table_remove_all (self->pages);
+  self->total_cached_bytes = 0;
 
   /* Free all parsed page handles */
   if (self->document) {
@@ -529,6 +593,9 @@ fw_cache_invalidate_page (FwCache *self, int page)
   g_return_if_fail (FW_IS_CACHE (self));
 
   g_mutex_lock (&self->lock);
+  CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (page));
+  if (entry)
+    self->total_cached_bytes -= entry->size_bytes + entry->prev_size_bytes;
   g_hash_table_remove (self->pages, GINT_TO_POINTER (page));
   g_mutex_unlock (&self->lock);
 }
@@ -539,19 +606,7 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
   g_return_if_fail (FW_IS_CACHE (self));
 
   g_mutex_lock (&self->lock);
-
-  /* Throttle: during cruising, skip rebuilds that arrive faster than
-   * every 150 ms — the viewport is moving and most work becomes stale. */
-  if (self->render_state == FW_RENDER_STATE_CRUISING) {
-    gint64 now = g_get_monotonic_time ();
-    if (now - self->last_priority_time < 150000) { /* 150 ms in µs */
-      g_mutex_unlock (&self->lock);
-      return;
-    }
-    self->last_priority_time = now;
-  } else {
-    self->last_priority_time = g_get_monotonic_time ();
-  }
+  self->last_priority_time = g_get_monotonic_time ();
 
   g_free (self->priority_order);
 
@@ -566,51 +621,35 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
   int last_visible  = visible_pages[n_visible - 1];
   int total = self->page_count;
 
-  /* Build priority: visible first, then a nearby buffer (7 forward,
-   * 3 backward), then remaining pages outward.  This ensures the
-   * immediate neighborhood is render-ready before filling the wider
-   * cache window.
+  /* Symmetric ±NEAR_RANGE preload window. The pool's sort function (by
+   * last_view_time) ensures workers pick the most recently prioritized page
+   * first, so we don't need a tiered "near vs far" split or throttling — the
+   * cache picks visible-first naturally as new priority pushes always carry
+   * a fresher timestamp than older queued jobs.
    *
-   * During cruising, only populate the near buffer — the viewport is
-   * moving and distant pages would be stale by the time they render.
-   * The full 50-page window is populated once the user stops scrolling. */
-  gboolean cruising = (self->render_state == FW_RENDER_STATE_CRUISING);
-  int window = CACHE_WINDOW < total ? CACHE_WINDOW : total;
+   * NEAR_RANGE is the per-side preload count. Total window = visible +
+   * 2*NEAR_RANGE, clamped to MAX_PRIORITY_PAGES as an array-size guard. */
+  #define NEAR_RANGE 10
+
+  int window = MAX_PRIORITY_PAGES < total ? MAX_PRIORITY_PAGES : total;
   self->priority_order = g_new (int, window);
   int idx = 0;
 
-  #define NEAR_FORWARD 7
-  #define NEAR_BACKWARD 3
-
-  /* 1. Visible pages */
+  /* 1. Visible pages first */
   for (int i = 0; i < n_visible && idx < window; i++)
     self->priority_order[idx++] = visible_pages[i];
 
-  /* 2. Nearby forward buffer */
-  int fwd_end = last_visible + 1 + NEAR_FORWARD;
-  if (fwd_end > total) fwd_end = total;
-  for (int i = last_visible + 1; i < fwd_end && idx < window; i++)
-    self->priority_order[idx++] = i;
+  /* 2. Symmetric ±NEAR_RANGE around the visible band, interleaved so
+   * forward and backward fill at equal pace. */
+  for (int step = 1; step <= NEAR_RANGE && idx < window; step++) {
+    int fwd = last_visible + step;
+    int bwd = first_visible - step;
+    if (fwd < total && idx < window)
+      self->priority_order[idx++] = fwd;
+    if (bwd >= 0 && idx < window)
+      self->priority_order[idx++] = bwd;
+  }
 
-  /* 3. Nearby backward buffer */
-  int bwd_start = first_visible - NEAR_BACKWARD;
-  if (bwd_start < 0) bwd_start = 0;
-  for (int i = first_visible - 1; i >= bwd_start && idx < window; i--)
-    self->priority_order[idx++] = i;
-
-  /* During cruising, stop here — don't fill the far window */
-  if (cruising)
-    goto done;
-
-  /* 4. Remaining pages ahead (beyond the near buffer) */
-  for (int i = fwd_end; i < total && idx < window; i++)
-    self->priority_order[idx++] = i;
-
-  /* 5. Remaining pages behind (beyond the near buffer) */
-  for (int i = bwd_start - 1; i >= 0 && idx < window; i--)
-    self->priority_order[idx++] = i;
-
-done:
   self->priority_len = idx;
 
   /* Build keep-set from priority window */
@@ -648,36 +687,52 @@ done:
     g_array_unref (to_remove);
   }
 
-  /* ── Tier 2: Evict rendered surfaces outside the window ── */
-  {
+  /* ── Tier 2: Evict rendered surfaces by byte cap ──
+   * Outside-priority surfaces are KEPT in cache up to byte_cap so that
+   * scrolling back into a previously-viewed area is instant. Eviction
+   * fires only when total_cached_bytes > byte_cap, and prefers
+   * outside-priority pages (priority pages are never evicted — they're
+   * about to be looked at). Pages with in-flight render jobs are also
+   * skipped: the worker's `entry` lookup at the store site would race
+   * with eviction otherwise. */
+  if (self->total_cached_bytes > self->byte_cap) {
     GHashTableIter iter;
     gpointer key, value;
     GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
     g_hash_table_iter_init (&iter, self->pages);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
-      if (!g_hash_table_contains (keep_set, key)) {
-        CacheEntry *entry = value;
-        /* Skip pages with in-flight render jobs — the worker will store
-         * its result soon.  Everything else outside the window is evicted
-         * regardless of generation to bound memory usage. */
-        if (!entry->rendering) {
-          int pg = GPOINTER_TO_INT (key);
-          g_array_append_val (to_remove, pg);
-        }
-      }
+      if (g_hash_table_contains (keep_set, key)) continue;
+      CacheEntry *entry = value;
+      if (entry->rendering) continue;
+      int pg = GPOINTER_TO_INT (key);
+      g_array_append_val (to_remove, pg);
     }
-    for (guint i = 0; i < to_remove->len; i++)
-      g_hash_table_remove (self->pages,
-                            GINT_TO_POINTER (g_array_index (to_remove, int, i)));
+    /* Remove victims one at a time, stopping when we drop under cap. */
+    gsize freed = 0;
+    guint dropped = 0;
+    for (guint i = 0; i < to_remove->len; i++) {
+      if (self->total_cached_bytes <= self->byte_cap) break;
+      int pg = g_array_index (to_remove, int, i);
+      CacheEntry *e = g_hash_table_lookup (self->pages, GINT_TO_POINTER (pg));
+      if (!e) continue;
+      gsize entry_bytes = e->size_bytes + e->prev_size_bytes;
+      self->total_cached_bytes -= entry_bytes;
+      freed += entry_bytes;
+      dropped++;
+      g_hash_table_remove (self->pages, GINT_TO_POINTER (pg));
+    }
     g_array_unref (to_remove);
+    FW_TRACE_MEM ("byte-cap evict: dropped=%u freed=%zu remaining=%zu cap=%zu",
+                  dropped, freed, self->total_cached_bytes, self->byte_cap);
   }
 
   g_hash_table_unref (keep_set);
 
-  FW_TRACE_MEM ("cache after eviction: surfaces=%u parsed=%u priority=%d",
+  FW_TRACE_MEM ("cache after eviction: surfaces=%u parsed=%u priority=%d bytes=%zu",
                 g_hash_table_size (self->pages),
                 g_hash_table_size (self->parsed),
-                self->priority_len);
+                self->priority_len,
+                self->total_cached_bytes);
 
   /* Submit renders for pages in the window */
   submit_next_jobs (self);
@@ -968,6 +1023,11 @@ fw_cache_init (FwCache *self)
   if (n_threads > 8) n_threads = 8;
 
   self->pool = g_thread_pool_new (render_worker, NULL, n_threads, FALSE, NULL);
+  /* Sort by last_view_time so the most-recently-prioritized page runs
+   * next, regardless of when its job was pushed. New high-priority pushes
+   * (current viewport) jump ahead of older queued jobs. */
+  g_thread_pool_set_sort_function (self->pool, render_job_compare, NULL);
+
   /* Single dedicated thread for thumbnails — background priority, never
    * competes with the main render pool. */
   self->thumb_pool = g_thread_pool_new (thumb_worker, NULL, 1, FALSE, NULL);
@@ -975,4 +1035,16 @@ fw_cache_init (FwCache *self)
   self->active_jobs = 0;
   self->render_state = FW_RENDER_STATE_STATIC;
   self->scale_factor = 1;
+  self->total_cached_bytes = 0;
+  /* Honour FW_CACHE_BYTES_CAP_MB env var for tuning and testing — falls
+   * back to the compiled-in default if unset or unparseable. */
+  const char *cap_env = g_getenv ("FW_CACHE_BYTES_CAP_MB");
+  if (cap_env) {
+    char *end = NULL;
+    long mb = strtol (cap_env, &end, 10);
+    self->byte_cap = (mb > 0) ? (gsize) mb * 1024u * 1024u
+                              : CACHE_BYTES_CAP_DEFAULT;
+  } else {
+    self->byte_cap = CACHE_BYTES_CAP_DEFAULT;
+  }
 }

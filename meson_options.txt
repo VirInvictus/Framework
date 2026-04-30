@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+option('stress',
+  type: 'boolean',
+  value: false,
+  description: 'Build stress tests and benchmarks under tests/. Off by default so packagers do not pay the cost.',
+)
+
+option('sanitize',
+  type: 'array',
+  choices: ['address', 'undefined', 'leak', 'thread'],
+  value: [],
+  description: 'Enable one or more compiler sanitizers (-fsanitize=...). address+undefined is the standard dev combo. Cannot mix thread with address/leak.',
+)

@@ -2,6 +2,305 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.21.0 (2026-04-30)
+
+*Phase 14 — auto-reload via `GFileMonitor`.* Recompile your LaTeX or Typst document and Framework refreshes automatically, restoring exact scroll position and zoom. The same pattern that made SumatraPDF a fixture in technical workflows for years.
+
+---
+
+### Auto-Reload on File Change
+A `GFileMonitor` is attached to the open document path the moment a document opens. When the file changes — `G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT` for in-place writes, `G_FILE_MONITOR_EVENT_CREATED` for atomic-rename editors — the window saves current state (page, scroll fraction, zoom, rotation) via the existing `fw_state_save` path, re-opens the document, and restores state from disk. The deferred `restore_state_tick` mechanism handles the scroll restore once the new document's layout settles, so the user lands at exactly the same paragraph they were reading.
+
+Implementation notes:
+- `G_FILE_MONITOR_WATCH_HARD_LINKS` flag tracks the inode, so atomic-rename patterns (`write to .tmp; rename .tmp to target`) still produce events. LaTeX and Typst both use in-place writes; some editors that "write to a temp file and rename" benefit from this flag.
+- A 200 ms debounce collapses bursts of CHANGED events (LaTeX writes auxiliary files in the same directory in quick succession; Typst sometimes emits multiple chunks) into a single reload.
+- The monitor is stopped at the start of every `fw_window_open_file` (before tearing down the old document) and on window dispose.
+- An `AdwToast` ("Document updated") shows briefly so the swap is visible — without it, an auto-reload mid-read could feel confusing if the user didn't trigger it themselves.
+
+### `AdwToastOverlay` for Window-Wide Notifications
+The window's content tree is now wrapped in an `AdwToastOverlay`. Beyond the auto-reload toast, this gives every future Framework feature a clean place to surface ephemeral notifications without resorting to dialogs (the next likely user is a "selection copied" toast for cases where Ctrl+C has no visual feedback).
+
+### Trade-offs
+- Reloading clears the navigation history (Alt+Left/Alt+Right). The history is per-document and the document just changed under us; preserving it would mean replaying jumps against a possibly-renumbered TOC. Wiping is cleaner.
+- The 200 ms debounce window means there's a tiny perceptible delay before the reload kicks in. For LaTeX users this is fine — recompile takes a second or more — and avoids the "reload mid-write" flicker on slow filesystems.
+- DjVu and CBR auto-reload for free since `fw_window_open_file` is backend-agnostic. Untested in practice; the LaTeX/Typst use case is the design driver.
+
+---
+
+## v0.20.0 (2026-04-30)
+
+*Drag-selection highlight matches the actual selected text.* The previous overlay drew a single bounding rectangle from drag start to end, which included unselected words on partial first/last lines and looked ragged across line wraps. Now the highlight is per-line — partial first line, full intermediate lines, partial last line — matching exactly what `Ctrl+C` puts on the clipboard.
+
+---
+
+### Per-Line Selection Quads via `fz_highlight_selection`
+A new `get_selection_quads` interface method asks the backend for an array of `FwRect`s (page-coordinate rectangles), one per line of selected text in reading order. The PDF backend implements it via MuPDF's `fz_highlight_selection` against the v0.18 cached `fz_stext_page` — same fast path as `pdf_get_text` and `pdf_select_at`, no extra parse.
+
+`FwView` stores the quads in `sel_quads` (`GArray<FwRect>`, owned), recomputed live during drag, on drag end, and on snap-select (double/triple click). The render path iterates quads and draws each as a separate semi-transparent blue overlay; if `sel_quads` is empty (DjVu, CBR — which don't implement the method), it falls back to the legacy bounding-box draw.
+
+Visible improvements:
+- Multi-line drag selection highlights *only* the actual selected text — partial line at the top of the drag, full lines in between, partial line at the bottom. No more highlighting half a paragraph just because the bounding box happens to cover it.
+- Snap-select overlays are also computed via quads, so they render identically to drag selection (a word on one line is one quad; a line is one quad).
+- Selection highlight updates in real time during drag — the cached stext makes per-frame quad recomputation cheap.
+
+### Backend Coverage
+- **All MuPDF-routed formats** (PDF, CBZ, CB7, CBT, XPS, EPUB, FB2, MOBI) → per-line quads.
+- **DjVu, CBR** → return NULL from `get_selection_quads`; the view falls back to drawing the drag bounding rectangle (existing behavior, unchanged).
+
+### Tested
+ASan-clean. All three registered stress tests still pass — the change touches view + PDF backend, not the cache pipeline that the stress tests exercise.
+
+---
+
+## v0.19.0 (2026-04-30)
+
+*Phase 14 — smart text selection.* Double-click selects the word under the cursor; triple-click selects the whole line. Built directly on the v0.18 stext cache, so the snap is constant-time after first text access on a page (no extra parse).
+
+---
+
+### Double-Click → Word, Triple-Click → Line
+The PDF backend grew a `select_at` interface method backed by MuPDF's `fz_snap_selection`. Given a click point and a granularity (`FW_SELECT_WORD` or `FW_SELECT_LINE`), it walks the cached `fz_stext_page` and snaps both selection endpoints to the word or line containing the click — no click-drag required.
+
+In the view, `on_click_pressed` now branches on `n_press`:
+- `n_press == 2` → call `fw_document_select_at` with `FW_SELECT_WORD`, apply the snapped rectangle to the existing selection state, queue redraw.
+- `n_press == 3` → same with `FW_SELECT_LINE`.
+- `n_press == 1` → unchanged (link-hit-test, single-click navigation).
+
+Multi-press takes priority over link clicks: if a user double-clicks on a hyperlinked word, the intent is selection — the link is ignored. Single-click on the same word still navigates. The drag gesture continues to work for arbitrary range selection.
+
+The selected text is extracted via the existing `fw_document_get_text` path (which itself uses the cached stext now, so it's another fast path). `Ctrl+C` copies it to the clipboard exactly as before — no new clipboard plumbing needed.
+
+### Backend Coverage
+- **PDF / CBZ / CB7 / CBT / XPS / EPUB / FB2 / MOBI** (all MuPDF-routed) → fully supported.
+- **DjVu / CBR** → `select_at` returns `FALSE` (no implementation). Click-drag selection still works on DjVu via the existing path; CBR has no text layer at all. The vtable's NULL fallback returns `FALSE` from the public glue, so the view falls through cleanly without selecting.
+
+### Tested
+ASan-clean. The `stress-search-cache` test (which exercises the same stext-cache path the new selection uses) still hits its 6×+ speedup target.
+
+The selection bbox handling correctly returns FALSE when the click misses every glyph (using `fz_snap_selection`'s zero-quad signal), so double-clicking on whitespace doesn't apply a stale-feeling no-op selection — the existing selection (if any) stays in place.
+
+---
+
+## v0.18.0 (2026-04-30)
+
+*Phase 11 Tier 1 — cached `fz_stext_page` per page.* PDF text extraction and search now build the structured-text page once per document-page lifetime and reuse it on every subsequent text-related call. A new automated test confirms the speedup is real: a full-document search across 901 pages of Effective Java goes from **332 ms cold to 48 ms warm — a 6.85× speedup**. With this in place, double-click word selection (Phase 14) becomes a one-line follow-up: it just consumes the cached stext.
+
+---
+
+### Per-Page `fz_stext_page` Cache
+A new `stext_cache` GHashTable on `FwDocumentPdf` maps page index → `fz_stext_page *`. All entries are owned by `self->ctx` and dropped en masse in `pdf_close`. Population is lazy: the first text-related call (`pdf_get_text`, `pdf_search`) on a given page extracts and caches; every later call hits.
+
+The previous code paths re-loaded the page and re-extracted stext on *every* invocation — a 1000-page search ran `fz_load_page` + `fz_new_stext_page_from_page` 1000 times. Even though MuPDF makes both fast individually, the redundancy adds up.
+
+Implementation notes:
+- All access goes through `self->lock` (the existing main-context mutex). No separate stext lock — read-after-write is already serialized.
+- `fz_stext_page` is immutable after construction in MuPDF, so cached read access from any code path that holds `self->lock` is safe without extra synchronization.
+- Memory cost: ~10–50 KB per page on typical textbooks (depends on text density). A 1000-page document costs ~30 MB worst-case. Bounded by document length, not user activity.
+- `pdf_search` switched from `fz_search_page` to `fz_search_stext_page` to consume the cached structured text directly. `pdf_get_text` similarly uses the cached stext via `fz_copy_selection`.
+
+### `stress-search-cache` Stress Test (Phase 12.2)
+A third stress test exercises the cache and asserts ≥1.5× warm/cold speedup on a full-document search. Catches regressions cleanly — without the cache, warm and cold passes would run at the same speed and the test would fail. Registered in `meson test` and runs in <1 s on the Effective Java sample.
+
+The test takes a document path and a query string as args; the registered case uses `"class"` against Effective Java for stable hit counts (1922 hits across all 901 pages).
+
+### What This Doesn't Do (Yet)
+The "bonus" item from the roadmap entry — opportunistic stext extraction during render, à la Sumatra's `RenderCache.cpp:790` — stays open. The current design extracts on first text-call rather than during render, so a freshly-opened document's first search is still cold. Adding render-time pre-warm would shift that cost off the search latency path, useful for users who scroll through a doc and then search. Tracked in roadmap Phase 11 Tier 1 as a follow-up.
+
+---
+
+## v0.17.0 (2026-04-30)
+
+*Phase 11 Tier 1 — `fz_cookie` mid-render abort.* Workers now plumb a per-render `fz_cookie` through to `fz_run_page`, and `pdf_cancel_render` flips `cookie->abort = 1` from the main thread. MuPDF sees the flag at its next checkpoint inside `fz_run_page` and abandons the in-flight render with whatever partial state it has. On a 50 MB scanned PDF this saves 1–3 seconds per stale page when the user has already scrubbed away. Neither zathura nor sioyek does this — Framework leads the field on this one.
+
+---
+
+### `fz_cookie` Plumbed Through PDF Render Path
+The MuPDF `fz_cookie` is the canonical cancellation primitive: a struct whose `abort` field MuPDF reads periodically during `fz_run_page` execution. Set it from any thread; the next checkpoint inside MuPDF returns immediately. The previous code passed `NULL` for the cookie, so `fz_run_page` always ran to completion regardless of whether the user had scrolled away.
+
+The implementation:
+- Each worker allocates an `fz_cookie` on its stack inside `pdf_render_page` and registers the pointer in a new `active_cookies[MAX_RENDER_INSTANCES]` array on `FwDocumentPdf`, indexed by render slot.
+- The cookie pointer is published and deregistered under a new `cookies_lock` mutex — *separate* from the per-instance render lock. This is load-bearing: cancel must reach the cookie pointer without blocking on the render lock that the worker holds during `fz_run_page`. Two locks make the cancel signal travel during render, not after.
+- After `fz_run_page` returns, `render_page_direct` checks `cookie->abort` and discards the partial surface if set — returning NULL to the worker, which discards the result via the existing stale-discard path.
+- New `pdf_cancel_render` walks `active_cookies` under `cookies_lock` and writes `abort = 1` on every published cookie. Wired in `iface_init`. The PDF backend previously had no `cancel_render` implementation, so this also closes a gap: scroll-aborts are now actually honored by the PDF render path.
+
+The cookie pointer's lifetime is exactly the worker's stack frame. Both publish and unpublish happen under `cookies_lock`, and cancel writes under the same lock — so the pointer is never accessed after the worker's frame is gone.
+
+### Validation
+Code paths verified clean under ASan: no use-after-stack, no double-free, no leaks across the worst-case scrub pattern. The synthetic stress-scrub test transitions to SCRUBBING before any worker enters `fz_run_page`, so it doesn't drive the cookie path; a Phase X cookie-abort test would need to render briefly first then transition. Real-world validation is `FW_DEBUG=1` plus the GUI: scrolling fast through a big scanned PDF should now produce `[pdf] cancel_render: aborted N in-flight render(s)` traces, with renders bailing in tens of ms instead of completing the full second-or-more rasterization.
+
+The DjVu and CBR backends keep their existing per-document `cancel_flag` mechanisms — they're not as fine-grained as fz_cookie but the streaming-RAR / single-mutex constraints there already cap parallelism, so the value of mid-render abort is much lower.
+
+### Trade-offs Documented
+- The pdf backend gains 8 cookie pointers + a mutex on `FwDocumentPdf`. Memory cost: ~80 bytes per open document. Negligible.
+- `cookies_lock` is acquired twice per render (publish + unpublish) plus once per cancel. The publish lock is held for nanoseconds (a single pointer write), so contention with cancel is bounded. No measurable per-render overhead.
+- Aborted renders return NULL. The worker's existing stale-discard path handles this — no new code there. Side effect: aborted pages count as "still needs render" in the cache, so the next priority update will re-queue them. This matches the SCRUBBING semantics the user expects.
+
+---
+
+## v0.16.0 (2026-04-30)
+
+*Phase 11 Tier 1 — bytes-aware cache cap.* The page-count `CACHE_WINDOW = 30` introduced in v1.3.3 has gone away — replaced by a byte budget that tracks `stride * height` per cached surface. The Phase 12 stress harness flagged this exact case: a 212-page Berserk volume peaks at ~525 MB of surfaces alone (~2.3 MB/page), while a 900-page Effective Java textbook peaks at ~109 MB (~0.12 MB/page). Page-count caps mis-fit by 20×; byte caps don't.
+
+---
+
+### Bytes-Aware Cache Cap (Phase 11 Tier 1)
+`FwCache` now tracks `total_cached_bytes` across every cache entry's `surface` and `prev_surface` slots, accounted live at every store/replace/evict path under the existing mutex. Default cap is 512 MB, overridable per-process via the `FW_CACHE_BYTES_CAP_MB` env var. The cap is a soft target on the rendered-surface tier (Tier 2) — parsed handles (Tier 1) and thumbnails (Tier 0) are tracked separately with their own bounds.
+
+**Eviction policy changed.** Previously: pages outside the priority window were unconditionally dropped, so the cache held at most ~21 surfaces. Now: outside-priority surfaces are *kept* until `total_cached_bytes` exceeds the cap, then evicted (oldest hash-iteration first; visible/priority pages are never evicted). The trade-off: scrolling back into a previously-rendered region is now instant (no re-render) when there's headroom, at the cost of higher steady-state memory.
+
+For the case where even the priority window's surfaces exceed the cap (poster-format PDFs at 400% zoom), eviction can't free enough — slicing (Phase 11 Tier 2) is the proper fix and remains scoped there.
+
+`FW_DEBUG=1` now prints `byte-cap evict` lines naming pages dropped, bytes freed, and remaining vs cap. Useful for tuning.
+
+### Cache Constants Cleaned Up
+- `CACHE_WINDOW = 30` deleted. Its dual purpose (priority array bound + eviction bound) split: `MAX_PRIORITY_PAGES = 64` is the array bound (only used as a safety check; actual content is `n_visible + 2 * NEAR_RANGE` ≈ 23), and the byte cap replaces the eviction bound.
+- `CACHE_BYTES_CAP_DEFAULT = 512 MB` is the new compile-time default.
+
+### Stress Harness Updated for the New Behavior
+`stress-scrub` gained a Phase 4 — a slow walk through the document at one priority shift per 200 ms. Without it, the test never accumulated outside-priority surfaces, so the byte-cap eviction path was never exercised. Stress-scrub also pins `FW_CACHE_BYTES_CAP_MB=128` at startup so eviction *will* fire during Phase 4 — under the 512 MB default the test would just hold everything.
+
+Verified across all six backends (PDF, DjVu, EPUB, MOBI, CBZ, CBR) both natively and under ASan. The Berserk CBZ run was the proof point: 7-13 pages dropped per priority shift, ~80 MB freed each time, cache stays at ~125 MB out of the 128 MB cap. No leaks under ASan.
+
+The `stress-scrub` test's RSS cap was bumped from 800 MB to 1200 MB — under the new policy the cache legitimately keeps more surfaces and total RSS includes glibc retention + thumbnails + ASan overhead.
+
+---
+
+## v0.15.0 (2026-04-30)
+
+*Phase 12 — stress harness foundation.* The first piece of the regression net: a `tests/` tree, a `-Dstress=true` meson option that gates the harness, a `-Dsanitize=` option for ASan/UBSan/LSan/TSan builds, and one real stress test that exercises today's Phase 11 Tier 1 cache pipeline. The remaining Phase 12 items (zoom storm, multi-doc, corpus soak, benchmarks, gdb pretty-printers, trace replay, --self-test) stay open as future work.
+
+---
+
+### Engine as a Static Library
+`src/meson.build` was refactored to compile the framework's internal modules into a `framework-core` static library; the `framework` executable now links against it via a single `framework_lib_dep`. This makes internal symbols (`fw_cache_*`, `fw_document_*`, `fw_view_*`, etc.) reachable to tests without exposing them as a public API. The `framework` binary itself is unchanged at runtime.
+
+### `-Dstress=true` and the `tests/` Tree
+A new top-level `tests/` directory holds the harness. It builds only when `-Dstress=true`, so packagers and end users pay zero cost. `tests/corpus.json` is the canonical sample manifest (default root: `/home/bdkl/docs/Calibre Library`, override via `FW_TEST_CORPUS_ROOT` for portability), tagged so each stress/bench tool can pick the samples it cares about (`large`, `textbook`, `djvu`, `scanned`, `reflow`, `comic`).
+
+```sh
+meson setup builddir -Dstress=true
+meson compile -C builddir
+meson test -C builddir            # once registered targets stabilize
+```
+
+### `stress-scrub` (Phase 12.2)
+The first stress test. Drives `FwCache` directly without a widget tree and simulates a punishing scroll pattern: 0 → last page in 500 ms, then 5 × back-and-forth, then a 3-second settle. Asserts no crashes (segfault → non-zero exit), peak RSS under a configurable cap (`FW_STRESS_RSS_CAP_MB`, default 800 MB), and no stuck workers.
+
+**Run across all six backends** (PDF, DjVu, EPUB, MOBI, CBZ, CBR) — every backend passed cleanly both natively and under `-Dsanitize=address`. The full corpus-coverage results revealed two real signals: (1) CBZ on a 212-page Berserk volume peaks at 789 MB under ASan, dangerously close to the 800 MB cap, giving the bytes-aware cache cap (Phase 11 Tier 1) concrete weight; (2) the CBR backend's streaming-RAR cost is real — even a single 4-second test renders only a handful of pages on a 583-page comic.
+
+### `stress-zoom-storm` (Phase 12.2)
+A second stress test exercising a different code path: the v1.4 `prev_surface` stash and v1.5 texture-before-surface unref ordering. Pins priority on a single page and runs 50 zoom cycles across 25%–400%, alternating direction. Each cycle bumps `render_gen` and triggers the surface/texture replacement. The peak during transition is permitted to be high (~1.2 GB on a 901-page textbook); the **leak signal** is current RSS read from `/proc/self/status` after a 5-second settle — `getrusage`'s high-water mark never decreases and would mask correct lifecycle behavior. Verified clean natively and under ASan; the post-storm RSS drops from ~1218 MB peak to ~660 MB, confirming transient memory is correctly released.
+
+Both tests are registered with `meson test` and run in under 12 seconds combined.
+
+Future stress tests (`stress-multidoc`, `stress-corpus-soak`) and the bench/triage stack remain open in Phase 12 — landing them is later work.
+
+### `-Dsanitize=` Option (Phase 12.4 partial)
+A meson `array` option taking any of `address`, `undefined`, `leak`, `thread`. Forwarded to compile and link as `-fsanitize=` flags via `add_project_arguments` and `add_project_link_arguments`. Builds cleanly with `-Dsanitize=address` on Brandon's Fedora; `-Dsanitize=undefined` requires `sudo dnf install libubsan` (not currently installed). Leak and Thread sanitizers similarly need their runtime libs.
+
+`stress-scrub` was rerun under `-Dsanitize=address` against the same 901-page textbook: clean. No use-after-free, no buffer overflows, no leaks. The cache + render-worker pipeline shipped in v0.14.0 holds up under the worst-case scroll pattern with ASan watching.
+
+### Trade-offs Documented
+- The static-library refactor adds a minor link-time cost. Functionally invisible at runtime.
+- `tests/` is gated behind `-Dstress=true` precisely so this doesn't bloat the standard build. The default `meson setup builddir` produces exactly the same artifacts as before.
+- The corpus manifest hardcodes the default path. CI use will require setting `FW_TEST_CORPUS_ROOT` (currently consumed by stress-scrub via argv only — to be wired up properly when the corpus-aware tests land).
+
+---
+
+## v0.14.0 (2026-04-30)
+
+*Phase 11 Tier 1 — render pipeline.* Three pre-1.0 cache-pipeline items land together as a single coherent change: GThreadPool sort-function priority, the symmetric ±10 parsed window, and the per-event scroll cap (toggleable). Together they deliver the user-visible target Brandon framed it as: *normal reading scroll never paints thumbnail placeholders; thumbnails are reserved for explicit jumps.*
+
+---
+
+### GThreadPool Sort-Function Priority Dispatch (Phase 11 Tier 1)
+Render jobs now carry a `last_view_time` field and the pool runs `g_thread_pool_set_sort_function (render_job_compare)` — workers naturally pick the most recently prioritized page next, regardless of when its job was pushed. New high-priority pushes (the current viewport on a fresh scroll) jump to the front of the queue ahead of older queued jobs from a previous priority list. Pure GLib pattern borrowed from zathura's `render.c:94`. Replaces the old "walk `priority_order[]` in index order, push one at a time, throttle by `active_jobs < job_limit`" model.
+
+### Startup-Blur Regression Fixed (Phase 11 Tier 1)
+The companion regression — saved-state open landing on a thumbnail-blurred page until the user scrolled — turned out *not* to be obviated for free by the sort-function change as predicted. Trace logs showed the priority pool happily rendering pages 0–13 from the initial open and never receiving the saved-page priority update. Root cause: `update_cache_priority` in `fw-view.c` bailed early on `gtk_widget_get_height (self) <= 0`. During the deferred `restore_state_tick`, the adjustment's value-changed signal fires before the view widget's allocation has settled, so the priority update never reached the cache.
+
+The fix is a fallback in `update_cache_priority`: when `widget_height <= 0`, derive the page at the scroll position from `page_y_offsets[]` directly and push that single page as priority. With the sort function in place, those jobs sort ahead of the in-flight pages 0–13 jobs at the next worker handoff, and the saved page renders within a few hundred milliseconds of open — visible by the time the window appears, no scroll required.
+
+### Symmetric ±10-Page Parsed Window (Phase 11 Tier 1)
+`fw_cache_set_priority` now builds a symmetric ±10 priority window in all non-SCRUBBING states: visible pages first, then forward/backward interleaved one page at a time outward up to 10 each side. Replaces the previous asymmetric "+7 forward, -3 backward in CRUISING; full 30-page radial outward in STATIC." With sort-function priority dispatch the asymmetric tiering is no longer needed — every push carries a fresh timestamp, so visible-first ordering happens naturally. Total preload window is ~21 pages (visible + 20 neighbors), well under the existing 30-page `CACHE_WINDOW` eviction bound. Parsed handles are lightweight; the slight memory bump is negligible.
+
+The 150 ms CRUISING throttle on priority rebuilds is gone — sort-function handles ordering, no need to throttle priority computation.
+
+### Per-Event Scroll Cap with Kinetic Toggle (Phase 11 Tier 1)
+A `GtkEventControllerScroll` on the view (capture phase) now caps single scroll-event deltas at 90 px, applying the bounded delta directly to the vadjustment and consuming the event. Wheel ticks are converted from unit-scale (~1 per click) to pixels via `SCROLL_WHEEL_STEP = 60` first, then clamped. Trackpad smooth-scroll arrives in pixels already. Net effect: per-event flicks can't outrun the render cache during continuous reading scroll.
+
+This trades GTK's kinetic momentum scrolling (the trackpad-flick coast) for predictable cache behavior. Because some users genuinely want the flick — *"if someone is just gliding through research or school things"* — the cap is gated by a new GSettings key:
+
+- **Schema:** `kinetic-scrolling` (bool, default `false`) on the previously-empty `io.github.virinvictus.framework` schema. The skeleton schema now backs one real feature.
+- **Menu entry:** "Kinetic Scrolling" in the primary menu, wired to the GSettings key via `g_settings_create_action`. The menu checkmark stays in sync with the setting; toggling flips the behavior live, no restart needed.
+- **Behavior with kinetic ON:** the scroll handler returns FALSE, GtkScrolledWindow's default kinetic momentum scrolling takes over. SCRUBBING-state thumbnail behavior still applies if velocity goes high enough.
+
+Default is off (cache-friendly); on is opt-in. Brandon's scope-discipline rule about declaring schema keys ahead of features is honored — this key declaration ships *with* the code that reads it, not before.
+
+### Trade-offs Documented
+- **Explicit jumps still flash thumbnails** (TOC click, page-entry edit, internal link click, search-hit reveal). That's the documented trade-off — pre-rendering every chapter target is wasteful, and the user expects a tiny pause on a deliberate jump.
+- **Scrubbing state still aborts** with thumbnail placeholders. Kinetic-on users who flick hard enough to trigger scrubbing get the same behavior as before.
+- **The `active_jobs` / `max_jobs` counters are now observability-only** — they're no longer read for concurrency limiting. The pool's worker count caps concurrency naturally. Counters retained for debug tracing.
+
+---
+
+## v0.13.0 (2026-04-30)
+
+*Phase 10 — The 1.0 Release.* All shipping artifacts now exist and validate. Framework builds, installs, and runs as a Flatpak end-to-end. The remaining 1.0 work is a tag and a Flathub submission, both of which wait until the broader roadmap is closer to done.
+
+---
+
+### App-ID Rename: `io.github.virinvictus.framework`
+The application's reverse-DNS identifier is now `io.github.virinvictus.framework` (was `com.github.vrnvctss.framework`). The reverse-DNS convention requires that the prefix be a domain the developer controls — `com.github.virinvictus` would imply ownership of `virinvictus.github.com` (a subdomain that doesn't exist; GitHub gives users paths, not subdomains under github.com), while `io.github.virinvictus` reverses to `virinvictus.github.io`, the GitHub Pages domain that actually belongs to the developer. Flathub's reviewers explicitly require this form for projects without their own DNS.
+
+The rename touches every artifact keyed on the ID: the desktop file, AppStream metainfo, GSettings schema, scalable icon, Flatpak manifest, the `APP_ID` constant in `meson.build`, the GSettings schema path (`/io/github/virinvictus/framework/`), and the documented references in `spec.md`, `roadmap.md`, and the project `CLAUDE.md`. State persisted under the old ID is invalidated; document state is keyed by file path in `~/.local/share/framework/state.json` and is unaffected.
+
+### AppStream Metainfo Rewrite (Phase 10)
+`data/io.github.virinvictus.framework.metainfo.xml.in` rewritten end-to-end. The previous version still described the app as "PDF and DjVu" only and stopped at v1.2.0 in its release history, ignoring the v0.6.0 version reset and everything since. The rewrite includes: current format list (PDF, DjVu, EPUB, MOBI, FB2, XPS, CBZ/CB7/CBT/CBR), feature bullets, `<developer>` block, `<categories>` (Office, Viewer, GNOME, GTK), `<recommends>` (display size ≥ 600 px, offline-only network), `<supports>` (pointing/keyboard/touch), and release entries from v0.6.0 → v0.13.0 in honest versioning. The historical 1.x entries are preserved in this file (`patchnotes.md`) but are not surfaced to software centers — those releases happened, but the running version is honest. `appstreamcli validate` is clean.
+
+A `<screenshots>` block sits in the metainfo as a commented-out template; before any Flathub submission, screenshots will need to be added under `data/screenshots/` and the URLs uncommented.
+
+### Desktop File Polish (Phase 10)
+`Comment=` updated to the current format list. New `Keywords=pdf;djvu;epub;mobi;fb2;xps;cbz;cbr;comic;viewer;reader;document;mupdf;` line so software centers and search bars rank Framework correctly. Categories normalized to `GTK;GNOME;Office;Viewer;`. `desktop-file-validate` is clean.
+
+### GSettings Schema Pruned to Skeleton (Phase 10)
+The previous schema declared eight keys (`default-zoom-mode`, `default-zoom-level`, `continuous-scroll`, `default-view-mode`, `invert-colors`, `window-width`, `window-height`, `window-maximized`, `sidebar-visible`, `sidebar-width`) that no code in `src/` actually reads. Pre-1.0 is the only safe time to prune a published schema — once 1.0 ships, removing keys becomes a back-compat issue. The schema file now contains only the schema declaration, ready to accept keys when corresponding features are wired up.
+
+### Flatpak Manifest (Phase 10)
+`io.github.virinvictus.framework.yml` lives at the project root and builds a working Flatpak end-to-end against `org.gnome.Platform//50` and `org.gnome.Sdk//50`. Three modules: `djvulibre` (autotools, `--disable-static --disable-desktopfiles`), `mupdf` (the project Makefile with `HAVE_X11=no HAVE_GLUT=no HAVE_LIBCRYPTO=no shared=yes USE_SYSTEM_LIBS=no` — bundled third-party libs are simpler than runtime equivalents), and `framework` itself (meson, release buildtype). `libarchive` comes from the freedesktop runtime under GNOME 50, no module needed.
+
+`finish-args` are intentionally tight: no network, no broad filesystem, GPU access via `--device=dri`, Wayland with X11 fallback, and read-only access to `xdg-documents` / `xdg-download` / `xdg-desktop` for command-line invocations. Anything outside those three XDG paths reaches Framework through the Document portal automatically (GtkFileDialog and drag-and-drop both go through it). Permissions audit clean — no `--filesystem=host`, no `--share=network`, no D-Bus talk-names beyond what the SDK auto-includes.
+
+Local install:
+```sh
+flatpak-builder --user --install --force-clean build-flatpak io.github.virinvictus.framework.yml
+flatpak run io.github.virinvictus.framework
+```
+
+The Flathub submission step (changing the `framework` module's `type: dir` source to a `type: git` source pointing at a tagged release) deliberately stays open.
+
+---
+
+## v0.12.0 (2026-04-30)
+
+*Phase 9 — Session Resilience.* Closing out the last two pre-1.0 items in the session-resilience phase: a Document Properties dialog and a Keyboard Shortcuts dialog. The 1.0 path now narrows to Phase 10 (Flatpak, AppStream, release).
+
+---
+
+### Document Properties (Phase 9)
+A new `Document Properties…` menu entry opens an `AdwDialog` summarizing the active document. Two groups: **Document** (Title, Author, Subject, Keywords, Creator, Producer, Created, Modified — empty rows are auto-hidden, so books with thin metadata get a sparse display instead of "Unknown" placeholders) and **File** (Filename, human-readable Size via `g_format_size`, full Location, Format, Encryption, Pages).
+
+Backed by a new `get_metadata` method on `FwDocumentInterface` returning a `GHashTable<gchar*, gchar*>` of normalized keys. The PDF backend implements it via `fz_lookup_metadata` for `info:Title` / `info:Author` / `info:Subject` / `info:Keywords` / `info:Creator` / `info:Producer` / `info:CreationDate` / `info:ModDate` plus `FZ_META_FORMAT` and `FZ_META_ENCRYPTION` — one implementation covers PDF, XPS, EPUB, FB2, MOBI, and CBZ/CB7/CBT. PDF date strings (`D:YYYYMMDDHHmmSSOHH'mm'`) are parsed to a human-readable `YYYY-MM-DD HH:MM:SS ±HH:MM` form before display. The DjVu and CBR backends return NULL — neither format exposes document-level metadata cleanly, and the File group's filename + size + page count + extension-derived format is sufficient there.
+
+Subtitle text on every row is selectable, so users can copy the title or producer string out of the dialog.
+
+### Keyboard Shortcuts Dialog (Phase 9)
+`Ctrl+?` and `F1` now open a Keyboard Shortcuts dialog, also accessible from the primary menu. Built as a custom `AdwDialog` containing an `AdwPreferencesPage` with one group per category (File, Navigation, Zoom & Rotation, Search, View, Selection); each binding is an `AdwActionRow` with a `GtkShortcutLabel` suffix that renders the accelerator with platform-appropriate key glyphs. Wired to the conventional `win.show-help-overlay` action name so a future `GtkShortcutsWindow` swap is a one-handler change.
+
+`GtkShortcutsWindow` itself is deprecated in GTK 4.18; the libadwaita-styled dialog avoids accruing that debt and matches the Document Properties dialog visually.
+
+---
+
 ## v0.11.0 (2026-04-30)
 
 *Pre-Phase-9 cleanup.* Four roadmap items that had been left open across earlier phases all land in this release.

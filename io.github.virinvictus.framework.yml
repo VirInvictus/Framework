@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Flatpak manifest for Framework. Two third-party libraries (MuPDF and
+# DjVuLibre) are not in the GNOME runtime and are built as modules.
+# libarchive comes from the freedesktop runtime that GNOME 50 is layered on,
+# so it does not need a module.
+#
+# Local development build:
+#   flatpak-builder --user --install --force-clean \
+#       build-flatpak io.github.virinvictus.framework.yml
+#   flatpak run io.github.virinvictus.framework
+#
+# Flathub submission requires switching the framework module's `type: dir`
+# source to `type: git` with a tag — see the comment near that block.
+
+app-id: io.github.virinvictus.framework
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: framework
+
+# Permissions are intentionally tight.  No network, no broad filesystem
+# access; arbitrary documents are reachable through the Document portal,
+# which GtkFileDialog and drag-and-drop go through automatically.  The xdg
+# shortcuts are convenience for CLI invocations like `flatpak run framework
+# ~/Downloads/foo.pdf`.
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=xdg-documents:ro
+  - --filesystem=xdg-download:ro
+  - --filesystem=xdg-desktop:ro
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+  - /share/doc
+  - '*.la'
+  - '*.a'
+
+modules:
+
+  # ── DjVuLibre ──────────────────────────────────────────────────────
+  # Autotools.  --disable-desktopfiles avoids installing MIME files into
+  # /app/share that the runtime would re-export and clash with our own
+  # MIME wiring in io.github.virinvictus.framework.desktop.
+  - name: djvulibre
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --disable-desktopfiles
+    sources:
+      - type: archive
+        url: https://downloads.sourceforge.net/djvu/djvulibre-3.5.28.tar.gz
+        sha256: fcd009ea7654fde5a83600eb80757bd3a76998e47d13c66b54c8db849f8f2edc
+
+  # ── MuPDF ──────────────────────────────────────────────────────────
+  # MuPDF ships its own Makefile, not autotools/meson.  Build the shared
+  # library only, with bundled third-party libs (freetype, harfbuzz,
+  # openjpeg, jbig2dec, zlib, libjpeg-turbo, mujs) — simpler than wiring
+  # up runtime equivalents and matches what Fedora's package does.
+  #
+  # HAVE_X11=no/HAVE_GLUT=no skip the X11 and GL viewer binaries we don't
+  # need.  HAVE_LIBCRYPTO=no disables PDF signing via OpenSSL — Framework
+  # is a viewer, not a signer.
+  - name: mupdf
+    buildsystem: simple
+    build-commands:
+      - make HAVE_X11=no HAVE_GLUT=no HAVE_LIBCRYPTO=no shared=yes verbose=yes
+        USE_SYSTEM_LIBS=no build=release prefix=/app -j${FLATPAK_BUILDER_N_JOBS:-4}
+      - make HAVE_X11=no HAVE_GLUT=no HAVE_LIBCRYPTO=no shared=yes verbose=yes
+        USE_SYSTEM_LIBS=no build=release prefix=/app install
+    sources:
+      - type: archive
+        url: https://mupdf.com/downloads/archive/mupdf-1.27.1-source.tar.gz
+        sha256: 5a1fce7373048a3e8985d6616ee37caaa1885ab90c1b0b3956bdb53d6ecd22af
+
+  # ── Framework ──────────────────────────────────────────────────────
+  # For Flathub submission, swap this dir source for a git source pointing
+  # at a tagged release, e.g.:
+  #   sources:
+  #     - type: git
+  #       url: https://github.com/VirInvictus/Framework.git
+  #       tag: v1.0.0
+  - name: framework
+    buildsystem: meson
+    config-opts:
+      - --buildtype=release
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - builddir
+          - build-flatpak
+          - .git
+          - .sumatrapdf
+          - .zathura
+          - .zathura-mupdf
+          - .sioyek
+          - .plato
+          - .fractal
+          - .komikku
+          - .mcomix
+          - .yacreader

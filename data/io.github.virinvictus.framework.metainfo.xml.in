@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component type="desktop-application">
+  <id>io.github.virinvictus.framework</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Framework</name>
+  <summary>Fast, native document viewer for GNOME</summary>
+
+  <developer id="io.github.virinvictus">
+    <name>Brandon LaRocque</name>
+  </developer>
+
+  <description>
+    <p>
+      Framework is a fast, native GNOME document viewer for the modern Linux
+      desktop. It opens PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book
+      archives (CBZ, CB7, CBT, CBR) through MuPDF, DjVuLibre, and libarchive
+      backends, and is engineered around a velocity-driven render cache that
+      keeps scrolling smooth even on thousand-page textbooks.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Continuous vertical scroll with Wayland fractional-scaling support</li>
+      <li>Parallel rendering across multiple CPU cores via independent MuPDF instances</li>
+      <li>Persistent thumbnail tier so fast scrolling never shows blank pages</li>
+      <li>Async progressive search with live "3 of 47" match counts</li>
+      <li>Internal link navigation, browser-style back/forward history (Alt+Left / Alt+Right)</li>
+      <li>Table-of-contents sidebar that follows the current page automatically</li>
+      <li>Click-and-drag text selection, copy to clipboard, dynamic cursors</li>
+      <li>Per-document state persistence: page, scroll, zoom, and rotation are restored on reopen</li>
+      <li>Printing through the system print dialog</li>
+      <li>Embedded-file extraction from PDFs with sanitized output paths</li>
+      <li>Drag-and-drop file open</li>
+    </ul>
+    <p>
+      Framework is a viewer, not an editor — no annotations, no save-as, no
+      library manager. Every action is visible, every keystroke is fast.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.virinvictus.framework.desktop</launchable>
+
+  <url type="homepage">https://github.com/VirInvictus/Framework</url>
+  <url type="bugtracker">https://github.com/VirInvictus/Framework/issues</url>
+  <url type="vcs-browser">https://github.com/VirInvictus/Framework</url>
+
+  <categories>
+    <category>Office</category>
+    <category>Viewer</category>
+    <category>GNOME</category>
+    <category>GTK</category>
+  </categories>
+
+  <provides>
+    <binary>framework</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <recommends>
+    <display_length compare="ge">600</display_length>
+    <internet>offline-only</internet>
+  </recommends>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <!-- Screenshots will be added before 1.0 ships. Each <screenshot> entry
+       points at a stable raw URL on the project's GitHub. The first entry
+       must carry type="default" and is what software centers feature.
+  <screenshots>
+    <screenshot type="default">
+      <caption>A textbook open with the table-of-contents sidebar</caption>
+      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/main.png</image>
+    </screenshot>
+  </screenshots>
+  -->
+
+  <releases>
+    <release version="0.12.0" date="2026-04-30">
+      <description>
+        <p>Phase 9 — Session Resilience: Document Properties dialog and Keyboard Shortcuts dialog (Ctrl+? / F1).</p>
+      </description>
+    </release>
+    <release version="0.11.0" date="2026-04-30">
+      <description>
+        <p>XPS / EPUB / FB2 / MOBI support, real CBR via libarchive, embedded file extraction, and a GtkListView-based TOC sidebar rewrite.</p>
+      </description>
+    </release>
+    <release version="0.10.0" date="2026-04-30">
+      <description>
+        <p>Empty-window state with drag-and-drop file open, and printing via GtkPrintOperation (Ctrl+P).</p>
+      </description>
+    </release>
+    <release version="0.9.0" date="2026-04-30">
+      <description>
+        <p>Comic-book archive support — CBZ files now open through the MuPDF backend.</p>
+      </description>
+    </release>
+    <release version="0.8.0" date="2026-04-30">
+      <description>
+        <p>TOC sidebar follows the current page; navigation history with Alt+Left / Alt+Right; internal link click navigation.</p>
+      </description>
+    </release>
+    <release version="0.7.0" date="2026-04-30">
+      <description>
+        <p>Async progressive search with live highlighting, F3/Shift+F3 navigation, and "3 of 47" match counts.</p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-04-29">
+      <description>
+        <p>Honest pre-1.0 versioning. Earlier 1.x release labels are preserved in patch notes as historical record.</p>
+      </description>
+    </release>
+  </releases>
+
+</component>

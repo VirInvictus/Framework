@@ -18,8 +18,10 @@ mupdf_dep = declare_dependency(
 djvu_dep    = dependency('ddjvuapi',    version: '>= 3.5.28')
 archive_dep = dependency('libarchive', version: '>= 3.6')
 
-framework_sources = files(
-  'main.c',
+# Source list, partitioned so tests can link against the engine without
+# pulling in main(). Everything except main.c is compiled into a static
+# library; the framework executable links it together with main.c.
+framework_lib_sources = files(
   'fw-application.c',
   'fw-window.c',
   'fw-view.c',
@@ -34,6 +36,8 @@ framework_sources = files(
   'fw-debug.c',
 )
 
+framework_main_sources = files('main.c')
+
 framework_deps = [
   gtk_dep,
   adw_dep,
@@ -45,8 +49,32 @@ framework_deps = [
   archive_dep,
 ]
 
-executable('framework',
-  framework_sources,
+# Sanitizer flags from the user-facing -Dsanitize= option. Forwarded to
+# every target so the executable and tests stay compatible.
+sanitize_flags = []
+foreach s : get_option('sanitize')
+  sanitize_flags += '-fsanitize=' + s
+endforeach
+if sanitize_flags.length() > 0
+  add_project_arguments(sanitize_flags, language: 'c')
+  add_project_link_arguments(sanitize_flags, language: 'c')
+endif
+
+framework_lib = static_library(
+  'framework-core',
+  framework_lib_sources,
   dependencies: framework_deps,
+  install: false,
+)
+
+framework_lib_dep = declare_dependency(
+  link_with: framework_lib,
+  include_directories: include_directories('.'),
+  dependencies: framework_deps,
+)
+
+executable('framework',
+  framework_main_sources,
+  dependencies: framework_lib_dep,
   install: true,
 )

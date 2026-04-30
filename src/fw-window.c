@@ -13,6 +13,7 @@
 #include "fw-state.h"
 #include "fw-debug.h"
 #include <gdk/gdk.h>
+#include <glib/gstdio.h>
 
 typedef struct {
   int     page;
@@ -39,6 +40,7 @@ struct _FwWindow {
   GtkToggleButton      *search_toggle;
 
   /* Layout */
+  AdwToastOverlay      *toast_overlay;  /* wraps content; hosts AdwToasts */
   AdwOverlaySplitView  *split_view;
   FwSidebar            *sidebar;
   GtkStack             *content_stack;  /* "empty" | "document" */
@@ -69,6 +71,15 @@ struct _FwWindow {
   GArray               *nav_back;     /* NavEntry[] */
   GArray               *nav_forward;  /* NavEntry[] */
   gboolean              nav_in_progress;  /* re-entrancy guard */
+
+  /* Auto-reload (Phase 14): GFileMonitor watches the open document
+   * path. When the file changes (LaTeX recompile, Typst rebuild, etc.)
+   * we save state, re-open the document, and restore scroll position
+   * — matching SumatraPDF's killer feature for the LaTeX/Typst flow.
+   * Monitor is replaced on every fw_window_open_file. */
+  GFileMonitor         *file_monitor;
+  guint                 reload_debounce_id;  /* g_timeout source for debouncing
+                                              * rapid CHANGED events during a write */
 };
 
 G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -774,6 +785,179 @@ static void act_copy (GSimpleAction *a, GVariant *p, gpointer d)
   }
 }
 
+/* ── Keyboard Shortcuts dialog ──────────────────────────────────── */
+
+static void
+add_shortcut_row (AdwPreferencesGroup *group, const char *title,
+                  const char *accel)
+{
+  AdwActionRow *row = ADW_ACTION_ROW (adw_action_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), title);
+
+  GtkWidget *label = gtk_shortcut_label_new (accel);
+  gtk_widget_set_valign (label, GTK_ALIGN_CENTER);
+  adw_action_row_add_suffix (row, label);
+
+  adw_preferences_group_add (group, GTK_WIDGET (row));
+}
+
+static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a; (void)p;
+  FwWindow *self = d;
+
+  AdwDialog *dlg = adw_dialog_new ();
+  adw_dialog_set_title (dlg, "Keyboard Shortcuts");
+  adw_dialog_set_content_width (dlg, 520);
+  adw_dialog_set_content_height (dlg, 640);
+
+  GtkWidget *toolbar = adw_toolbar_view_new ();
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar),
+                                 adw_header_bar_new ());
+  adw_dialog_set_child (dlg, toolbar);
+
+  GtkWidget *page = adw_preferences_page_new ();
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
+
+  AdwPreferencesGroup *g_file =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_file, "File");
+  add_shortcut_row (g_file, "Open",  "<Control>o");
+  add_shortcut_row (g_file, "Print", "<Control>p");
+  add_shortcut_row (g_file, "Quit",  "<Control>q <Control>w");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_file);
+
+  AdwPreferencesGroup *g_nav =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_nav, "Navigation");
+  add_shortcut_row (g_nav, "Next page",     "Page_Down");
+  add_shortcut_row (g_nav, "Previous page", "Page_Up");
+  add_shortcut_row (g_nav, "First page",    "Home");
+  add_shortcut_row (g_nav, "Last page",     "End");
+  add_shortcut_row (g_nav, "Go to page…",   "<Control>g");
+  add_shortcut_row (g_nav, "Go back",       "<Alt>Left");
+  add_shortcut_row (g_nav, "Go forward",    "<Alt>Right");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_nav);
+
+  AdwPreferencesGroup *g_zoom =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_zoom, "Zoom & Rotation");
+  add_shortcut_row (g_zoom, "Zoom in",                  "<Control>plus");
+  add_shortcut_row (g_zoom, "Zoom out",                 "<Control>minus");
+  add_shortcut_row (g_zoom, "Actual size",              "<Control>0");
+  add_shortcut_row (g_zoom, "Fit width",                "<Control>1");
+  add_shortcut_row (g_zoom, "Fit page",                 "<Control>2");
+  add_shortcut_row (g_zoom, "Rotate clockwise",         "<Control><Shift>plus");
+  add_shortcut_row (g_zoom, "Rotate counter-clockwise", "<Control><Shift>minus");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_zoom);
+
+  AdwPreferencesGroup *g_search =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_search, "Search");
+  add_shortcut_row (g_search, "Find",          "<Control>f");
+  add_shortcut_row (g_search, "Find next",     "F3");
+  add_shortcut_row (g_search, "Find previous", "<Shift>F3");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_search);
+
+  AdwPreferencesGroup *g_view =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_view, "View");
+  add_shortcut_row (g_view, "Toggle sidebar", "F9");
+  add_shortcut_row (g_view, "Fullscreen",     "F11");
+  add_shortcut_row (g_view, "Invert colors",  "<Control>i");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_view);
+
+  AdwPreferencesGroup *g_sel =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_sel, "Selection");
+  add_shortcut_row (g_sel, "Copy", "<Control>c");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_sel);
+
+  adw_dialog_present (dlg, GTK_WIDGET (self));
+}
+
+/* ── Document Properties dialog ─────────────────────────────────── */
+
+static void
+add_property_row (AdwPreferencesGroup *group, const char *title,
+                  const char *value)
+{
+  if (!value || !*value) return;
+  AdwActionRow *row = ADW_ACTION_ROW (adw_action_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), title);
+  adw_action_row_set_subtitle (row, value);
+  adw_action_row_set_subtitle_selectable (row, TRUE);
+  adw_preferences_group_add (group, GTK_WIDGET (row));
+}
+
+static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a; (void)p;
+  FwWindow *self = d;
+  if (!self->document) return;
+
+  AdwDialog *dlg = adw_dialog_new ();
+  adw_dialog_set_title (dlg, "Document Properties");
+  adw_dialog_set_content_width (dlg, 480);
+  adw_dialog_set_content_height (dlg, 560);
+
+  GtkWidget *toolbar = adw_toolbar_view_new ();
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar),
+                                 adw_header_bar_new ());
+  adw_dialog_set_child (dlg, toolbar);
+
+  GtkWidget *page = adw_preferences_page_new ();
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
+
+  GHashTable *meta = fw_document_get_metadata (self->document);
+
+  /* Document group — backend metadata (title, author, dates, etc.) */
+  AdwPreferencesGroup *doc_group =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (doc_group, "Document");
+  if (meta) {
+    add_property_row (doc_group, "Title",    g_hash_table_lookup (meta, "title"));
+    add_property_row (doc_group, "Author",   g_hash_table_lookup (meta, "author"));
+    add_property_row (doc_group, "Subject",  g_hash_table_lookup (meta, "subject"));
+    add_property_row (doc_group, "Keywords", g_hash_table_lookup (meta, "keywords"));
+    add_property_row (doc_group, "Creator",  g_hash_table_lookup (meta, "creator"));
+    add_property_row (doc_group, "Producer", g_hash_table_lookup (meta, "producer"));
+    add_property_row (doc_group, "Created",  g_hash_table_lookup (meta, "creation-date"));
+    add_property_row (doc_group, "Modified", g_hash_table_lookup (meta, "modification-date"));
+  }
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), doc_group);
+
+  /* File group — derived from the open path + backend format/encryption */
+  AdwPreferencesGroup *file_group =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (file_group, "File");
+
+  if (self->file_path) {
+    g_autofree char *basename = g_path_get_basename (self->file_path);
+    add_property_row (file_group, "Filename", basename);
+
+    GStatBuf st;
+    if (g_stat (self->file_path, &st) == 0) {
+      g_autofree char *size = g_format_size ((guint64) st.st_size);
+      add_property_row (file_group, "Size", size);
+    }
+    add_property_row (file_group, "Location", self->file_path);
+  }
+  if (meta) {
+    add_property_row (file_group, "Format",     g_hash_table_lookup (meta, "format"));
+    add_property_row (file_group, "Encryption", g_hash_table_lookup (meta, "encryption"));
+  }
+
+  g_autofree char *pages =
+    g_strdup_printf ("%d", fw_document_get_page_count (self->document));
+  add_property_row (file_group, "Pages", pages);
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), file_group);
+
+  if (meta) g_hash_table_unref (meta);
+
+  adw_dialog_present (dlg, GTK_WIDGET (self));
+}
+
 static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
@@ -1004,8 +1188,11 @@ fw_window_constructed (GObject *object)
   g_menu_append_submenu (menu, "Zoom", G_MENU_MODEL (zoom_section));
 
   g_menu_append (menu, "Invert Colors", "win.invert-colors");
+  g_menu_append (menu, "Kinetic Scrolling", "win.kinetic-scrolling");
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
+  g_menu_append (menu, "Document Properties…", "win.properties");
+  g_menu_append (menu, "Keyboard Shortcuts", "win.show-help-overlay");
   g_menu_append (menu, "About Framework", "win.about");
 
   GtkMenuButton *menu_button = GTK_MENU_BUTTON (gtk_menu_button_new ());
@@ -1175,8 +1362,13 @@ fw_window_constructed (GObject *object)
   gtk_box_append (box, GTK_WIDGET (self->header_bar));
   gtk_box_append (box, GTK_WIDGET (self->split_view));
 
+  /* Toast overlay wraps the entire content so AdwToasts (e.g.,
+   * "Document updated" on auto-reload) float above everything else. */
+  self->toast_overlay = ADW_TOAST_OVERLAY (adw_toast_overlay_new ());
+  adw_toast_overlay_set_child (self->toast_overlay, GTK_WIDGET (box));
+
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
-                                       GTK_WIDGET (box));
+                                       GTK_WIDGET (self->toast_overlay));
 
   /* Initialize state */
   self->zoom = 1.0;
@@ -1210,11 +1402,24 @@ fw_window_constructed (GObject *object)
     { .name = "rotate-ccw",    .activate = act_rotate_ccw },
     { .name = "copy",          .activate = act_copy },
     { .name = "print",         .activate = act_print },
-    { .name = "save-attachments", .activate = act_save_attachments },
-    { .name = "about",         .activate = act_about },
+    { .name = "save-attachments",  .activate = act_save_attachments },
+    { .name = "properties",        .activate = act_properties },
+    { .name = "show-help-overlay", .activate = act_shortcuts },
+    { .name = "about",             .activate = act_about },
   };
   g_action_map_add_action_entries (G_ACTION_MAP (self), win_entries,
                                    G_N_ELEMENTS (win_entries), self);
+
+  /* ── Stateful settings-backed action: Kinetic Scrolling toggle ──
+   * g_settings_create_action returns a GAction whose state is bound
+   * to the GSettings key — the menu checkmark stays in sync, and
+   * activating the action flips the setting (which fw-view listens to). */
+  {
+    g_autoptr (GSettings) settings = g_settings_new (APP_ID);
+    g_autoptr (GAction) kinetic_action =
+      g_settings_create_action (settings, "kinetic-scrolling");
+    g_action_map_add_action (G_ACTION_MAP (self), kinetic_action);
+  }
 
   /* ── Arrow key scrolling & Ctrl+Scroll zoom ── */
   GtkEventController *key_ctl =
@@ -1304,6 +1509,97 @@ restore_state_tick (GtkWidget *widget, GdkFrameClock *clock,
   return G_SOURCE_REMOVE;
 }
 
+/* ── Auto-reload via GFileMonitor ────────────────────────────────── */
+
+static void
+fw_window_show_toast (FwWindow *self, const char *text)
+{
+  if (!self->toast_overlay)
+    return;
+  AdwToast *toast = adw_toast_new (text);
+  adw_toast_set_timeout (toast, 2);
+  adw_toast_overlay_add_toast (self->toast_overlay, toast);
+}
+
+static gboolean
+reload_document_idle (gpointer user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  self->reload_debounce_id = 0;
+
+  if (!self->file_path)
+    return G_SOURCE_REMOVE;
+
+  /* fw_window_open_file frees self->file_path early — copy first. */
+  g_autofree char *path = g_strdup (self->file_path);
+  FW_TRACE_WINDOW ("auto-reload: '%s'", path);
+  fw_window_open_file (self, path);
+  fw_window_show_toast (self, "Document updated");
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_file_monitor_changed (GFileMonitor      *monitor,
+                         GFile             *file,
+                         GFile             *other_file,
+                         GFileMonitorEvent  event,
+                         gpointer           user_data)
+{
+  (void) monitor; (void) file; (void) other_file;
+  FwWindow *self = FW_WINDOW (user_data);
+
+  /* CHANGES_DONE_HINT fires when the writer finishes (after the inotify
+   * close-write equivalent). CREATED covers atomic-rename editors that
+   * unlink+create rather than write in place. Both events trigger a
+   * debounced reload — multiple events in quick succession (LaTeX often
+   * writes auxiliary files in the same directory) collapse to a single
+   * reload that runs after a 200 ms quiet window. */
+  if (event != G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT &&
+      event != G_FILE_MONITOR_EVENT_CREATED)
+    return;
+
+  if (self->reload_debounce_id)
+    g_source_remove (self->reload_debounce_id);
+  self->reload_debounce_id = g_timeout_add (200, reload_document_idle, self);
+}
+
+static void
+fw_window_stop_monitor (FwWindow *self)
+{
+  if (self->reload_debounce_id) {
+    g_source_remove (self->reload_debounce_id);
+    self->reload_debounce_id = 0;
+  }
+  if (self->file_monitor) {
+    g_signal_handlers_disconnect_by_func (self->file_monitor,
+                                          on_file_monitor_changed, self);
+    g_file_monitor_cancel (self->file_monitor);
+    g_clear_object (&self->file_monitor);
+  }
+}
+
+static void
+fw_window_start_monitor (FwWindow *self, const char *path)
+{
+  if (!path)
+    return;
+  g_autoptr (GFile) gfile = g_file_new_for_path (path);
+  g_autoptr (GError) error = NULL;
+  /* WATCH_HARD_LINKS makes inotify track the inode, so atomic-rename
+   * patterns (write-to-tmp, rename-over) still produce events. */
+  GFileMonitor *m = g_file_monitor_file (gfile,
+                                          G_FILE_MONITOR_WATCH_HARD_LINKS,
+                                          NULL, &error);
+  if (!m) {
+    g_warning ("auto-reload: could not watch '%s': %s",
+               path, error ? error->message : "(null)");
+    return;
+  }
+  self->file_monitor = m;
+  g_signal_connect (m, "changed",
+                    G_CALLBACK (on_file_monitor_changed), self);
+}
+
 /* ── Open file ────────────────────────────────────────────────────── */
 
 void
@@ -1320,6 +1616,10 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* New document → clear navigation history */
   if (self->nav_back)    g_array_set_size (self->nav_back, 0);
   if (self->nav_forward) g_array_set_size (self->nav_forward, 0);
+
+  /* Stop watching the old file before tearing it down — avoids spurious
+   * change events firing on the path we're about to swap. */
+  fw_window_stop_monitor (self);
 
   /* Clean up previous document */
   if (self->cache) {
@@ -1344,6 +1644,10 @@ fw_window_open_file (FwWindow *self, const char *path)
   }
 
   self->file_path = g_strdup (path);
+
+  /* Start watching the new file for changes — auto-reload on
+   * recompile (LaTeX, Typst, anything that rewrites the same path). */
+  fw_window_start_monitor (self, self->file_path);
 
   /* Switch from empty state to the document view. */
   if (self->content_stack)
@@ -1450,6 +1754,7 @@ fw_window_dispose (GObject *object)
   FwWindow *self = FW_WINDOW (object);
 
   fw_window_save_state (self);
+  fw_window_stop_monitor (self);
 
   /* Disconnect view from document/cache FIRST — the view holds refs to both,
    * and GTK widget teardown order is unpredictable. Without this, the cache

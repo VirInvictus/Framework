@@ -160,7 +160,8 @@ fw_application_startup (GApplication *app)
     { "win.rotate-cw",       { "<Control><Shift>plus", NULL } },
     { "win.rotate-ccw",      { "<Control><Shift>minus", NULL } },
     { "win.copy",            { "<Control>c", NULL } },
-    { "win.print",           { "<Control>p", NULL } },
+    { "win.print",            { "<Control>p", NULL } },
+    { "win.show-help-overlay",{ "<Control>question", "F1", NULL } },
   };
   for (size_t i = 0; i < G_N_ELEMENTS (shortcuts); i++)
     gtk_application_set_accels_for_action (GTK_APPLICATION (app),

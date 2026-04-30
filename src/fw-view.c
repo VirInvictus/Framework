@@ -7,10 +7,21 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include "fw-config.h"
 #include "fw-view.h"
 #include "fw-debug.h"
 
+#include <gio/gio.h>
+
 #define PAGE_GAP 8
+
+/* Per-event scroll cap when kinetic scrolling is OFF (default).
+ * Bounds how far a single wheel tick or trackpad event can move the
+ * viewport, so the cache is never asked to render faster than it can
+ * keep up. Wheel ticks are converted from unit-scale to pixels via
+ * SCROLL_WHEEL_STEP first, then clamped to MAX_SCROLL_PER_EVENT. */
+#define SCROLL_WHEEL_STEP    60.0
+#define MAX_SCROLL_PER_EVENT 90.0
 
 struct _FwView {
   GtkWidget    parent_instance;
@@ -44,12 +55,19 @@ struct _FwView {
   gboolean     invert_colors;
   gboolean     redraw_pending;
 
-  /* Text selection */
+  /* Text selection
+   * sel_x0/y0 + sel_x1/y1 are the user's drag start/end (or snap-result
+   * endpoints for double/triple-click). sel_quads is the per-line
+   * highlight rectangles MuPDF returns from fz_highlight_selection —
+   * one quad per line of selected text, following reading order, so the
+   * highlight matches the actual selected text rather than drawing a
+   * single bounding box that may include unselected words. */
   int          sel_page;       /* -1 = no selection */
   double       sel_x0, sel_y0; /* start in document points */
   double       sel_x1, sel_y1; /* end in document points */
   gboolean     selecting;
   char        *selected_text;
+  GArray      *sel_quads;      /* GArray<FwRect>, owned, NULL when empty */
 
   /* Link cache — lazily populated per page */
   GArray     **link_cache;     /* array of GArray* indexed by page, or NULL */
@@ -59,6 +77,14 @@ struct _FwView {
   FwSearch    *search;         /* owned ref, or NULL */
   gulong       search_hits_handler;
   gulong       search_current_handler;
+
+  /* Settings — `kinetic-scrolling` gates whether wheel/trackpad events
+   * apply their full delta (true) or are capped per-event (false, default).
+   * The cached `kinetic_scrolling` flag is updated live via the "changed"
+   * signal so the toggle takes effect without restart. */
+  GSettings   *settings;
+  gulong       settings_changed_handler;
+  gboolean     kinetic_scrolling;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -91,10 +117,26 @@ update_cache_priority (FwView *self)
     return;
 
   int widget_height = gtk_widget_get_height (GTK_WIDGET (self));
-  if (widget_height <= 0)
-    return;
-
   double scroll_y   = gtk_adjustment_get_value (self->vadjustment);
+
+  /* During state restore, the scroll position may be set before the view
+   * has a real allocation. Fall back to the page at the scroll position
+   * so the cache still gets a priority hint for the saved page — without
+   * this, the saved page stays at thumbnail resolution until the user
+   * scrolls (the v0.13 startup-blur regression). */
+  if (widget_height <= 0) {
+    int page = 0;
+    for (int i = 0; i < self->page_count; i++) {
+      if (self->page_y_offsets[i] <= scroll_y + 1.0)
+        page = i;
+      else
+        break;
+    }
+    int single[1] = { page };
+    fw_cache_set_priority (self->cache, single, 1);
+    return;
+  }
+
   double vis_top    = scroll_y;
   double vis_bottom = scroll_y + widget_height;
 
@@ -381,25 +423,41 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
       }
     }
 
-    /* Paint text selection overlay on the selected page */
+    /* Paint text selection overlay on the selected page. Prefer the
+     * per-line quads from fz_highlight_selection (they follow reading
+     * order and match the actual selected text exactly). Fall back to
+     * the bounding box only when quads aren't available (DjVu, CBR
+     * — backends that don't implement get_selection_quads). */
     if (self->sel_page == i &&
         (self->selecting || self->selected_text)) {
-      double sx0 = self->sel_x0 < self->sel_x1 ? self->sel_x0 : self->sel_x1;
-      double sy0 = self->sel_y0 < self->sel_y1 ? self->sel_y0 : self->sel_y1;
-      double sx1 = self->sel_x0 > self->sel_x1 ? self->sel_x0 : self->sel_x1;
-      double sy1 = self->sel_y0 > self->sel_y1 ? self->sel_y0 : self->sel_y1;
+      GdkRGBA sel_color = { 0.2f, 0.4f, 0.8f, 0.3f };
 
-      /* Convert from document points to widget coordinates */
-      float sel_wx = (float) (x + sx0 * self->zoom);
-      float sel_wy = (float) (y + sy0 * self->zoom);
-      float sel_ww = (float) ((sx1 - sx0) * self->zoom);
-      float sel_wh = (float) ((sy1 - sy0) * self->zoom);
-
-      if (sel_ww > 0 && sel_wh > 0) {
-        graphene_rect_t sel_rect = GRAPHENE_RECT_INIT (
-          sel_wx, sel_wy, sel_ww, sel_wh);
-        GdkRGBA sel_color = { 0.2f, 0.4f, 0.8f, 0.3f };
-        gtk_snapshot_append_color (snapshot, &sel_color, &sel_rect);
+      if (self->sel_quads && self->sel_quads->len > 0) {
+        for (guint q = 0; q < self->sel_quads->len; q++) {
+          FwRect r = g_array_index (self->sel_quads, FwRect, q);
+          float qx = (float) (x + r.x0 * self->zoom);
+          float qy = (float) (y + r.y0 * self->zoom);
+          float qw = (float) ((r.x1 - r.x0) * self->zoom);
+          float qh = (float) ((r.y1 - r.y0) * self->zoom);
+          if (qw > 0 && qh > 0) {
+            graphene_rect_t qr = GRAPHENE_RECT_INIT (qx, qy, qw, qh);
+            gtk_snapshot_append_color (snapshot, &sel_color, &qr);
+          }
+        }
+      } else {
+        double sx0 = self->sel_x0 < self->sel_x1 ? self->sel_x0 : self->sel_x1;
+        double sy0 = self->sel_y0 < self->sel_y1 ? self->sel_y0 : self->sel_y1;
+        double sx1 = self->sel_x0 > self->sel_x1 ? self->sel_x0 : self->sel_x1;
+        double sy1 = self->sel_y0 > self->sel_y1 ? self->sel_y0 : self->sel_y1;
+        float sel_wx = (float) (x + sx0 * self->zoom);
+        float sel_wy = (float) (y + sy0 * self->zoom);
+        float sel_ww = (float) ((sx1 - sx0) * self->zoom);
+        float sel_wh = (float) ((sy1 - sy0) * self->zoom);
+        if (sel_ww > 0 && sel_wh > 0) {
+          graphene_rect_t sel_rect = GRAPHENE_RECT_INIT (
+            sel_wx, sel_wy, sel_ww, sel_wh);
+          gtk_snapshot_append_color (snapshot, &sel_color, &sel_rect);
+        }
       }
     }
   }
@@ -538,6 +596,10 @@ on_drag_begin (GtkGestureDrag *gesture, double start_x, double start_y,
   self->sel_y1 = doc_y;
   self->selecting = TRUE;
   g_clear_pointer (&self->selected_text, g_free);
+  if (self->sel_quads) {
+    g_array_unref (self->sel_quads);
+    self->sel_quads = NULL;
+  }
   FW_TRACE_VIEW ("drag begin: page=%d doc=(%.1f,%.1f)", page, doc_x, doc_y);
 }
 
@@ -564,6 +626,20 @@ on_drag_update (GtkGestureDrag *gesture, double offset_x, double offset_y,
     if (page == self->sel_page) {
       self->sel_x1 = doc_x;
       self->sel_y1 = doc_y;
+
+      /* Recompute per-line quads so the highlight follows reading
+       * order in real time as the user drags. The cached stext makes
+       * this fast — fz_highlight_selection is a stext walk, no parse. */
+      if (self->document) {
+        if (self->sel_quads) {
+          g_array_unref (self->sel_quads);
+          self->sel_quads = NULL;
+        }
+        self->sel_quads = fw_document_get_selection_quads (
+          self->document, self->sel_page,
+          self->sel_x0, self->sel_y0,
+          self->sel_x1, self->sel_y1);
+      }
     }
   }
 
@@ -592,9 +668,18 @@ on_drag_end (GtkGestureDrag *gesture, double offset_x, double offset_y,
   self->selected_text = fw_document_get_text (
     self->document, self->sel_page, x0, y0, x1, y1);
 
-  FW_TRACE_VIEW ("drag end: page=%d rect=(%.1f,%.1f)-(%.1f,%.1f) text=%s",
+  /* Final per-line quads for the released selection. */
+  if (self->sel_quads) {
+    g_array_unref (self->sel_quads);
+    self->sel_quads = NULL;
+  }
+  self->sel_quads = fw_document_get_selection_quads (
+    self->document, self->sel_page, x0, y0, x1, y1);
+
+  FW_TRACE_VIEW ("drag end: page=%d rect=(%.1f,%.1f)-(%.1f,%.1f) text=%s quads=%u",
                   self->sel_page, x0, y0, x1, y1,
-                  self->selected_text ? "yes" : "no");
+                  self->selected_text ? "yes" : "no",
+                  self->sel_quads ? self->sel_quads->len : 0);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -679,7 +764,6 @@ static void
 on_click_pressed (GtkGestureClick *gesture, int n_press, double x, double y,
                   gpointer user_data)
 {
-  (void) n_press;
   FwView *self = FW_VIEW (user_data);
 
   int page;
@@ -688,6 +772,51 @@ on_click_pressed (GtkGestureClick *gesture, int n_press, double x, double y,
   if (!fw_view_widget_to_doc (self, x, y, &page, &doc_x, &doc_y))
     return;
 
+  /* Double-click → select word; triple-click → select line. The click
+   * is treated as authoritative — if the user double-clicks, the intent
+   * is text selection, not link navigation, even if a link sits under
+   * the cursor. */
+  if (n_press == 2 || n_press == 3) {
+    if (!self->document)
+      return;
+
+    FwSelectGranularity gran = (n_press == 2) ? FW_SELECT_WORD : FW_SELECT_LINE;
+    double x0, y0, x1, y1;
+    if (!fw_document_select_at (self->document, page, doc_x, doc_y, gran,
+                                 &x0, &y0, &x1, &y1))
+      return;
+
+    /* Claim so the drag gesture doesn't fight us */
+    gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+
+    self->sel_page  = page;
+    self->sel_x0    = x0;
+    self->sel_y0    = y0;
+    self->sel_x1    = x1;
+    self->sel_y1    = y1;
+    self->selecting = FALSE;
+
+    g_clear_pointer (&self->selected_text, g_free);
+    self->selected_text = fw_document_get_text (self->document, page,
+                                                 x0, y0, x1, y1);
+
+    if (self->sel_quads) {
+      g_array_unref (self->sel_quads);
+      self->sel_quads = NULL;
+    }
+    self->sel_quads = fw_document_get_selection_quads (self->document, page,
+                                                       x0, y0, x1, y1);
+
+    FW_TRACE_VIEW ("snap-select: page=%d gran=%s rect=(%.1f,%.1f)-(%.1f,%.1f) text=%s",
+                    page, gran == FW_SELECT_WORD ? "word" : "line",
+                    x0, y0, x1, y1,
+                    self->selected_text ? "yes" : "no");
+
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+    return;
+  }
+
+  /* Single click — fall through to link-hit-test (existing behaviour). */
   FwLink *link = fw_view_hit_test_link (self, page, doc_x, doc_y);
   if (!link)
     return;
@@ -731,6 +860,10 @@ fw_view_set_document (FwView *self, FwDocument *document, FwCache *cache)
   fw_view_free_link_cache (self);
   self->sel_page = -1;
   g_clear_pointer (&self->selected_text, g_free);
+  if (self->sel_quads) {
+    g_array_unref (self->sel_quads);
+    self->sel_quads = NULL;
+  }
 
   FW_TRACE_VIEW ("set_document: pages=%d", self->page_count);
   recompute_layout (self);
@@ -1036,6 +1169,13 @@ fw_view_dispose (GObject *object)
     self->search_current_handler = 0;
   }
   g_clear_object (&self->search);
+
+  if (self->settings) {
+    if (self->settings_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->settings_changed_handler);
+    self->settings_changed_handler = 0;
+    g_clear_object (&self->settings);
+  }
   g_clear_object (&self->document);
   g_clear_object (&self->cache);
 
@@ -1061,6 +1201,8 @@ fw_view_finalize (GObject *object)
   g_free (self->page_heights);
   g_free (self->page_y_offsets);
   g_free (self->selected_text);
+  if (self->sel_quads)
+    g_array_unref (self->sel_quads);
   G_OBJECT_CLASS (fw_view_parent_class)->finalize (object);
 }
 
@@ -1092,6 +1234,49 @@ fw_view_class_init (FwViewClass *klass)
     "page-jumped", FW_TYPE_VIEW,
     G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_INT);
+}
+
+static void
+on_kinetic_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->kinetic_scrolling = g_settings_get_boolean (settings, "kinetic-scrolling");
+  FW_TRACE_VIEW ("kinetic-scrolling=%d", self->kinetic_scrolling);
+}
+
+static gboolean
+on_scroll_event (GtkEventControllerScroll *ctrl, double dx, double dy,
+                 gpointer user_data)
+{
+  (void) dx;
+  FwView *self = user_data;
+
+  /* Kinetic mode: don't intercept — let GtkScrolledWindow apply the full
+   * delta with momentum scrolling (the GTK default behavior). */
+  if (self->kinetic_scrolling || !self->vadjustment)
+    return FALSE;
+
+  /* Cache-friendly mode: apply a per-event capped delta directly to the
+   * vadjustment and consume the event so the scrolled window doesn't
+   * also process it. Wheel events arrive in unit-scale (≈1 per click);
+   * trackpad smooth-scroll arrives in pixel-scale already. */
+  GdkEvent *evt = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (ctrl));
+  GdkScrollUnit unit = evt ? gdk_scroll_event_get_unit (evt)
+                           : GDK_SCROLL_UNIT_SURFACE;
+
+  double pixels = (unit == GDK_SCROLL_UNIT_WHEEL) ? dy * SCROLL_WHEEL_STEP : dy;
+  if (pixels >  MAX_SCROLL_PER_EVENT) pixels =  MAX_SCROLL_PER_EVENT;
+  if (pixels < -MAX_SCROLL_PER_EVENT) pixels = -MAX_SCROLL_PER_EVENT;
+
+  double upper = gtk_adjustment_get_upper (self->vadjustment);
+  double size  = gtk_adjustment_get_page_size (self->vadjustment);
+  double v     = gtk_adjustment_get_value (self->vadjustment) + pixels;
+  if (v > upper - size) v = upper - size;
+  if (v < 0) v = 0;
+  gtk_adjustment_set_value (self->vadjustment, v);
+
+  return TRUE;
 }
 
 static gboolean
@@ -1133,6 +1318,25 @@ fw_view_init (FwView *self)
 {
   self->zoom = 1.0;
   self->sel_page = -1;
+
+  /* Settings — bind kinetic-scrolling live so the toggle in the menu
+   * takes effect without restarting the app. */
+  self->settings = g_settings_new (APP_ID);
+  self->kinetic_scrolling = g_settings_get_boolean (self->settings,
+                                                     "kinetic-scrolling");
+  self->settings_changed_handler = g_signal_connect (
+    self->settings, "changed::kinetic-scrolling",
+    G_CALLBACK (on_kinetic_setting_changed), self);
+
+  /* Scroll controller — capture-phase so we see wheel/trackpad events
+   * before the parent GtkScrolledWindow's bubble-phase handler. The
+   * handler decides whether to consume (cap-per-event mode) or
+   * fall through (kinetic mode). */
+  GtkEventController *scroll =
+    gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+  gtk_event_controller_set_propagation_phase (scroll, GTK_PHASE_CAPTURE);
+  g_signal_connect (scroll, "scroll", G_CALLBACK (on_scroll_event), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), scroll);
 
   gtk_widget_add_tick_callback (GTK_WIDGET (self), view_tick_cb, self, NULL);
 

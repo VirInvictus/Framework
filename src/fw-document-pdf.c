@@ -54,6 +54,27 @@ struct _FwDocumentPdf {
   /* Page sizes cached at open time to avoid repeated fz_load_page calls */
   double       *page_widths;   /* in points */
   double       *page_heights;
+
+  /* Phase 11 Tier 1: in-flight render cancellation via fz_cookie.
+   * Each active render publishes its cookie pointer here under
+   * cookies_lock. pdf_cancel_render iterates and writes cookie->abort = 1
+   * on every active render — MuPDF sees the flag during its next
+   * fz_run_page checkpoint and returns immediately, abandoning whatever
+   * partial output it has produced. cookies_lock is a separate mutex
+   * from the per-instance render lock so cancel never blocks on the
+   * worker that's mid-render. Pointers live on the worker's stack and
+   * are deregistered before fz_run_page's caller returns. */
+  GMutex        cookies_lock;
+  fz_cookie    *active_cookies[MAX_RENDER_INSTANCES];
+
+  /* Phase 11 Tier 1: cached structured-text per page (`fz_stext_page`).
+   * Populated lazily on first text-related call (selection, search) for
+   * a given page; reused on every subsequent call. Eliminates the
+   * fz_load_page + fz_new_stext_page_from_page round-trip that used to
+   * happen for every get_text and every search-on-this-page. Owned by
+   * `self->ctx`, dropped en masse in pdf_close. Access is serialized
+   * via `self->lock` (same as the rest of main-ctx state). */
+  GHashTable   *stext_cache;   /* int → fz_stext_page* */
 };
 
 static void fw_document_pdf_iface_init (FwDocumentInterface *iface);
@@ -83,10 +104,15 @@ build_transform (double zoom, int rotation)
  * For ARGB32, `cairo_format_stride_for_width` returns `4*w` (always 4-byte
  * aligned for any width), so cairo's stride and MuPDF's tight stride match.
  *
+ * The `cookie` argument is plumbed to fz_run_page so that
+ * pdf_cancel_render can flip cookie->abort = 1 from another thread and
+ * MuPDF will abandon the in-flight render at its next checkpoint
+ * instead of running to completion. NULL cookie = no in-flight cancel.
+ *
  * Called with inst->lock held. */
 static cairo_surface_t *
 render_page_direct (fz_context *ctx, fz_page *page,
-                    double zoom, int rotation)
+                    double zoom, int rotation, fz_cookie *cookie)
 {
   fz_rect bbox = fz_bound_page (ctx, page);
   fz_matrix m = build_transform (zoom, rotation);
@@ -128,7 +154,7 @@ render_page_direct (fz_context *ctx, fz_page *page,
     fz_clear_pixmap_with_value (ctx, (fz_pixmap *) pix, 0xFF);
 
     dev = fz_new_draw_device (ctx, fz_identity, (fz_pixmap *) pix);
-    fz_run_page (ctx, page, (fz_device *) dev, draw_m, NULL);
+    fz_run_page (ctx, page, (fz_device *) dev, draw_m, cookie);
     fz_close_device (ctx, (fz_device *) dev);
   }
   fz_always (ctx) {
@@ -139,6 +165,15 @@ render_page_direct (fz_context *ctx, fz_page *page,
   }
   fz_catch (ctx) {
     g_warning ("MuPDF: render failed: %s", fz_caught_message (ctx));
+    cairo_surface_destroy (surface);
+    return NULL;
+  }
+
+  /* Mid-render abort: cookie->abort got flipped to 1 from another thread
+   * during fz_run_page. The surface contains whatever pixels MuPDF
+   * managed to draw before bailing — discard. The 1-3 s saved per
+   * abandoned big-PDF page is the whole point of plumbing the cookie. */
+  if (cookie && cookie->abort) {
     cairo_surface_destroy (surface);
     return NULL;
   }
@@ -297,6 +332,19 @@ pdf_close (FwDocument *doc)
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   FW_TRACE_PDF ("close: '%s'", self->path ? self->path : "(null)");
 
+  /* Drop cached structured-text pages first — they're owned by
+   * self->ctx, which is dropped further down. After this loop the
+   * hash table is empty but still allocated; finalize unrefs it. */
+  if (self->stext_cache && self->ctx) {
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init (&iter, self->stext_cache);
+    while (g_hash_table_iter_next (&iter, &key, &value)) {
+      fz_drop_stext_page (self->ctx, (fz_stext_page *) value);
+    }
+    g_hash_table_remove_all (self->stext_cache);
+  }
+
   /* Drop independent render instances first */
   for (int i = 0; i < self->n_render; i++) {
     if (self->render[i].doc) {
@@ -375,8 +423,23 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
   }
 
   if (pg) {
+    /* Allocate the in-flight cancel cookie on this worker's stack and
+     * publish its address so pdf_cancel_render can find it from the
+     * main thread. The cookie is deregistered before this function
+     * returns — pointer is never accessed after the worker's stack
+     * frame goes away. */
+    fz_cookie cookie = {0};
+    g_mutex_lock (&self->cookies_lock);
+    self->active_cookies[slot] = &cookie;
+    g_mutex_unlock (&self->cookies_lock);
+
     /* Direct render into a fresh cairo surface — zero pixel copying. */
-    surface = render_page_direct (ctx, (fz_page *) pg, zoom, rotation);
+    surface = render_page_direct (ctx, (fz_page *) pg, zoom, rotation, &cookie);
+
+    g_mutex_lock (&self->cookies_lock);
+    self->active_cookies[slot] = NULL;
+    g_mutex_unlock (&self->cookies_lock);
+
     fz_try (ctx) {
       fz_drop_page (ctx, (fz_page *) pg);
     }
@@ -455,21 +518,66 @@ pdf_get_toc (FwDocument *doc)
 
 /* ── Search ───────────────────────────────────────────────────────── */
 
+/* Return the cached fz_stext_page for `page`, building it if absent.
+ * Caller must hold self->lock. Returns NULL on extraction failure
+ * (corrupt page, OOM, etc.). The cached entry is owned by self->ctx
+ * and stays alive for the document's lifetime — read access from any
+ * code path that already holds self->lock is safe.
+ *
+ * MuPDF's fz_stext_page is immutable after construction. We exploit
+ * that to share a single cached copy across selection, search, and
+ * (eventually) word/line click selection. */
+static fz_stext_page *
+pdf_get_or_extract_stext (FwDocumentPdf *self, int page)
+{
+  fz_stext_page *cached = g_hash_table_lookup (self->stext_cache,
+                                                GINT_TO_POINTER (page));
+  if (cached) return cached;
+
+  volatile fz_page *pg = NULL;
+  volatile fz_stext_page *stext = NULL;
+
+  fz_try (self->ctx) {
+    pg = fz_load_page (self->ctx, self->doc, page);
+    stext = fz_new_stext_page_from_page (self->ctx, (fz_page *) pg, NULL);
+  }
+  fz_always (self->ctx) {
+    if (pg) fz_drop_page (self->ctx, (fz_page *) pg);
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: stext extraction failed on page %d: %s",
+               page, fz_caught_message (self->ctx));
+    if (stext) {
+      fz_drop_stext_page (self->ctx, (fz_stext_page *) stext);
+      stext = NULL;
+    }
+  }
+
+  if (stext)
+    g_hash_table_insert (self->stext_cache, GINT_TO_POINTER (page),
+                         (fz_stext_page *) stext);
+
+  return (fz_stext_page *) stext;
+}
+
 static GArray *
 pdf_search (FwDocument *doc, const char *text, int page)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   GArray *hits = g_array_new (FALSE, FALSE, sizeof (FwSearchHit));
-  fz_page *pg = NULL;
 
   g_mutex_lock (&self->lock);
 
-  fz_try (self->ctx) {
-    pg = fz_load_page (self->ctx, self->doc, page);
+  fz_stext_page *stext = pdf_get_or_extract_stext (self, page);
+  if (!stext) {
+    g_mutex_unlock (&self->lock);
+    return hits;
+  }
 
+  fz_try (self->ctx) {
     fz_quad quads[512];
-    int count = fz_search_page (self->ctx, pg, text, NULL, quads,
-                                G_N_ELEMENTS (quads));
+    int count = fz_search_stext_page (self->ctx, stext, text, NULL, quads,
+                                       G_N_ELEMENTS (quads));
 
     for (int i = 0; i < count; i++) {
       fz_rect r = fz_rect_from_quad (quads[i]);
@@ -480,9 +588,6 @@ pdf_search (FwDocument *doc, const char *text, int page)
       };
       g_array_append_val (hits, hit);
     }
-  }
-  fz_always (self->ctx) {
-    fz_drop_page (self->ctx, pg);
   }
   fz_catch (self->ctx) {
     g_warning ("MuPDF: search failed on page %d: %s",
@@ -502,14 +607,16 @@ pdf_get_text (FwDocument *doc, int page,
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   char *result = NULL;
-  fz_page *pg = NULL;
-  fz_stext_page *stext = NULL;
 
   g_mutex_lock (&self->lock);
 
+  fz_stext_page *stext = pdf_get_or_extract_stext (self, page);
+  if (!stext) {
+    g_mutex_unlock (&self->lock);
+    return NULL;
+  }
+
   fz_try (self->ctx) {
-    pg = fz_load_page (self->ctx, self->doc, page);
-    stext = fz_new_stext_page_from_page (self->ctx, pg, NULL);
     fz_point a = { (float) x0, (float) y0 };
     fz_point b = { (float) x1, (float) y1 };
     char *mupdf_text = fz_copy_selection (self->ctx, stext, a, b, 0);
@@ -517,10 +624,6 @@ pdf_get_text (FwDocument *doc, int page,
       result = g_strdup (mupdf_text);
       fz_free (self->ctx, mupdf_text);
     }
-  }
-  fz_always (self->ctx) {
-    fz_drop_stext_page (self->ctx, stext);
-    fz_drop_page (self->ctx, pg);
   }
   fz_catch (self->ctx) {
     g_warning ("MuPDF: text extraction failed on page %d: %s",
@@ -530,6 +633,104 @@ pdf_get_text (FwDocument *doc, int page,
   g_mutex_unlock (&self->lock);
 
   return result;
+}
+
+/* ── Click-to-select snap ─────────────────────────────────────────── */
+
+static gboolean
+pdf_select_at (FwDocument *doc, int page, double x, double y,
+               FwSelectGranularity gran,
+               double *out_x0, double *out_y0,
+               double *out_x1, double *out_y1)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  gboolean ok = FALSE;
+
+  /* MuPDF's snap mode constants. fz_snap_selection takes both endpoints
+   * by reference and returns a quad covering the snapped region. With
+   * a == b set to the click point, it picks the word/line containing
+   * that point. */
+  int mode = (gran == FW_SELECT_LINE) ? FZ_SELECT_LINES : FZ_SELECT_WORDS;
+
+  g_mutex_lock (&self->lock);
+
+  fz_stext_page *stext = pdf_get_or_extract_stext (self, page);
+  if (!stext) {
+    g_mutex_unlock (&self->lock);
+    return FALSE;
+  }
+
+  fz_try (self->ctx) {
+    fz_point a = { (float) x, (float) y };
+    fz_point b = { (float) x, (float) y };
+    fz_quad q = fz_snap_selection (self->ctx, stext, &a, &b, mode);
+
+    /* If the click missed every glyph, fz_snap_selection returns a
+     * zero-size or default quad — detect that and report failure so the
+     * caller can leave the existing selection alone. */
+    float w = q.lr.x - q.ul.x;
+    float h = q.lr.y - q.ul.y;
+    if (w > 0.5f && h > 0.5f) {
+      *out_x0 = (double) q.ul.x;
+      *out_y0 = (double) q.ul.y;
+      *out_x1 = (double) q.lr.x;
+      *out_y1 = (double) q.lr.y;
+      ok = TRUE;
+    }
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: snap selection failed on page %d: %s",
+               page, fz_caught_message (self->ctx));
+  }
+
+  g_mutex_unlock (&self->lock);
+  return ok;
+}
+
+static GArray *
+pdf_get_selection_quads (FwDocument *doc, int page,
+                         double x0, double y0, double x1, double y1)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  GArray *out = g_array_new (FALSE, FALSE, sizeof (FwRect));
+
+  g_mutex_lock (&self->lock);
+
+  fz_stext_page *stext = pdf_get_or_extract_stext (self, page);
+  if (!stext) {
+    g_mutex_unlock (&self->lock);
+    return out;
+  }
+
+  /* fz_highlight_selection follows reading order: partial first line +
+   * full middle lines + partial last line, returned as one quad per
+   * line. The 256-quad bound covers single-page selections of the
+   * largest densely-typeset textbook pages (~50-line printed page); a
+   * per-document worst case far below this. */
+  fz_quad quads[256];
+  fz_try (self->ctx) {
+    fz_point a = { (float) x0, (float) y0 };
+    fz_point b = { (float) x1, (float) y1 };
+    int n = fz_highlight_selection (self->ctx, stext, a, b,
+                                     quads, G_N_ELEMENTS (quads));
+    for (int i = 0; i < n; i++) {
+      /* MuPDF returns a fz_quad (4 corners); for our axis-aligned
+       * highlight overlay the bounding box is enough. */
+      fz_rect r = fz_rect_from_quad (quads[i]);
+      FwRect rect = {
+        .x0 = (double) r.x0, .y0 = (double) r.y0,
+        .x1 = (double) r.x1, .y1 = (double) r.y1,
+      };
+      g_array_append_val (out, rect);
+    }
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: highlight selection failed on page %d: %s",
+               page, fz_caught_message (self->ctx));
+  }
+
+  g_mutex_unlock (&self->lock);
+  return out;
 }
 
 /* ── Link extraction ──────────────────────────────────────────────── */
@@ -601,6 +802,11 @@ fw_document_pdf_finalize (GObject *object)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (object);
   g_mutex_clear (&self->lock);
+  g_mutex_clear (&self->cookies_lock);
+  if (self->stext_cache) {
+    g_hash_table_unref (self->stext_cache);
+    self->stext_cache = NULL;
+  }
   G_OBJECT_CLASS (fw_document_pdf_parent_class)->finalize (object);
 }
 
@@ -616,6 +822,12 @@ static void
 fw_document_pdf_init (FwDocumentPdf *self)
 {
   g_mutex_init (&self->lock);
+  g_mutex_init (&self->cookies_lock);
+  for (int i = 0; i < MAX_RENDER_INSTANCES; i++)
+    self->active_cookies[i] = NULL;
+  /* No GDestroyNotify — entries are fz_stext_page* owned by self->ctx,
+   * which is dropped after the cache is cleared in pdf_close. */
+  self->stext_cache = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
 /* ── Embedded files (PDF /EmbeddedFiles name tree) ───────────────── */
@@ -761,6 +973,123 @@ pdf_save_attachment (FwDocument *doc, FwAttachment *attachment,
   return TRUE;
 }
 
+/* ── Metadata extraction ─────────────────────────────────────────── */
+
+/* Parse a PDF date string ("D:YYYYMMDDHHmmSSOHH'mm'") into a human-readable
+ * "YYYY-MM-DD HH:MM:SS [+/-HH:MM]" form. Returns NULL if the input doesn't
+ * match the expected shape — the dialog will then fall back to the raw
+ * value. PDF dates are optional past the year, so any tail is best-effort. */
+static char *
+format_pdf_date (const char *s)
+{
+  if (!s) return NULL;
+  if (s[0] == 'D' && s[1] == ':') s += 2;
+
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+  int n = sscanf (s, "%4d%2d%2d%2d%2d%2d", &y, &mo, &d, &h, &mi, &se);
+  if (n < 1 || y < 1900 || y > 9999) return NULL;
+  if (n < 2) mo = 1;
+  if (n < 3) d  = 1;
+
+  /* Skip past the parts we already consumed to inspect the timezone. */
+  size_t consumed = (size_t) (n * 2);
+  if (n >= 1) consumed += 2;  /* year is 4 chars, not 2 */
+  const char *tz = (strlen (s) > consumed) ? s + consumed : NULL;
+
+  GString *out = g_string_new (NULL);
+  if (n >= 4)
+    g_string_append_printf (out, "%04d-%02d-%02d %02d:%02d:%02d",
+                            y, mo, d, h, mi, se);
+  else
+    g_string_append_printf (out, "%04d-%02d-%02d", y, mo, d);
+
+  if (tz && (*tz == '+' || *tz == '-')) {
+    int oh = 0, om = 0;
+    if (sscanf (tz + 1, "%2d'%2d", &oh, &om) >= 1)
+      g_string_append_printf (out, " %c%02d:%02d", *tz, oh, om);
+  } else if (tz && *tz == 'Z') {
+    g_string_append (out, " UTC");
+  }
+  return g_string_free (out, FALSE);
+}
+
+static void
+metadata_lookup (fz_context *ctx, fz_document *doc,
+                 GHashTable *out, const char *mupdf_key,
+                 const char *out_key, gboolean is_date)
+{
+  char buf[1024];
+  int n = fz_lookup_metadata (ctx, doc, mupdf_key, buf, sizeof buf);
+  if (n <= 0) return;
+  /* Trim trailing whitespace and reject empty values. */
+  while (n > 0 && g_ascii_isspace (buf[n - 1])) buf[--n] = '\0';
+  if (n == 0) return;
+
+  char *val = NULL;
+  if (is_date) val = format_pdf_date (buf);
+  if (!val)    val = g_strdup (buf);
+  g_hash_table_insert (out, g_strdup (out_key), val);
+}
+
+static GHashTable *
+pdf_get_metadata (FwDocument *doc)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  GHashTable *out = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                            g_free, g_free);
+
+  g_mutex_lock (&self->lock);
+  fz_try (self->ctx) {
+    metadata_lookup (self->ctx, self->doc, out, "info:Title",        "title",             FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:Author",       "author",            FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:Subject",      "subject",           FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:Keywords",     "keywords",          FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:Creator",      "creator",           FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:Producer",     "producer",          FALSE);
+    metadata_lookup (self->ctx, self->doc, out, "info:CreationDate", "creation-date",     TRUE);
+    metadata_lookup (self->ctx, self->doc, out, "info:ModDate",      "modification-date", TRUE);
+    metadata_lookup (self->ctx, self->doc, out, FZ_META_FORMAT,      "format",            FALSE);
+    metadata_lookup (self->ctx, self->doc, out, FZ_META_ENCRYPTION,  "encryption",        FALSE);
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: get_metadata failed: %s",
+               fz_caught_message (self->ctx));
+  }
+  g_mutex_unlock (&self->lock);
+
+  if (g_hash_table_size (out) == 0) {
+    g_hash_table_unref (out);
+    return NULL;
+  }
+  return out;
+}
+
+/* In-flight cancel: walk the active_cookies array under cookies_lock and
+ * flip ->abort = 1 on every published cookie. The render workers see the
+ * flag at the next fz_run_page checkpoint and bail with whatever partial
+ * state they have. cookies_lock is independent of the per-instance render
+ * lock, so cancel never blocks waiting for a render to finish — it just
+ * tells MuPDF to *make* it finish, fast.
+ *
+ * Called from FwCache when the velocity engine transitions to SCRUBBING
+ * (`fw_cache_set_velocity`) and on document close. */
+static void
+pdf_cancel_render (FwDocument *doc)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  int aborted = 0;
+  g_mutex_lock (&self->cookies_lock);
+  for (int i = 0; i < self->n_render; i++) {
+    if (self->active_cookies[i]) {
+      self->active_cookies[i]->abort = 1;
+      aborted++;
+    }
+  }
+  g_mutex_unlock (&self->cookies_lock);
+  if (aborted)
+    FW_TRACE_PDF ("cancel_render: aborted %d in-flight render(s)", aborted);
+}
+
 static void
 fw_document_pdf_iface_init (FwDocumentInterface *iface)
 {
@@ -769,12 +1098,16 @@ fw_document_pdf_iface_init (FwDocumentInterface *iface)
   iface->get_page_count  = pdf_get_page_count;
   iface->get_page_size   = pdf_get_page_size;
   iface->render_page     = pdf_render_page;
+  iface->cancel_render   = pdf_cancel_render;
   iface->get_toc         = pdf_get_toc;
   iface->search          = pdf_search;
   iface->get_text        = pdf_get_text;
   iface->get_links       = pdf_get_links;
   iface->get_attachments = pdf_get_attachments;
   iface->save_attachment = pdf_save_attachment;
+  iface->get_metadata    = pdf_get_metadata;
+  iface->select_at       = pdf_select_at;
+  iface->get_selection_quads = pdf_get_selection_quads;
   /* Page handle API intentionally NULL — PDF uses independent render instances
    * in pdf_render_page() for true parallel rendering. The cache falls through
    * to fw_document_render_page() which dispatches here. */

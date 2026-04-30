@@ -249,6 +249,42 @@ fw_document_save_attachment (FwDocument *self, FwAttachment *attachment,
   return iface->save_attachment (self, attachment, output_path, error);
 }
 
+GHashTable *
+fw_document_get_metadata (FwDocument *self)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), NULL);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->get_metadata)
+    return iface->get_metadata (self);
+  return NULL;
+}
+
+gboolean
+fw_document_select_at (FwDocument *self, int page, double x, double y,
+                       FwSelectGranularity gran,
+                       double *out_x0, double *out_y0,
+                       double *out_x1, double *out_y1)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), FALSE);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->select_at)
+    return iface->select_at (self, page, x, y, gran,
+                             out_x0, out_y0, out_x1, out_y1);
+  return FALSE;
+}
+
+GArray *
+fw_document_get_selection_quads (FwDocument *self, int page,
+                                 double x0, double y0,
+                                 double x1, double y1)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), NULL);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->get_selection_quads)
+    return iface->get_selection_quads (self, page, x0, y0, x1, y1);
+  return NULL;
+}
+
 /* ── Factory — pick backend by file extension ─────────────────────── */
 
 FwDocument *

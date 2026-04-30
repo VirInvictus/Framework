@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 desktop_file = i18n.merge_file(
-  input: 'com.github.vrnvctss.framework.desktop.in',
-  output: 'com.github.vrnvctss.framework.desktop',
+  input: 'io.github.virinvictus.framework.desktop.in',
+  output: 'io.github.virinvictus.framework.desktop',
   type: 'desktop',
   po_dir: '../po',
   install: true,
@@ -10,15 +10,15 @@ desktop_file = i18n.merge_file(
 )
 
 appstream_file = i18n.merge_file(
-  input: 'com.github.vrnvctss.framework.metainfo.xml.in',
-  output: 'com.github.vrnvctss.framework.metainfo.xml',
+  input: 'io.github.virinvictus.framework.metainfo.xml.in',
+  output: 'io.github.virinvictus.framework.metainfo.xml',
   po_dir: '../po',
   install: true,
   install_dir: get_option('datadir') / 'metainfo',
 )
 
 install_data(
-  'com.github.vrnvctss.framework.gschema.xml',
+  'io.github.virinvictus.framework.gschema.xml',
   install_dir: get_option('datadir') / 'glib-2.0' / 'schemas',
 )
 

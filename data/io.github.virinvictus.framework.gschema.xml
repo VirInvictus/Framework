@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<schemalist gettext-domain="framework">
+  <schema id="io.github.virinvictus.framework" path="/io/github/virinvictus/framework/">
+
+    <key name="kinetic-scrolling" type="b">
+      <default>false</default>
+      <summary>Enable kinetic momentum scrolling</summary>
+      <description>
+        When false (default), per-event scroll deltas are capped so the
+        render cache always keeps up with the user's scroll velocity. The
+        user never sees thumbnail placeholders during normal reading scroll;
+        thumbnails are reserved for explicit jumps (TOC click, page-entry
+        edit, search-hit reveal). When true, scroll events apply their full
+        delta with kinetic momentum (a trackpad flick coasts past pages),
+        matching the GTK default. Fast scrolling in this mode will paint
+        thumbnails until the cache catches up.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>
