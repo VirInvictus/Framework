@@ -213,10 +213,49 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **Trace-domain matrix** — `tests/scripts/trace-replay.sh <log>` parses `FW_DEBUG=1` output and produces a timeline (cache state transitions, render queue depth, eviction events) as a single SVG. Catches "why did it freeze" without manual log reading. Lightweight: just awk + svgwrite.
 - [ ] **`framework --self-test`** — built only with `-Dstress=true`, runs a 5-second smoke test: opens a known sample, scrubs through it, validates a hash of the rendered first-page surface against a baseline. Used by the Flatpak CI pipeline (Phase 10) to catch toolchain regressions before shipping.
 
+## Phase 13: Layout & Reflow Architectures
+*Structural shifts for specific formats beyond the single-canvas raster paradigm. Focus on rich aesthetics and format-specific native behaviors.*
+
+- [ ] **Fractal-Style EPUB Reflow** — Bypass MuPDF's fixed-layout engine for EPUBs (and reflowables). Parse the XHTML/DOM and map structural blocks into a `GListModel`, rendered via `GtkListView` using native GTK widgets (`GtkLabel` with Pango). This provides true reflow on window resize, native text selection, drops heavy Cairo surface caching, and achieves a gorgeous, modern aesthetic identical to Fractal's list architecture.
+- [ ] **Comic Facing Pages (Left/Right)** — For CBR/CBZ archives, implement a two-up facing pages layout (left/right). Requires adjusting the `FwView` geometry math and cache eviction window to handle two active `RenderJob` instances side-by-side, preserving aspect ratios and handling mismatched page dimensions gracefully.
+- [ ] **Manga Mode (Right-to-Left)** — Borrowed from MComix/Komikku. Invert keyboard navigation (Right Arrow = previous page, Left Arrow = next page) and default the horizontal scrollbar to the right edge. Crucial for Japanese comics.
+- [ ] **Webtoon Mode (Infinite Canvas)** — Borrowed from Komikku. A specialized continuous vertical view where the Y-gap between pages is exactly `0px`, stitching long-strip comics into a seamless vertical scroll.
+
+## Phase 14: Best-in-Class UX (The "Sumatra Clone" Polish)
+*Features identified across reference repositories that elevate the viewer from 'functional' to 'exceptional'. Translated into native GTK/GNOME idioms.*
+
+- [ ] **Smart Text Selection (from SumatraPDF)** — Sumatra's `FindClosestGlyph` handles selection intuitively by preferring the glyph the cursor is actually hovering over. We will implement double-click-to-select-word and triple-click-to-select-line.
+  - *GTK Implementation:* Add a `GtkGestureClick` to `FwView` reacting to `n_press == 2` and `n_press == 3`. This will query the cached `fz_stext_page` (from Phase 11) to find whitespace boundaries and instantly apply the selection overlay without requiring a click-drag.
+- [ ] **Seamless Auto-Reload (from SumatraPDF / Zathura)** — Sumatra is famous among LaTeX/Typst users because it never locks the PDF file and reloads it instantly when recompiled.
+  - *GTK Implementation:* Attach a `GFileMonitor` to the active document. On the `G_FILE_MONITOR_EVENT_CHANGED` signal, transparently swap the `FwDocument` backend instance, invalidate the `FwCache`, restore the exact `scroll_position` from `FwState`, and display an `AdwToast` ("Document updated") to the user.
+- [ ] **Margin Cropping (from Plato / Sioyek)** — E-ink readers and advanced viewers often auto-crop white margins to maximize text size on small laptop screens.
+  - *GTK Implementation:* Add a "Crop Margins" toggle. When active, scan the first few pages using MuPDF to calculate a unified content bounding box. Apply a translation matrix during the `fw_view_snapshot` phase to hide the whitespace margins globally.
+- [ ] **Visual Ruler / Reading Mark (from Sioyek)** — Sioyek features a "visual mark" that darkens the page except for the active reading line to help users keep their place in dense technical PDFs.
+  - *GTK Implementation:* A toggleable mode in `FwView` that appends a semi-transparent black `GskColorNode` over the whole screen, with a masked-out horizontal band that tracks the mouse Y-coordinate.
+- [ ] **Interactive Loupe / Magnifying Glass (from YACReader)** — Useful for dense comic panels or small text where global zoom is too disruptive.
+  - *GTK Implementation:* Render a secondary `GtkSnapshot` clipped to a circular mask centered on the cursor, scaling the underlying Cairo surface texture by a user-defined multiplier (e.g., 2.5x).
+
 ### Explicitly NOT borrowing
 
 - **Sumatra**: tile-as-default rendering (only as fallback per Tier 2); Win32-anything (`UpdateBitmapColors`, `CRITICAL_SECTION`, `HBITMAP`, GDI paint paths); `Func1<>` callback templates; `EngineEbook`/`EngineChm`/`EngineImages`/`EnginePs` (out of scope per spec §13).
 - **Zathura**: girara UI; vim keybindings; per-page widget model (our single-canvas paint is a deliberate choice); `epub.css` user stylesheets.
+- **Sioyek**: Qt5/QML stack; OpenGL textures (we use `GdkTexture` + `gtk_snapshot_append_texture`); PhD-research features (custom highlights, ruler mode, portal-style links).
+- **Plato**: e-ink-specific UI; `framebuffer/` direct-to-fb rendering; single-threaded `Rc<Context>` model (loses our parallelism).
+- **mupdf-gl**: single-threaded design; in-tree custom UI toolkit.
+
+---
+
+## Deferred (v2.0+ / Strictly Out of Scope for 1.0)
+*Listed so the architecture doesn't preclude them, but forbidden from development until 1.0 ships.*
+
+- [ ] Single page view mode
+- [ ] Facing pages view mode (PDFs/general docs — see Phase 13 for Comic facing pages)
+- [ ] Thumbnail sidebar (alternative to TOC)
+- [ ] Annotations (highlight, underline — stored externally)
+- [ ] Presentation mode (page-at-a-time, no chrome)
+- [ ] Smooth pinch-to-zoom on touchscreens
+- [ ] Configurable keybindings via GSettings
+is a deliberate choice); `epub.css` user stylesheets.
 - **Sioyek**: Qt5/QML stack; OpenGL textures (we use `GdkTexture` + `gtk_snapshot_append_texture`); PhD-research features (custom highlights, ruler mode, portal-style links).
 - **Plato**: e-ink-specific UI; `framebuffer/` direct-to-fb rendering; single-threaded `Rc<Context>` model (loses our parallelism).
 - **mupdf-gl**: single-threaded design; in-tree custom UI toolkit.

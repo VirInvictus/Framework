@@ -26,11 +26,15 @@ framework-spec.md
 claude.run
 
 # Vendored reference repos (see CLAUDE.md "Reference repos" — not part of build)
-.sumatrapdf/
-.zathura-mupdf/
-.zathura/
-.sioyek/
+.fractal/
+.komikku/
+.mcomix/
 .plato/
+.sioyek/
+.sumatrapdf/
+.yacreader/
+.zathura/
+.zathura-mupdf/
 
 # OS junk
 .DS_Store

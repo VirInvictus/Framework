@@ -89,6 +89,10 @@ All cloned shallow (`--depth 1`); refresh with `git -C <dir> pull --depth 1`. Th
 
 | Repo | Stack | Why it's here |
 |---|---|---|
+| `.fractal/` | Rust / GTK4 | Reference for native GTK list architectures and dynamic sizing, particularly for reflowing structured content (like EPUB chapters) into native widgets rather than rendering them as static pixels. |
+| `.komikku/` | Python / GTK4 | Top-tier native GNOME manga/webtoon reader. Reference for Webtoon (infinite vertical canvas) mode and RTL navigation. |
+| `.mcomix/` | Python / GTK3 | Mature comic reader. Reference for robust Manga mode (Right-to-Left orientation) logic. |
+| `.yacreader/` | C++ / Qt | Reference for the highly customizable "Loupe" (magnifying glass) feature and advanced comic spread detection. |
 | `.sumatrapdf/` | C++ / Win32 / GDI | Most architecturally similar engine + cache layer; bundles full MuPDF source under `mupdf/`. |
 | `.zathura/` | C / GTK3 / GLib | Closest peer technically — same `GThreadPool` + GObject + cairo idioms. Render scheduler is in `zathura/render.c`. |
 | `.zathura-mupdf/` | C / Zlib | Tiny PDF plugin (1.3 KLOC). Source of the zero-copy MuPDF→cairo pipeline. |
