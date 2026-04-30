@@ -89,10 +89,10 @@ All cloned shallow (`--depth 1`); refresh with `git -C <dir> pull --depth 1`. Th
 
 | Repo | Stack | Why it's here |
 |---|---|---|
-| `.fractal/` | Rust / GTK4 | Reference for native GTK list architectures and dynamic sizing, particularly for reflowing structured content (like EPUB chapters) into native widgets rather than rendering them as static pixels. |
-| `.komikku/` | Python / GTK4 | Top-tier native GNOME manga/webtoon reader. Reference for Webtoon (infinite vertical canvas) mode and RTL navigation. |
-| `.mcomix/` | Python / GTK3 | Mature comic reader. Reference for robust Manga mode (Right-to-Left orientation) logic. |
-| `.yacreader/` | C++ / Qt | Reference for the highly customizable "Loupe" (magnifying glass) feature and advanced comic spread detection. |
+| `.fractal/` | Rust / GTK4 | Reference for native GTK list architectures and dynamic sizing, particularly for reflowing structured content (like EPUB chapters) into native widgets rather than rendering them as static pixels. (See `.fractal/src/utils/grouping_list_model/` and `.fractal/src/components/`) |
+| `.komikku/` | Python / GTK4 | Top-tier native GNOME manga/webtoon reader. Reference for Webtoon (infinite vertical canvas) mode and RTL navigation. (See `.komikku/komikku/reader/pager/`) |
+| `.mcomix/` | Python / GTK3 | Mature comic reader. Reference for robust Manga mode (Right-to-Left orientation) logic. (See `.mcomix/mcomix/main.py` and `event.py`) |
+| `.yacreader/` | C++ / Qt | Reference for the highly customizable "Loupe" (magnifying glass) feature and advanced comic spread detection. (See `.yacreader/YACReader/magnifying_glass.cpp`) |
 | `.sumatrapdf/` | C++ / Win32 / GDI | Most architecturally similar engine + cache layer; bundles full MuPDF source under `mupdf/`. |
 | `.zathura/` | C / GTK3 / GLib | Closest peer technically — same `GThreadPool` + GObject + cairo idioms. Render scheduler is in `zathura/render.c`. |
 | `.zathura-mupdf/` | C / Zlib | Tiny PDF plugin (1.3 KLOC). Source of the zero-copy MuPDF→cairo pipeline. |
@@ -173,6 +173,10 @@ Framework is **GPL-3.0-or-later**. All borrowed-code attributions go in `README.
 | zathura-pdf-mupdf | Zlib | yes | Same. |
 | SumatraPDF | GPL-3.0 (source headers say `License: GPLv3`; readme's "(A)GPLv3" wording reflects that the *binary* link with AGPL'd MuPDF is effectively AGPL — the source itself is GPL-3) | yes | Combined work distributable under GPL-3 (the common denominator with GPL-3-or-later). |
 | Sioyek | GPL-3.0 | yes | Same as Sumatra. |
+| Fractal | GPL-3.0 | yes | Same as Sumatra. |
+| Komikku | GPL-3.0-or-later | yes | Fully compatible with Framework's license. |
+| MComix | GPL-2.0+ | yes | Compatible; combined work distributed as GPL-3.0-or-later. |
+| YACReader | GPL-3.0 | yes | Same as Sumatra. |
 | Plato | **AGPL-3.0** | **NO source copies** | Technique reference only. Copying code would force Framework to AGPL. |
 | MuPDF (system dep, also bundled in `.sumatrapdf/mupdf/`) | AGPL-3.0 | **NO source copies** | We link the system library — fine. The shipping binary is effectively AGPL because of this link, even though Framework's source stays GPL-3-or-later. |
 | DjVuLibre (system dep) | GPL-2-or-later | linking only | Already credited in README dependency table. |

@@ -225,14 +225,19 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 *Features identified across reference repositories that elevate the viewer from 'functional' to 'exceptional'. Translated into native GTK/GNOME idioms.*
 
 - [ ] **Smart Text Selection (from SumatraPDF)** — Sumatra's `FindClosestGlyph` handles selection intuitively by preferring the glyph the cursor is actually hovering over. We will implement double-click-to-select-word and triple-click-to-select-line.
+  - **Study:** sumatra `.sumatrapdf/src/TextSelection.cpp:44` (`FindClosestGlyph`).
   - *GTK Implementation:* Add a `GtkGestureClick` to `FwView` reacting to `n_press == 2` and `n_press == 3`. This will query the cached `fz_stext_page` (from Phase 11) to find whitespace boundaries and instantly apply the selection overlay without requiring a click-drag.
 - [ ] **Seamless Auto-Reload (from SumatraPDF / Zathura)** — Sumatra is famous among LaTeX/Typst users because it never locks the PDF file and reloads it instantly when recompiled.
+  - **Study:** sumatra `.sumatrapdf/src/utils/FileWatcher.cpp` and zathura `.zathura/zathura/file-monitor-glib.c`.
   - *GTK Implementation:* Attach a `GFileMonitor` to the active document. On the `G_FILE_MONITOR_EVENT_CHANGED` signal, transparently swap the `FwDocument` backend instance, invalidate the `FwCache`, restore the exact `scroll_position` from `FwState`, and display an `AdwToast` ("Document updated") to the user.
 - [ ] **Margin Cropping (from Plato / Sioyek)** — E-ink readers and advanced viewers often auto-crop white margins to maximize text size on small laptop screens.
+  - **Study:** sioyek `.sioyek/scripts/dual_panelify.py` (crop algorithms).
   - *GTK Implementation:* Add a "Crop Margins" toggle. When active, scan the first few pages using MuPDF to calculate a unified content bounding box. Apply a translation matrix during the `fw_view_snapshot` phase to hide the whitespace margins globally.
 - [ ] **Visual Ruler / Reading Mark (from Sioyek)** — Sioyek features a "visual mark" that darkens the page except for the active reading line to help users keep their place in dense technical PDFs.
+  - **Study:** sioyek `.sioyek/pdf_viewer/main_widget.cpp` (visual mark overlay logic).
   - *GTK Implementation:* A toggleable mode in `FwView` that appends a semi-transparent black `GskColorNode` over the whole screen, with a masked-out horizontal band that tracks the mouse Y-coordinate.
 - [ ] **Interactive Loupe / Magnifying Glass (from YACReader)** — Useful for dense comic panels or small text where global zoom is too disruptive.
+  - **Study:** yacreader `.yacreader/YACReader/magnifying_glass.cpp` and `magnifying_glass.h`.
   - *GTK Implementation:* Render a secondary `GtkSnapshot` clipped to a circular mask centered on the cursor, scaling the underlying Cairo surface texture by a user-defined multiplier (e.g., 2.5x).
 
 ### Explicitly NOT borrowing
