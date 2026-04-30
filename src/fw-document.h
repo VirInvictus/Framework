@@ -45,6 +45,18 @@ FwLink *fw_link_new_external (double x0, double y0, double x1, double y1,
 void    fw_link_free         (FwLink *link);
 void    fw_link_free_indirect (gpointer data);  /* for g_array_set_clear_func */
 
+/* ── Embedded file attachment ────────────────────────────────────── */
+
+typedef struct {
+  char     *name;          /* sanitized basename — safe to join with output dir */
+  char     *mime_type;     /* may be NULL */
+  gint64    size;          /* in bytes (-1 if unknown) */
+  gpointer  backend_data;  /* opaque cookie passed back to save_attachment */
+} FwAttachment;
+
+void fw_attachment_free          (FwAttachment *a);
+void fw_attachment_free_indirect (gpointer      data);  /* for g_array set_clear_func */
+
 /* ── Search hit ───────────────────────────────────────────────────── */
 
 typedef struct {
@@ -110,6 +122,18 @@ struct _FwDocumentInterface {
   /* Render cancellation — called when the cache aborts during high-velocity
    * scrubbing. Backends can use this to bail out of in-progress renders. */
   void             (*cancel_render) (FwDocument   *self);
+
+  /* Embedded files (PDF /EmbeddedFiles name tree). Returns a GArray of
+   * `FwAttachment *` (caller frees with g_array_unref + per-element
+   * fw_attachment_free) or NULL when the format does not support
+   * attachments. Save writes one attachment to a destination path; the
+   * caller is responsible for choosing a safe path under a user-selected
+   * directory. */
+  GArray          *(*get_attachments)  (FwDocument   *self);
+  gboolean         (*save_attachment)  (FwDocument   *self,
+                                        FwAttachment *attachment,
+                                        const char   *output_path,
+                                        GError      **error);
 };
 
 /* Public API — delegates to interface vtable */
@@ -150,6 +174,11 @@ cairo_surface_t *fw_document_render_page_from_handle
                                              double        zoom,
                                              int           rotation);
 void             fw_document_cancel_render  (FwDocument   *self);
+GArray          *fw_document_get_attachments(FwDocument   *self);
+gboolean         fw_document_save_attachment(FwDocument   *self,
+                                             FwAttachment *attachment,
+                                             const char   *output_path,
+                                             GError      **error);
 
 /* ── Factory ──────────────────────────────────────────────────────── */
 

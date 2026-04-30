@@ -76,37 +76,36 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 ## Phase 5: Search & Illumination
 *Finding data fast.*
 
-- [ ] **Async Search** — Pass search queries to a background worker. 
-- [ ] **Search Result Highlighting** — Paint semi-transparent yellow overlays on matching text regions.
-- [ ] **Search Navigation** — F3 / Shift+F3 to cycle through matches, automatically scrolling to the active match.
-- [ ] **Match Count** — "3 of 47 matches" label in the search bar.
+- [x] **Async Search** — Pass search queries to a background worker. (v0.7)
+- [x] **Search Result Highlighting** — Paint semi-transparent yellow overlays on matching text regions; active hit in orange. (v0.7)
+- [x] **Search Navigation** — F3 / Shift+F3 to cycle through matches, automatically scrolling to the active match. (v0.7)
+- [x] **Match Count** — "3 of 47" label in the search bar (with `+` while still scanning). (v0.7)
 
 ## Phase 6: Document Topology
 *Moving through the structure and embedded contents of the file.*
 
-- [ ] **Sidebar TOC Highlight** — Track the current page and highlight the active section in the sidebar during scrolling.
-- [ ] **Sidebar Click Navigation** — Clicking a TOC entry jumps immediately to the target page.
+- [x] **Sidebar TOC Highlight** — Track the current page and highlight the active section in the sidebar during scrolling. (v0.8)
+- [x] **Sidebar Click Navigation** — Clicking a TOC entry jumps immediately to the target page. (shipped early; formally landed v0.8)
 - [x] **Internal Link Jumps** — Clicking a linked footnote or index item navigates to the target page.
-- [ ] **Navigation Stack (History)** — Alt+Left / Alt+Right to go back/forward after jumping via links or TOC.
+- [x] **Navigation Stack (History)** — Alt+Left / Alt+Right to go back/forward after jumping via links or TOC. (v0.8)
 
-- [ ] **Embedded File Extraction** — Many PDFs (TTRPG sourcebooks with bundled character sheets, academic papers with supplementary data, technical specs with reference material) carry attached files via the PDF `/EmbeddedFiles` name tree. Add a "Save Embedded Files…" entry to the primary menu that opens a list dialog (filename + size + MIME) with per-file save and select-all-save-as-folder. Read-only operation — Framework does not modify the source PDF; this is the file-equivalent of text copy. DjVu has no equivalent attachment mechanism — interface returns empty list for that backend.
-  - **Study:** zathura-pdf-mupdf `.zathura-mupdf/zathura-pdf-mupdf/attachment.c` — full ~95-line Zlib-licensed reference. Iterates `pdf_xref_len` calling `pdf_is_embedded_file` per object, extracts metadata via `pdf_get_filespec_params`, writes contents via `pdf_load_embedded_file_contents` + `fz_save_buffer`. License is copy-safe; this is the cleanest borrow target in the whole roadmap.
-  - **Target:** add `get_attachments` and `save_attachment` (or a more GLib-idiomatic `extract_attachment_to_file`) to `FwDocumentInterface` in `src/fw-document.h:61`; implement in `src/fw-document-pdf.c` (around the existing TOC code at line 384) and stub-return-empty in `src/fw-document-djvu.c`. New menu entry wired through `src/fw-window.c` actions; new dialog widget under `src/fw-attachments.c/h` (or fold into a future `fw-properties.c` shared with the Phase 9 Document Properties Dialog). Watch the path-traversal angle when saving — sanitize filenames before joining with the user-chosen output directory; an attacker-crafted PDF with a `../../../etc/passwd` filename should not write outside the chosen target.
+- [x] **Embedded File Extraction** — `Save Embedded Files…` menu entry walks the PDF /EmbeddedFiles xref via `pdf_is_embedded_file` + `pdf_get_filespec_params` + `pdf_load_embedded_file_contents` + `fz_save_buffer`; user picks an output folder and every attachment is saved under a sanitized basename (defeats `../path/traversal`). DjVu and CBR backends return NULL — neither format has an attachment mechanism. (v0.11)
 
 ## Phase 7: Format Expansion
 *Leveraging MuPDF to open everything in the anti-library.*
 
-- [ ] **Comic Books (CBZ/CBR)** — Wire up the archive backend for graphic novels.
-- [ ] **EPUB / XPS Support** — Hook up the remaining MuPDF format parsers.
+- [x] **Comic Books (CBZ)** — Routed through the MuPDF backend; CBR best-effort with a libunrar caveat. (v0.9)
+- [x] **CBR via libarchive** — New `FwDocumentCbr` backend at `src/fw-document-cbr.c` enumerates RAR/7z/tar image entries via libarchive, decodes via MuPDF's image API, paints into cairo using the v0.7 zero-copy draw-device pattern. Single-mutex per archive (libarchive isn't thread-safe per-reader); the velocity engine + thumbnail tier hide the serial cost. (v0.11)
+- [x] **XPS / EPUB / FB2 / MOBI Support** — Factory dispatches all of these to the MuPDF backend; reflowable formats (EPUB / FB2 / MOBI) get an `fz_layout_document(600, 900, 11)` pass on every render-instance open. EPUB pagination is "wherever MuPDF's default layout puts it" — Foliate handles serious EPUB reading better. (v0.11)
 - [x] **External Links** — Open web URLs in default browser via `GtkUriLauncher`.
 
 ## Phase 8: Desktop Symbiosis
 *Making it a native, well-behaved GTK citizen.*
 
-- [ ] **GtkListView Migration** — Deprecate `GtkTreeView` for the sidebar. Move to the faster `GtkListView`/`GtkTreeListModel`.
-- [ ] **Empty Window State** — Centered "Open a Document" button when no file is loaded.
-- [ ] **Drag-and-Drop** — Drop a file onto the window to open it.
-- [ ] **Printing** — Implement `GtkPrintOperation`, rendering pages to the print context's cairo surface (Ctrl+P).
+- [x] **GtkListView Migration** — `fw-sidebar.c` rewritten against `GtkListView` + `GtkTreeListModel` + `GtkSingleSelection`; new `FwTocItem` GObject replaces the `GtkTreeStore` row data; current-page highlight walks the `FwTocItem` tree, expands ancestor `GtkTreeListRow`s, then walks the flat model to find the position to select. (v0.11)
+- [x] **Empty Window State** — `AdwStatusPage` with "Open File…" button when no document is loaded; crossfades to the document view on open. (v0.10)
+- [x] **Drag-and-Drop** — `GtkDropTarget` accepting `G_TYPE_FILE` on the window; routes through `fw_window_open_file`. (v0.10)
+- [x] **Printing** — `GtkPrintOperation` wired to `Ctrl+P`; renders each page via `fw_document_render_page` at the print context's DPI capped at 300. (v0.10)
 
 ## Phase 9: Session Resilience
 *Bulletproofing the state tracker.*
@@ -184,6 +183,35 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **Per-thread-shared-context hybrid** — sioyek's middle-ground model (one parent context, per-thread `fz_clone_context`, per-(thread, path) `fz_document`). Measure if this beats both pure Sumatra and Framework's current model on the textbook benchmark before picking.
   - **Study:** sioyek `.sioyek/pdf_viewer/pdf_renderer.cpp:41–63` (`init_context`, `start_threads`, `run` thread main with cloned context); sioyek `pdf_renderer.cpp:454` (per-`(thread_index, path)` document map) — this is the full pattern.
   - **Target:** alternative implementation of `src/fw-document-pdf.c` rendering layer; same insertion points as the previous item.
+
+## Phase 12: Stress-Testing & Debugging Suite
+*Until we can break it on demand, every release is a guess. Build the harness that proves "still fast" and "still doesn't leak" before the borrows in Phase 11 land. Every item lives under `tests/` (currently doesn't exist) and is gated by a meson option so packagers don't pay the cost.*
+
+### 12.1 Test infrastructure
+
+- [ ] **`tests/` tree + `meson_options.txt`** — add `-Dstress=true` (default false) to opt-in to building the harness. New top-level `tests/meson.build` with subdirs `tests/stress/`, `tests/bench/`, `tests/scripts/`. Tests link against the same static archive of `framework_sources` so internal symbols (`fw_cache_*`, `render_page_direct`, etc.) are reachable without exposing them publicly.
+- [ ] **Corpus manifest** — `tests/corpus.json` holding canonical sample paths plus per-sample tags (`large`, `scanned`, `djvu`, `poster`, `cad`, `bookmarks`). Default corpus = Brandon's `/home/bdkl/docs/Calibre Library/`. Manifest read by all stress tools so a single source of truth controls what's exercised. Honour `FW_TEST_CORPUS_ROOT` env var override for CI without Calibre.
+
+### 12.2 Stress tests (the "can it survive abuse" set)
+
+- [ ] **`stress-scrub`** — opens a document headlessly (no widget tree, just `FwDocument` + `FwCache` driven by direct `fw_cache_set_priority` + `fw_cache_set_velocity` calls), simulates a worst-case scrub: 0→last page in 500 ms, then 5×back-and-forth, then a settle. Asserts: zero crashes, RSS stays under a configurable cap (default 600 MB), no surface memory leak after settle (peak vs. resting RSS within 5%). Failure prints a `coredumpctl debug` invocation. Borrows the dispatch model from `.zathura/zathura/render.c` for the velocity injector.
+- [ ] **`stress-zoom-storm`** — page 0 → 50 alternating Ctrl+Plus / Ctrl+Minus across the full zoom range (10%–1000%). Confirms `prev_texture` slot doesn't double-pin surfaces; counts `pixmap → cairo_surface_t` allocations vs. frees via a debug counter exported when `-Dstress=true`. Catches the bug class where a zoom-storm leaks one surface per cycle.
+- [ ] **`stress-multidoc`** — open/close 50 documents in sequence (and another mode: 10 in parallel `FwDocument` instances) to exercise the dispose path without the windowing layer. Validates the cache leak fix from v1.3.3 doesn't regress, and that the 8-instance MuPDF backend tears down cleanly under churn.
+- [ ] **`stress-corpus-soak`** — iterate the entire corpus, render every page at fit-width once, twice with rotation, scrub each. The "hit every code path on every kind of file we have" run. Configurable with `--max-time` for CI, default unbounded for local. Reports per-file timings and surfaces any `fz_catch` warnings.
+
+### 12.3 Benchmarks (the "is it still fast" set)
+
+- [ ] **`bench-render`** — measures cold/warm `render_page_direct` wall time across the corpus, p50/p95/p99 buckets per backend (PDF/DjVu) and per-tag (large textbook, comic, scanned book). Output is JSON to `tests/bench/results-<commit>.json`; a `tests/scripts/bench-diff.py` compares two runs and flags regressions over a configurable threshold (default 5%).
+- [ ] **`bench-cache-hit-rate`** — drives the cache through a recorded scroll trace and reports hit/miss ratio per state (STATIC/CRUISING/SCRUBBING). Trace files live in `tests/traces/*.scroll` (binary, replayable). Useful for tuning the bytes-aware cache cap (Phase 11 Tier 1) without manual A/B testing.
+- [ ] **`bench-startup`** — open-to-first-paint latency for representative samples. Catches regressions in the `apply_fit_width_tick` deferred layout path.
+
+### 12.4 Debugging setup
+
+- [ ] **Sanitizer build option** — `-Dsanitize=address,undefined` in `meson_options.txt` flips on `-fsanitize=address,undefined,leak`. Per-file `LSAN_SUPPRESSIONS` for known MuPDF/DjVu leaks (font-store statics, ddjvuapi message buffers) in `tests/lsan.supp`. Document the flow in `CLAUDE.md`.
+- [ ] **`tests/scripts/debug.sh`** — wraps `gdb -batch` with the canonical batch flags used in `CLAUDE.md`, plus pre-loaded breakpoints in `tests/scripts/framework.gdb` for `fz_catch` (the silent-warning trap), `cache_entry_free`, `submit_next_jobs`, and `render_worker`. One command for "open this file under gdb with all the right hooks."
+- [ ] **`tests/scripts/coredump-triage.sh`** — given a coredump file or PID, runs `coredumpctl debug` non-interactively, captures `thread apply all bt`, MuPDF context state from each `RenderInstance`, and the cache state via a custom `gdb` pretty-printer for `FwCache`. Output goes to `~/.local/share/framework/triage/<timestamp>/`.
+- [ ] **Trace-domain matrix** — `tests/scripts/trace-replay.sh <log>` parses `FW_DEBUG=1` output and produces a timeline (cache state transitions, render queue depth, eviction events) as a single SVG. Catches "why did it freeze" without manual log reading. Lightweight: just awk + svgwrite.
+- [ ] **`framework --self-test`** — built only with `-Dstress=true`, runs a 5-second smoke test: opens a known sample, scrubs through it, validates a hash of the rendered first-page surface against a baseline. Used by the Flatpak CI pipeline (Phase 10) to catch toolchain regressions before shipping.
 
 ### Explicitly NOT borrowing
 

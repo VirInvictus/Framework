@@ -16,7 +16,7 @@ This is very much a work-in-progress and is not feature-complete. I'm a computer
 
 # Framework
 
-A fast, native GNOME document viewer built on MuPDF and DjVuLibre. Framework is engineered for performance, utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
+A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, and **MOBI** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
@@ -31,6 +31,7 @@ Linux document viewers often fall into two categories: feature-heavy clients (li
 | **Parallel Rendering** | Independent MuPDF instances render pages across multiple CPU cores. |
 | **Zero-Copy DjVu** | Full DjVuLibre support with zero-copy rendering into Cairo surfaces. |
 | **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland. |
+| **Async Search** | Background-thread find that highlights matches and surfaces results as they're found, even on 1000-page textbooks. |
 
 ## Screenshot
 
@@ -66,6 +67,8 @@ Framework is strictly a **viewer**. It is not an editor (no annotations), not a 
 | First page | Home, Ctrl+Home |
 | Last page | End, Ctrl+End |
 | Go to page | Ctrl+G |
+| Back (history) | Alt+Left |
+| Forward (history) | Alt+Right |
 
 ### Zoom
 
@@ -83,8 +86,27 @@ Framework is strictly a **viewer**. It is not an editor (no annotations), not a 
 |--------|----------|
 | Toggle sidebar | F9 |
 | Fullscreen | F11 |
-| Find | Ctrl+F |
 | Invert colors | Ctrl+I |
+
+### Search
+
+| Action | Shortcut |
+|--------|----------|
+| Find | Ctrl+F |
+| Next match | F3 |
+| Previous match | Shift+F3 |
+| Close search | Escape |
+
+### General
+
+| Action | Shortcut |
+|--------|----------|
+| Open file | Ctrl+O |
+| Print | Ctrl+P |
+| Copy selected text | Ctrl+C |
+| Quit | Ctrl+Q, Ctrl+W |
+
+You can also drop a file directly onto the window to open it.
 
 ## Requirements
 
@@ -94,8 +116,9 @@ Framework is strictly a **viewer**. It is not an editor (no annotations), not a 
 |------------|---------|
 | gtk4 (4.16+) | UI toolkit |
 | libadwaita (1.7+) | GNOME design patterns |
-| mupdf (1.24+) | PDF rendering |
+| mupdf (1.24+) | PDF / CBZ / XPS / EPUB / FB2 / MOBI rendering |
 | djvulibre (3.5.28+) | DjVu rendering |
+| libarchive (3.6+) | CBR (RAR) decompression |
 | cairo (1.18+) | Surface management |
 | glib (2.82+) | Data structures, threading |
 | json-glib (1.10+) | State persistence |
@@ -105,7 +128,8 @@ On Fedora:
 
 ```bash
 sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
-                 cairo-devel glib2-devel json-glib-devel meson gcc
+                 libarchive-devel cairo-devel glib2-devel json-glib-devel \
+                 meson gcc
 ```
 
 ## Building
@@ -125,7 +149,12 @@ framework document.pdf
 
 # Open a DjVu file
 framework book.djvu
+
+# Open a CBZ comic-book archive
+framework volume.cbz
 ```
+
+CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB pagination is whatever MuPDF's default layout produces — Framework is good for fixed-layout EPUBs and as an "open everything" reader; serious EPUB readers like [Foliate](https://johnfactotum.github.io/foliate/) handle reflow and font customization better.
 
 One document per window. Multiple files open multiple windows.
 

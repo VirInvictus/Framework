@@ -14,6 +14,11 @@
 #include "fw-debug.h"
 #include <gdk/gdk.h>
 
+typedef struct {
+  int     page;
+  double  fraction;  /* 0..1 within page */
+} NavEntry;
+
 struct _FwWindow {
   AdwApplicationWindow  parent_instance;
 
@@ -36,10 +41,15 @@ struct _FwWindow {
   /* Layout */
   AdwOverlaySplitView  *split_view;
   FwSidebar            *sidebar;
+  GtkStack             *content_stack;  /* "empty" | "document" */
   GtkScrolledWindow    *scroll;
   FwView               *view;
   FwSearch             *search;
   GtkSearchBar         *search_bar;
+  GtkSearchEntry       *search_entry;
+  GtkLabel             *search_count_label;
+  GtkButton            *search_prev_button;
+  GtkButton            *search_next_button;
 
   /* State */
   double                zoom;
@@ -51,11 +61,20 @@ struct _FwWindow {
   /* Deferred restore */
   double                _restore_scroll;  /* scroll fraction to restore */
   gboolean              _restore_pending;
+
+  /* Navigation history — stacks of NavEntry (page, intra-page-fraction).
+   * Pushed only on explicit jumps (link click, sidebar TOC, page entry),
+   * not on plain scroll or next/prev page actions. Cleared on document
+   * change. */
+  GArray               *nav_back;     /* NavEntry[] */
+  GArray               *nav_forward;  /* NavEntry[] */
+  gboolean              nav_in_progress;  /* re-entrancy guard */
 };
 
 G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
 
 static void fw_window_save_state (FwWindow *self);
+static void nav_push_current     (FwWindow *self);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -137,6 +156,8 @@ go_to_page (FwWindow *self, int page)
   if (page >= total) page = total - 1;
   self->current_page = page;
   update_page_entry (self);
+  if (self->sidebar)
+    fw_sidebar_set_current_page (self->sidebar, page);
 
   if (self->view)
     fw_view_go_to_page (self->view, page);
@@ -165,6 +186,8 @@ page_entry_activated (GtkEntry *entry, gpointer user_data)
   const char *text = gtk_entry_buffer_get_text (
     gtk_entry_get_buffer (entry));
   int page = (int) g_ascii_strtoll (text, NULL, 10) - 1;
+  if (page != self->current_page)
+    nav_push_current (self);
   go_to_page (self, page);
 }
 
@@ -182,6 +205,8 @@ on_scroll_changed (GtkAdjustment *adj, gpointer user_data)
   if (page != self->current_page) {
     self->current_page = page;
     update_page_entry (self);
+    if (self->sidebar)
+      fw_sidebar_set_current_page (self->sidebar, page);
   }
 }
 
@@ -193,6 +218,143 @@ search_toggled (GtkToggleButton *button, gpointer user_data)
   FwWindow *self = FW_WINDOW (user_data);
   gboolean active = gtk_toggle_button_get_active (button);
   gtk_search_bar_set_search_mode (self->search_bar, active);
+  if (active) {
+    gtk_widget_grab_focus (GTK_WIDGET (self->search_entry));
+  } else if (self->search) {
+    fw_search_clear (self->search);
+  }
+}
+
+/* ── Search controller wiring ───────────────────────────────────── */
+
+static void
+update_search_count_label (FwWindow *self)
+{
+  if (!self->search_count_label || !self->search)
+    return;
+
+  int count = fw_search_get_count (self->search);
+  int current = fw_search_get_current (self->search);
+  gboolean running = fw_search_is_running (self->search);
+
+  char buf[64];
+  if (count == 0)
+    g_snprintf (buf, sizeof buf, "%s", running ? "Searching…" : "");
+  else
+    g_snprintf (buf, sizeof buf, "%d of %d%s",
+                current >= 0 ? current + 1 : 0,
+                count,
+                running ? "+" : "");
+
+  gtk_label_set_text (self->search_count_label, buf);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->search_prev_button), count > 0);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->search_next_button), count > 0);
+}
+
+static void
+on_search_hits_changed (FwSearch *search, gpointer user_data)
+{
+  (void) search;
+  update_search_count_label (FW_WINDOW (user_data));
+}
+
+static void
+on_search_current_changed (FwSearch *search, gpointer user_data)
+{
+  (void) search;
+  FwWindow *self = FW_WINDOW (user_data);
+  update_search_count_label (self);
+
+  /* Update header bar page entry to reflect the page that contains the
+   * active hit, since the view will scroll there. */
+  int page = fw_search_get_current_page (self->search);
+  if (page >= 0 && page != self->current_page) {
+    self->current_page = page;
+    update_page_entry (self);
+  }
+}
+
+static void
+on_search_finished (FwSearch *search, gpointer user_data)
+{
+  (void) search;
+  update_search_count_label (FW_WINDOW (user_data));
+}
+
+static void
+on_search_entry_changed (GtkSearchEntry *entry, gpointer user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->search)
+    return;
+  const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
+  if (!text || !text[0]) {
+    fw_search_clear (self->search);
+    update_search_count_label (self);
+    return;
+  }
+  fw_search_find (self->search, text, self->current_page);
+  update_search_count_label (self);
+}
+
+static void
+on_search_entry_next (GtkSearchEntry *entry, gpointer user_data)
+{
+  (void) entry;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->search)
+    fw_search_next (self->search);
+}
+
+static void
+on_search_entry_previous (GtkSearchEntry *entry, gpointer user_data)
+{
+  (void) entry;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->search)
+    fw_search_prev (self->search);
+}
+
+static void
+on_search_entry_stop (GtkSearchEntry *entry, gpointer user_data)
+{
+  (void) entry;
+  FwWindow *self = FW_WINDOW (user_data);
+  gtk_toggle_button_set_active (self->search_toggle, FALSE);
+}
+
+static void
+search_prev_clicked (GtkButton *button, gpointer user_data)
+{
+  (void) button;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->search)
+    fw_search_prev (self->search);
+}
+
+static void
+search_next_clicked (GtkButton *button, gpointer user_data)
+{
+  (void) button;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->search)
+    fw_search_next (self->search);
+}
+
+static void act_find_next (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  if (w->search)
+    fw_search_next (w->search);
+}
+
+static void act_find_prev (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  if (w->search)
+    fw_search_prev (w->search);
 }
 
 /* ── Sidebar toggle ───────────────────────────────────────────────── */
@@ -213,8 +375,116 @@ on_sidebar_page_requested (FwSidebar *sidebar, int page, gpointer user_data)
 {
   (void) sidebar;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->document && page >= 0)
+  if (self->document && page >= 0) {
+    if (page != self->current_page)
+      nav_push_current (self);
     go_to_page (self, page);
+  }
+}
+
+/* ── Navigation history ───────────────────────────────────────────── */
+
+/* Capture the current viewport as a NavEntry. */
+static NavEntry
+nav_capture (FwWindow *self)
+{
+  NavEntry e = { .page = self->current_page, .fraction = 0 };
+  if (!self->view || !self->scroll || !self->document)
+    return e;
+
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (!vadj)
+    return e;
+
+  /* Resolve current page + intra-page fraction by querying the view's
+   * layout via fw_view_get_current_page() and the y-offset arithmetic
+   * the rest of fw_window does. The simplest portable approach: use
+   * scroll fraction within total (close enough for restore). */
+  int page = fw_view_get_current_page (self->view);
+  e.page = page;
+
+  /* Fraction = (scroll_y - page_top) / page_height — but the view owns
+   * those arrays. Approximate via global scroll fraction; on jump we
+   * land back on the same page anyway, which is the load-bearing part. */
+  double upper = gtk_adjustment_get_upper (vadj);
+  double size  = gtk_adjustment_get_page_size (vadj);
+  double value = gtk_adjustment_get_value (vadj);
+  if (upper > size)
+    e.fraction = value / (upper - size);
+  return e;
+}
+
+static void
+nav_apply (FwWindow *self, NavEntry e)
+{
+  if (!self->view)
+    return;
+
+  self->nav_in_progress = TRUE;
+  fw_view_go_to_page (self->view, e.page);
+  self->current_page = e.page;
+  update_page_entry (self);
+  if (self->sidebar)
+    fw_sidebar_set_current_page (self->sidebar, e.page);
+
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (vadj && e.fraction > 0) {
+    double upper = gtk_adjustment_get_upper (vadj);
+    double size  = gtk_adjustment_get_page_size (vadj);
+    if (upper > size)
+      gtk_adjustment_set_value (vadj, e.fraction * (upper - size));
+  }
+  self->nav_in_progress = FALSE;
+}
+
+/* Push the current viewport onto the back stack. Clears the forward
+ * stack — the standard browser history rule. */
+static void
+nav_push_current (FwWindow *self)
+{
+  if (!self->document || self->nav_in_progress)
+    return;
+
+  NavEntry e = nav_capture (self);
+  g_array_append_val (self->nav_back, e);
+  g_array_set_size (self->nav_forward, 0);
+}
+
+static void
+on_view_page_jumped (FwView *view, int dest_page, gpointer user_data)
+{
+  (void) view; (void) dest_page;
+  nav_push_current (FW_WINDOW (user_data));
+}
+
+static void act_nav_back (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  if (w->nav_back->len == 0)
+    return;
+  /* Push current → forward, then pop back → current. */
+  NavEntry cur = nav_capture (w);
+  g_array_append_val (w->nav_forward, cur);
+
+  NavEntry e = g_array_index (w->nav_back, NavEntry, w->nav_back->len - 1);
+  g_array_set_size (w->nav_back, w->nav_back->len - 1);
+  nav_apply (w, e);
+}
+
+static void act_nav_forward (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  if (w->nav_forward->len == 0)
+    return;
+  NavEntry cur = nav_capture (w);
+  g_array_append_val (w->nav_back, cur);
+
+  NavEntry e = g_array_index (w->nav_forward, NavEntry,
+                              w->nav_forward->len - 1);
+  g_array_set_size (w->nav_forward, w->nav_forward->len - 1);
+  nav_apply (w, e);
 }
 
 /* ── Window actions ───────────────────────────────────────────────── */
@@ -292,11 +562,199 @@ static void act_rotate_ccw (GSimpleAction *a, GVariant *p, gpointer d)
   set_rotation (w, w->rotation - 90);
 }
 
+/* ── Embedded files extraction ──────────────────────────────────── */
+
+typedef struct {
+  FwWindow *window;        /* weak: not refed; we live inside the window */
+  GArray   *attachments;   /* owned */
+} ExtractCtx;
+
+static void
+extract_ctx_free (ExtractCtx *ctx)
+{
+  if (ctx->attachments)
+    g_array_unref (ctx->attachments);
+  g_free (ctx);
+}
+
+static void
+extract_folder_chosen (GObject *source, GAsyncResult *result,
+                       gpointer user_data)
+{
+  ExtractCtx *ctx = user_data;
+  g_autoptr (GFile) folder =
+    gtk_file_dialog_select_folder_finish (GTK_FILE_DIALOG (source),
+                                          result, NULL);
+  if (!folder) {
+    extract_ctx_free (ctx);
+    return;
+  }
+
+  g_autofree char *folder_path = g_file_get_path (folder);
+  if (!folder_path || !ctx->window->document) {
+    extract_ctx_free (ctx);
+    return;
+  }
+
+  int saved = 0, failed = 0;
+  GString *errors = g_string_new (NULL);
+
+  for (guint i = 0; i < ctx->attachments->len; i++) {
+    FwAttachment *a = g_array_index (ctx->attachments, FwAttachment *, i);
+    g_autofree char *out_path = g_build_filename (folder_path, a->name, NULL);
+
+    g_autoptr (GError) err = NULL;
+    if (fw_document_save_attachment (ctx->window->document, a,
+                                      out_path, &err)) {
+      saved++;
+    } else {
+      failed++;
+      if (err && errors->len < 1024)
+        g_string_append_printf (errors, "\n%s: %s", a->name, err->message);
+    }
+  }
+
+  /* Toast-style summary via AdwAlertDialog. */
+  g_autofree char *heading = g_strdup_printf (
+    "Extracted %d file%s%s",
+    saved, saved == 1 ? "" : "s",
+    failed > 0 ? " (some failed)" : "");
+  g_autofree char *body = failed > 0
+    ? g_strdup_printf ("%d failed:%s", failed, errors->str)
+    : g_strdup_printf ("Saved to %s", folder_path);
+
+  AdwAlertDialog *dlg = ADW_ALERT_DIALOG (
+    adw_alert_dialog_new (heading, body));
+  adw_alert_dialog_add_response (dlg, "ok", "OK");
+  adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (ctx->window));
+
+  g_string_free (errors, TRUE);
+  extract_ctx_free (ctx);
+}
+
+static void act_save_attachments (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *self = d;
+  if (!self->document)
+    return;
+
+  GArray *list = fw_document_get_attachments (self->document);
+  if (!list || list->len == 0) {
+    if (list) g_array_unref (list);
+    AdwAlertDialog *dlg = ADW_ALERT_DIALOG (adw_alert_dialog_new (
+      "No Embedded Files",
+      "This document has no attached files to extract."));
+    adw_alert_dialog_add_response (dlg, "ok", "OK");
+    adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (self));
+    return;
+  }
+
+  ExtractCtx *ctx = g_new0 (ExtractCtx, 1);
+  ctx->window      = self;
+  ctx->attachments = list;
+
+  GtkFileDialog *dialog = gtk_file_dialog_new ();
+  g_autofree char *title = g_strdup_printf (
+    "Extract %u file%s to folder…", list->len, list->len == 1 ? "" : "s");
+  gtk_file_dialog_set_title (dialog, title);
+  gtk_file_dialog_select_folder (dialog, GTK_WINDOW (self), NULL,
+                                 extract_folder_chosen, ctx);
+  g_object_unref (dialog);
+}
+
+/* ── Printing ───────────────────────────────────────────────────── */
+
+/* Render quality: cap at 300 DPI to keep memory bounded. A US-letter page
+ * at 300 DPI is 8.5*300 × 11*300 × 4 bytes = ~33 MB — acceptable for a
+ * print-time render. The printer's actual native DPI may be 600/1200, but
+ * cairo handles the upscale on the destination side. */
+#define PRINT_DPI_CAP 300.0
+
+static void
+on_print_begin (GtkPrintOperation *op, GtkPrintContext *ctx,
+                gpointer user_data)
+{
+  (void) ctx;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->document) {
+    gtk_print_operation_set_n_pages (op, 0);
+    return;
+  }
+  gtk_print_operation_set_n_pages (op, fw_document_get_page_count (self->document));
+}
+
+static void
+on_print_draw_page (GtkPrintOperation *op, GtkPrintContext *ctx,
+                    int page_nr, gpointer user_data)
+{
+  (void) op;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->document)
+    return;
+
+  cairo_t *cr = gtk_print_context_get_cairo_context (ctx);
+  if (!cr)
+    return;
+
+  /* Render at the print context's DPI capped at 300 — same surface format
+   * the cache uses, so we get the v0.7 zero-copy MuPDF render path. */
+  double dpi = gtk_print_context_get_dpi_x (ctx);
+  if (dpi <= 0)        dpi = 72.0;
+  if (dpi > PRINT_DPI_CAP) dpi = PRINT_DPI_CAP;
+  double zoom = dpi / 72.0;
+
+  cairo_surface_t *surface =
+    fw_document_render_page (self->document, page_nr, zoom, 0);
+  if (!surface) {
+    g_warning ("Print: render failed for page %d", page_nr + 1);
+    return;
+  }
+
+  /* Cairo print context uses points (72 DPI). Source surface is in pixels
+   * at `zoom` magnification — scale down so 1 source pixel maps to 1/zoom
+   * points, which is the correct on-paper size. */
+  cairo_save (cr);
+  cairo_scale (cr, 1.0 / zoom, 1.0 / zoom);
+  cairo_set_source_surface (cr, surface, 0, 0);
+  cairo_paint (cr);
+  cairo_restore (cr);
+
+  cairo_surface_destroy (surface);
+
+  FW_TRACE_WINDOW ("print: page %d rendered at %.0f DPI", page_nr + 1, dpi);
+}
+
 static void act_print (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
-  (void)d;
-  /* TODO: implement printing via GtkPrintOperation */
+  FwWindow *self = d;
+  if (!self->document)
+    return;
+
+  GtkPrintOperation *op = gtk_print_operation_new ();
+  gtk_print_operation_set_embed_page_setup (op, TRUE);
+  gtk_print_operation_set_show_progress (op, TRUE);
+
+  if (self->file_path) {
+    g_autofree char *base = g_path_get_basename (self->file_path);
+    gtk_print_operation_set_job_name (op, base);
+  }
+
+  g_signal_connect (op, "begin-print",
+                    G_CALLBACK (on_print_begin), self);
+  g_signal_connect (op, "draw-page",
+                    G_CALLBACK (on_print_draw_page), self);
+
+  GError *err = NULL;
+  gtk_print_operation_run (op,
+                            GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG,
+                            GTK_WINDOW (self), &err);
+  if (err) {
+    g_warning ("Print: %s", err->message);
+    g_error_free (err);
+  }
+  g_object_unref (op);
 }
 
 static void act_copy (GSimpleAction *a, GVariant *p, gpointer d)
@@ -447,6 +905,31 @@ on_scale_factor_changed (GObject *object, GParamSpec *pspec, gpointer user_data)
   fw_cache_start (self->cache, self->zoom, self->rotation);
 }
 
+/* ── Drag-and-drop ──────────────────────────────────────────────── */
+
+static gboolean
+on_drop (GtkDropTarget *target, const GValue *value, double x, double y,
+         gpointer user_data)
+{
+  (void) target; (void) x; (void) y;
+  FwWindow *self = FW_WINDOW (user_data);
+
+  if (!G_VALUE_HOLDS (value, G_TYPE_FILE))
+    return FALSE;
+
+  GFile *file = g_value_get_object (value);
+  if (!file)
+    return FALSE;
+
+  g_autofree char *path = g_file_get_path (file);
+  if (!path)
+    return FALSE;
+
+  FW_TRACE_WINDOW ("drop: '%s'", path);
+  fw_window_open_file (self, path);
+  return TRUE;
+}
+
 /* ── Close handler ───────────────────────────────────────────────── */
 
 static gboolean
@@ -521,7 +1004,8 @@ fw_window_constructed (GObject *object)
   g_menu_append_submenu (menu, "Zoom", G_MENU_MODEL (zoom_section));
 
   g_menu_append (menu, "Invert Colors", "win.invert-colors");
-  g_menu_append (menu, "Print...", "win.print");
+  g_menu_append (menu, "Print…", "win.print");
+  g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
   g_menu_append (menu, "About Framework", "win.about");
 
   GtkMenuButton *menu_button = GTK_MENU_BUTTON (gtk_menu_button_new ());
@@ -567,6 +1051,8 @@ fw_window_constructed (GObject *object)
 
   /* ── Content area ── */
   self->view = fw_view_new ();
+  g_signal_connect (self->view, "page-jumped",
+                    G_CALLBACK (on_view_page_jumped), self);
   self->scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (self->scroll, GTK_WIDGET (self->view));
   gtk_scrolled_window_set_policy (self->scroll,
@@ -583,17 +1069,87 @@ fw_window_constructed (GObject *object)
   gtk_widget_set_hexpand (GTK_WIDGET (self->scroll), TRUE);
 
   /* Search bar overlay */
-  GtkSearchEntry *search_entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
+  self->search_entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
+  gtk_widget_set_hexpand (GTK_WIDGET (self->search_entry), TRUE);
+  g_signal_connect (self->search_entry, "search-changed",
+                    G_CALLBACK (on_search_entry_changed), self);
+  g_signal_connect (self->search_entry, "next-match",
+                    G_CALLBACK (on_search_entry_next), self);
+  g_signal_connect (self->search_entry, "previous-match",
+                    G_CALLBACK (on_search_entry_previous), self);
+  g_signal_connect (self->search_entry, "stop-search",
+                    G_CALLBACK (on_search_entry_stop), self);
+
+  self->search_count_label = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->search_count_label), "dim-label");
+  gtk_widget_set_size_request (GTK_WIDGET (self->search_count_label), 90, -1);
+  gtk_label_set_xalign (self->search_count_label, 0.5);
+
+  self->search_prev_button = GTK_BUTTON (
+    gtk_button_new_from_icon_name ("go-up-symbolic"));
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->search_prev_button),
+                               "Previous Match (Shift+F3)");
+  gtk_widget_set_sensitive (GTK_WIDGET (self->search_prev_button), FALSE);
+  g_signal_connect (self->search_prev_button, "clicked",
+                    G_CALLBACK (search_prev_clicked), self);
+
+  self->search_next_button = GTK_BUTTON (
+    gtk_button_new_from_icon_name ("go-down-symbolic"));
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->search_next_button),
+                               "Next Match (F3)");
+  gtk_widget_set_sensitive (GTK_WIDGET (self->search_next_button), FALSE);
+  g_signal_connect (self->search_next_button, "clicked",
+                    G_CALLBACK (search_next_clicked), self);
+
+  GtkBox *search_row = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6));
+  gtk_box_append (search_row, GTK_WIDGET (self->search_entry));
+  gtk_box_append (search_row, GTK_WIDGET (self->search_count_label));
+  gtk_box_append (search_row, GTK_WIDGET (self->search_prev_button));
+  gtk_box_append (search_row, GTK_WIDGET (self->search_next_button));
+
   self->search_bar = GTK_SEARCH_BAR (gtk_search_bar_new ());
-  gtk_search_bar_set_child (self->search_bar, GTK_WIDGET (search_entry));
-  gtk_search_bar_connect_entry (self->search_bar, GTK_EDITABLE (search_entry));
+  gtk_search_bar_set_child (self->search_bar, GTK_WIDGET (search_row));
+  gtk_search_bar_connect_entry (self->search_bar,
+                                GTK_EDITABLE (self->search_entry));
   gtk_widget_set_valign (GTK_WIDGET (self->search_bar), GTK_ALIGN_START);
+
+  /* Search controller — created here, populated when a doc opens. */
+  self->search = fw_search_new ();
+  g_signal_connect (self->search, "hits-changed",
+                    G_CALLBACK (on_search_hits_changed), self);
+  g_signal_connect (self->search, "current-changed",
+                    G_CALLBACK (on_search_current_changed), self);
+  g_signal_connect (self->search, "search-finished",
+                    G_CALLBACK (on_search_finished), self);
 
   GtkOverlay *overlay = GTK_OVERLAY (gtk_overlay_new ());
   gtk_overlay_set_child (overlay, GTK_WIDGET (self->scroll));
   gtk_overlay_add_overlay (overlay, GTK_WIDGET (self->search_bar));
   gtk_widget_set_vexpand (GTK_WIDGET (overlay), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (overlay), TRUE);
+
+  /* Empty-state page shown when no document is open. */
+  AdwStatusPage *empty = ADW_STATUS_PAGE (adw_status_page_new ());
+  adw_status_page_set_icon_name (empty, APP_ID);
+  adw_status_page_set_title (empty, "Open a Document");
+  adw_status_page_set_description (empty,
+    "Drop a PDF, DjVu, or CBZ file here, or use Ctrl+O.");
+  GtkButton *empty_btn = GTK_BUTTON (gtk_button_new_with_label ("Open File…"));
+  gtk_actionable_set_action_name (GTK_ACTIONABLE (empty_btn), "app.open");
+  gtk_widget_set_halign (GTK_WIDGET (empty_btn), GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "suggested-action");
+  gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "pill");
+  adw_status_page_set_child (empty, GTK_WIDGET (empty_btn));
+
+  /* Stack flips between the empty state and the rendered document. */
+  self->content_stack = GTK_STACK (gtk_stack_new ());
+  gtk_stack_set_transition_type (self->content_stack,
+                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+  gtk_stack_add_named (self->content_stack, GTK_WIDGET (empty), "empty");
+  gtk_stack_add_named (self->content_stack, GTK_WIDGET (overlay), "document");
+  gtk_stack_set_visible_child_name (self->content_stack, "empty");
+  gtk_widget_set_vexpand (GTK_WIDGET (self->content_stack), TRUE);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->content_stack), TRUE);
 
   /* Sidebar */
   self->sidebar = fw_sidebar_new ();
@@ -609,7 +1165,7 @@ fw_window_constructed (GObject *object)
   adw_overlay_split_view_set_sidebar (self->split_view,
                                        GTK_WIDGET (sidebar_scroll));
   adw_overlay_split_view_set_content (self->split_view,
-                                       GTK_WIDGET (overlay));
+                                       GTK_WIDGET (self->content_stack));
   adw_overlay_split_view_set_show_sidebar (self->split_view, FALSE);
   adw_overlay_split_view_set_max_sidebar_width (self->split_view, 280);
   gtk_widget_set_vexpand (GTK_WIDGET (self->split_view), TRUE);
@@ -626,6 +1182,8 @@ fw_window_constructed (GObject *object)
   self->zoom = 1.0;
   self->rotation = 0;
   self->current_page = 0;
+  self->nav_back    = g_array_new (FALSE, FALSE, sizeof (NavEntry));
+  self->nav_forward = g_array_new (FALSE, FALSE, sizeof (NavEntry));
   update_zoom_entry (self);
 
   /* ── Window actions ── */
@@ -642,12 +1200,17 @@ fw_window_constructed (GObject *object)
     { .name = "toggle-sidebar",.activate = act_toggle_sidebar },
     { .name = "fullscreen",    .activate = act_toggle_fullscreen },
     { .name = "find",          .activate = act_find },
+    { .name = "find-next",     .activate = act_find_next },
+    { .name = "find-prev",     .activate = act_find_prev },
+    { .name = "nav-back",      .activate = act_nav_back },
+    { .name = "nav-forward",   .activate = act_nav_forward },
     { .name = "go-to-page",    .activate = act_go_to_page },
     { .name = "invert-colors", .activate = act_invert_colors },
     { .name = "rotate-cw",     .activate = act_rotate_cw },
     { .name = "rotate-ccw",    .activate = act_rotate_ccw },
     { .name = "copy",          .activate = act_copy },
     { .name = "print",         .activate = act_print },
+    { .name = "save-attachments", .activate = act_save_attachments },
     { .name = "about",         .activate = act_about },
   };
   g_action_map_add_action_entries (G_ACTION_MAP (self), win_entries,
@@ -681,6 +1244,11 @@ fw_window_constructed (GObject *object)
    * scale factors (e.g., 1x laptop → 2x external display) */
   g_signal_connect (self, "notify::scale-factor",
                     G_CALLBACK (on_scale_factor_changed), self);
+
+  /* Drag-and-drop: drop a file onto the window to open it */
+  GtkDropTarget *drop = gtk_drop_target_new (G_TYPE_FILE, GDK_ACTION_COPY);
+  g_signal_connect (drop, "drop", G_CALLBACK (on_drop), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (drop));
 }
 
 /* ── Deferred fit-width via tick callback ─────────────────────────── */
@@ -749,6 +1317,10 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* Save state of previous document before switching */
   fw_window_save_state (self);
 
+  /* New document → clear navigation history */
+  if (self->nav_back)    g_array_set_size (self->nav_back, 0);
+  if (self->nav_forward) g_array_set_size (self->nav_forward, 0);
+
   /* Clean up previous document */
   if (self->cache) {
     FW_TRACE_MEM ("closing previous doc: cache=%p doc=%p",
@@ -773,6 +1345,10 @@ fw_window_open_file (FwWindow *self, const char *path)
 
   self->file_path = g_strdup (path);
 
+  /* Switch from empty state to the document view. */
+  if (self->content_stack)
+    gtk_stack_set_visible_child_name (self->content_stack, "document");
+
   /* Update title */
   g_autofree char *basename = g_path_get_basename (path);
   gtk_label_set_text (self->title_label, basename);
@@ -786,6 +1362,13 @@ fw_window_open_file (FwWindow *self, const char *path)
   fw_cache_set_scale_factor (self->cache,
     gtk_widget_get_scale_factor (GTK_WIDGET (self)));
   fw_view_set_document (self->view, self->document, self->cache);
+
+  /* Hand the new document to search; clear any prior query. */
+  fw_search_set_document (self->search, self->document);
+  fw_view_set_search (self->view, self->search);
+  if (self->search_entry)
+    gtk_editable_set_text (GTK_EDITABLE (self->search_entry), "");
+  update_search_count_label (self);
 
   /* Apply saved zoom or default to fit-width.
    * set_zoom() already calls fw_cache_start() internally — do NOT call
@@ -871,8 +1454,11 @@ fw_window_dispose (GObject *object)
   /* Disconnect view from document/cache FIRST — the view holds refs to both,
    * and GTK widget teardown order is unpredictable. Without this, the cache
    * refcount never reaches zero during window dispose. */
-  if (self->view)
+  if (self->view) {
+    fw_view_set_search (self->view, NULL);
     fw_view_set_document (self->view, NULL, NULL);
+  }
+  g_clear_object (&self->search);
 
   if (self->cache) {
     FW_TRACE_MEM ("window dispose: stopping cache=%p", (void *) self->cache);
@@ -884,6 +1470,8 @@ fw_window_dispose (GObject *object)
                 self->file_path ? self->file_path : "(null)");
   g_clear_object (&self->document);
   g_clear_pointer (&self->file_path, g_free);
+  g_clear_pointer (&self->nav_back,    g_array_unref);
+  g_clear_pointer (&self->nav_forward, g_array_unref);
 
   G_OBJECT_CLASS (fw_window_parent_class)->dispose (object);
 }

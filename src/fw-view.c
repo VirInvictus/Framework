@@ -54,12 +54,24 @@ struct _FwView {
   /* Link cache — lazily populated per page */
   GArray     **link_cache;     /* array of GArray* indexed by page, or NULL */
   int          link_cache_count;
+
+  /* Search highlighting */
+  FwSearch    *search;         /* owned ref, or NULL */
+  gulong       search_hits_handler;
+  gulong       search_current_handler;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
 
 G_DEFINE_FINAL_TYPE_WITH_CODE (FwView, fw_view, GTK_TYPE_WIDGET,
   G_IMPLEMENT_INTERFACE (GTK_TYPE_SCROLLABLE, fw_view_scrollable_init))
+
+enum {
+  SIGNAL_PAGE_JUMPED,
+  N_SIGNALS,
+};
+
+static guint signals[N_SIGNALS];
 
 enum {
   PROP_0,
@@ -343,6 +355,30 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
     } else {
       GdkRGBA gray = { 0.92f, 0.92f, 0.92f, 1.0f };
       gtk_snapshot_append_color (snapshot, &gray, &rect);
+    }
+
+    /* Paint search match overlays on this page */
+    if (self->search) {
+      int active_in_page = -1;
+      GArray *page_hits = fw_search_hits_for_page (self->search, i,
+                                                    &active_in_page);
+      if (page_hits) {
+        for (guint h = 0; h < page_hits->len; h++) {
+          FwSearchHit *hit = &g_array_index (page_hits, FwSearchHit, h);
+          float hx = (float) (x + hit->x0 * self->zoom);
+          float hy = (float) (y + hit->y0 * self->zoom);
+          float hw = (float) ((hit->x1 - hit->x0) * self->zoom);
+          float hh = (float) ((hit->y1 - hit->y0) * self->zoom);
+          if (hw <= 0 || hh <= 0)
+            continue;
+          graphene_rect_t hr = GRAPHENE_RECT_INIT (hx, hy, hw, hh);
+          GdkRGBA color = (int) h == active_in_page
+            ? (GdkRGBA) { 1.0f, 0.55f, 0.10f, 0.55f }    /* active: orange */
+            : (GdkRGBA) { 1.0f, 0.92f, 0.20f, 0.40f };   /* match: yellow */
+          gtk_snapshot_append_color (snapshot, &color, &hr);
+        }
+        g_array_unref (page_hits);
+      }
     }
 
     /* Paint text selection overlay on the selected page */
@@ -661,6 +697,7 @@ on_click_pressed (GtkGestureClick *gesture, int n_press, double x, double y,
 
   if (link->type == FW_LINK_INTERNAL) {
     FW_TRACE_VIEW ("link click: internal → page %d", link->dest_page);
+    g_signal_emit (self, signals[SIGNAL_PAGE_JUMPED], 0, link->dest_page);
     fw_view_go_to_page (self, link->dest_page);
   } else if (link->type == FW_LINK_EXTERNAL && link->uri) {
     FW_TRACE_VIEW ("link click: external → %s", link->uri);
@@ -861,6 +898,127 @@ fw_view_get_selected_text (FwView *self)
   return self->selected_text;
 }
 
+/* ── Search wiring ───────────────────────────────────────────────── */
+
+static void
+on_search_changed (FwSearch *search, gpointer user_data)
+{
+  (void) search;
+  FwView *self = FW_VIEW (user_data);
+  if (!self->redraw_pending) {
+    self->redraw_pending = TRUE;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
+}
+
+static void
+on_search_current_changed (FwSearch *search, gpointer user_data)
+{
+  (void) search;
+  FwView *self = FW_VIEW (user_data);
+  fw_view_reveal_active_hit (self);
+  if (!self->redraw_pending) {
+    self->redraw_pending = TRUE;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
+}
+
+void
+fw_view_set_search (FwView *self, FwSearch *search)
+{
+  g_return_if_fail (FW_IS_VIEW (self));
+
+  if (self->search == search)
+    return;
+
+  if (self->search) {
+    if (self->search_hits_handler)
+      g_signal_handler_disconnect (self->search, self->search_hits_handler);
+    if (self->search_current_handler)
+      g_signal_handler_disconnect (self->search, self->search_current_handler);
+    self->search_hits_handler = 0;
+    self->search_current_handler = 0;
+  }
+
+  g_set_object (&self->search, search);
+
+  if (self->search) {
+    self->search_hits_handler = g_signal_connect (
+      self->search, "hits-changed",
+      G_CALLBACK (on_search_changed), self);
+    self->search_current_handler = g_signal_connect (
+      self->search, "current-changed",
+      G_CALLBACK (on_search_current_changed), self);
+  }
+
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+void
+fw_view_reveal_active_hit (FwView *self)
+{
+  g_return_if_fail (FW_IS_VIEW (self));
+
+  if (!self->search || !self->vadjustment || !self->page_y_offsets)
+    return;
+
+  int idx = fw_search_active_index (self->search);
+  if (idx < 0)
+    return;
+
+  int n_hits = 0;
+  const FwSearchHit *hits = fw_search_peek_hits (self->search, &n_hits);
+  if (!hits || idx >= n_hits)
+    return;
+
+  const FwSearchHit *hit = &hits[idx];
+  if (hit->page < 0 || hit->page >= self->page_count)
+    return;
+
+  /* Position the hit roughly 1/3 down from the viewport top so the user
+   * has reading context above it. */
+  int widget_h = gtk_widget_get_height (GTK_WIDGET (self));
+  if (widget_h <= 0)
+    widget_h = 700;
+
+  double hit_y = self->page_y_offsets[hit->page] + hit->y0 * self->zoom;
+  double target = hit_y - widget_h / 3.0;
+
+  double upper = gtk_adjustment_get_upper (self->vadjustment);
+  double page_size = gtk_adjustment_get_page_size (self->vadjustment);
+  if (target < 0) target = 0;
+  if (target > upper - page_size) target = upper - page_size;
+  if (target < 0) target = 0;
+
+  gtk_adjustment_set_value (self->vadjustment, target);
+
+  /* Horizontal: also reveal if the hit is offscreen horizontally
+   * (zoomed past fit-width). */
+  if (self->hadjustment && self->page_widths) {
+    int widget_w = gtk_widget_get_width (GTK_WIDGET (self));
+    if (widget_w <= 0) widget_w = 900;
+
+    double pw = self->page_widths[hit->page];
+    double page_x;
+    if (self->max_width <= widget_w)
+      page_x = (widget_w - pw) / 2.0;
+    else
+      page_x = (self->max_width - pw) / 2.0;
+
+    double hit_x = page_x + hit->x0 * self->zoom;
+    double hadj_val = gtk_adjustment_get_value (self->hadjustment);
+    double hadj_size = gtk_adjustment_get_page_size (self->hadjustment);
+    if (hit_x < hadj_val || hit_x > hadj_val + hadj_size) {
+      double hadj_upper = gtk_adjustment_get_upper (self->hadjustment);
+      double new_h = hit_x - hadj_size / 3.0;
+      if (new_h < 0) new_h = 0;
+      if (new_h > hadj_upper - hadj_size) new_h = hadj_upper - hadj_size;
+      if (new_h < 0) new_h = 0;
+      gtk_adjustment_set_value (self->hadjustment, new_h);
+    }
+  }
+}
+
 /* ── GObject boilerplate ──────────────────────────────────────────── */
 
 static void
@@ -869,6 +1027,15 @@ fw_view_dispose (GObject *object)
   FwView *self = FW_VIEW (object);
 
   fw_view_free_link_cache (self);
+  if (self->search) {
+    if (self->search_hits_handler)
+      g_signal_handler_disconnect (self->search, self->search_hits_handler);
+    if (self->search_current_handler)
+      g_signal_handler_disconnect (self->search, self->search_current_handler);
+    self->search_hits_handler = 0;
+    self->search_current_handler = 0;
+  }
+  g_clear_object (&self->search);
   g_clear_object (&self->document);
   g_clear_object (&self->cache);
 
@@ -917,6 +1084,14 @@ fw_view_class_init (FwViewClass *klass)
   g_object_class_override_property (object_class, PROP_VADJUSTMENT,  "vadjustment");
   g_object_class_override_property (object_class, PROP_HSCROLL_POLICY, "hscroll-policy");
   g_object_class_override_property (object_class, PROP_VSCROLL_POLICY, "vscroll-policy");
+
+  /* Emitted when the user activates an internal link. The window listens
+   * to push the previous viewport into navigation history. Plain scroll
+   * and search-hit-reveal do NOT emit this signal — only explicit jumps. */
+  signals[SIGNAL_PAGE_JUMPED] = g_signal_new (
+    "page-jumped", FW_TYPE_VIEW,
+    G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_INT);
 }
 
 static gboolean

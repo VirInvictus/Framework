@@ -15,7 +15,8 @@ mupdf_dep = declare_dependency(
   ],
 )
 
-djvu_dep = dependency('ddjvuapi', version: '>= 3.5.28')
+djvu_dep    = dependency('ddjvuapi',    version: '>= 3.5.28')
+archive_dep = dependency('libarchive', version: '>= 3.6')
 
 framework_sources = files(
   'main.c',
@@ -26,6 +27,7 @@ framework_sources = files(
   'fw-document.c',
   'fw-document-pdf.c',
   'fw-document-djvu.c',
+  'fw-document-cbr.c',
   'fw-sidebar.c',
   'fw-search.c',
   'fw-state.c',
@@ -40,6 +42,7 @@ framework_deps = [
   json_glib_dep,
   mupdf_dep,
   djvu_dep,
+  archive_dep,
 ]
 
 executable('framework',

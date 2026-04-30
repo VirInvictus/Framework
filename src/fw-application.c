@@ -77,9 +77,27 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   gtk_file_filter_add_mime_type (filter, "application/pdf");
   gtk_file_filter_add_mime_type (filter, "image/vnd.djvu");
   gtk_file_filter_add_mime_type (filter, "image/x-djvu");
+  gtk_file_filter_add_mime_type (filter, "application/vnd.comicbook+zip");
+  gtk_file_filter_add_mime_type (filter, "application/vnd.comicbook-rar");
+  gtk_file_filter_add_mime_type (filter, "application/x-cbz");
+  gtk_file_filter_add_mime_type (filter, "application/x-cbr");
   gtk_file_filter_add_pattern (filter, "*.pdf");
   gtk_file_filter_add_pattern (filter, "*.djvu");
   gtk_file_filter_add_pattern (filter, "*.djv");
+  gtk_file_filter_add_pattern (filter, "*.cbz");
+  gtk_file_filter_add_pattern (filter, "*.cbr");
+  gtk_file_filter_add_pattern (filter, "*.cb7");
+  gtk_file_filter_add_pattern (filter, "*.cbt");
+  gtk_file_filter_add_pattern (filter, "*.xps");
+  gtk_file_filter_add_pattern (filter, "*.oxps");
+  gtk_file_filter_add_pattern (filter, "*.epub");
+  gtk_file_filter_add_pattern (filter, "*.fb2");
+  gtk_file_filter_add_pattern (filter, "*.mobi");
+  gtk_file_filter_add_mime_type (filter, "application/oxps");
+  gtk_file_filter_add_mime_type (filter, "application/vnd.ms-xpsdocument");
+  gtk_file_filter_add_mime_type (filter, "application/epub+zip");
+  gtk_file_filter_add_mime_type (filter, "application/x-fictionbook+xml");
+  gtk_file_filter_add_mime_type (filter, "application/x-mobipocket-ebook");
 
   GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
   g_list_store_append (filters, filter);
@@ -133,6 +151,10 @@ fw_application_startup (GApplication *app)
     { "win.toggle-sidebar",  { "F9", NULL } },
     { "win.fullscreen",      { "F11", NULL } },
     { "win.find",            { "<Control>f", NULL } },
+    { "win.find-next",       { "F3", NULL } },
+    { "win.find-prev",       { "<Shift>F3", NULL } },
+    { "win.nav-back",        { "<Alt>Left", NULL } },
+    { "win.nav-forward",     { "<Alt>Right", NULL } },
     { "win.go-to-page",      { "<Control>g", NULL } },
     { "win.invert-colors",   { "<Control>i", NULL } },
     { "win.rotate-cw",       { "<Control><Shift>plus", NULL } },

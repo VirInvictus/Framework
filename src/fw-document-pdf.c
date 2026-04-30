@@ -188,6 +188,13 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
   fz_try (ctx) {
     fz_register_document_handlers (ctx);
     self->doc = fz_open_document (ctx, path);
+    /* Reflowable formats (EPUB, FB2, MOBI) need a layout pass before page
+     * count is meaningful. Fixed-layout formats (PDF, CBZ, XPS) return
+     * FALSE and skip the call. 600×900 pt at 11pt is a sensible default
+     * page size for novel-shaped reading; pages stay this size for the
+     * document's lifetime in this session. */
+    if (fz_is_document_reflowable (ctx, self->doc))
+      fz_layout_document (ctx, self->doc, 600, 900, 11);
     self->page_count = fz_count_pages (ctx, self->doc);
   }
   fz_catch (ctx) {
@@ -228,6 +235,12 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
       fz_register_document_handlers (self->render[i].ctx);
       fz_try (self->render[i].ctx) {
         self->render[i].doc = fz_open_document (self->render[i].ctx, path);
+        /* Reflowable formats need an identical layout pass per instance,
+         * otherwise different render threads see different page bounds. */
+        if (fz_is_document_reflowable (self->render[i].ctx,
+                                        self->render[i].doc))
+          fz_layout_document (self->render[i].ctx, self->render[i].doc,
+                              600, 900, 11);
       }
       fz_catch (self->render[i].ctx) {
         g_warning ("MuPDF: render instance %d failed to open: %s",
@@ -605,18 +618,163 @@ fw_document_pdf_init (FwDocumentPdf *self)
   g_mutex_init (&self->lock);
 }
 
+/* ── Embedded files (PDF /EmbeddedFiles name tree) ───────────────── */
+
+/* Sanitize an attacker-supplied filename: strip directory components,
+ * collapse "..", drop leading dots, and replace control chars with '_'.
+ * The result is safe to join with a user-chosen output directory. */
+static char *
+sanitize_basename (const char *raw)
+{
+  if (!raw || !raw[0])
+    return g_strdup ("attachment");
+
+  /* Take the basename only — drop "../" / "/foo/" path traversal. */
+  const char *slash1 = strrchr (raw, '/');
+  const char *slash2 = strrchr (raw, '\\');
+  const char *base = raw;
+  if (slash1 && slash1 + 1 > base) base = slash1 + 1;
+  if (slash2 && slash2 + 1 > base) base = slash2 + 1;
+
+  /* Reject empty / dot-only names. */
+  if (!base[0] || g_strcmp0 (base, ".") == 0 || g_strcmp0 (base, "..") == 0)
+    return g_strdup ("attachment");
+
+  GString *out = g_string_new (NULL);
+  for (const char *p = base; *p; p++) {
+    unsigned char c = (unsigned char) *p;
+    if (c < 0x20 || c == 0x7f)
+      g_string_append_c (out, '_');
+    else
+      g_string_append_c (out, *p);
+  }
+  /* Strip leading dots — prevents creating dotfiles by surprise. */
+  while (out->len && out->str[0] == '.')
+    g_string_erase (out, 0, 1);
+  if (!out->len)
+    g_string_assign (out, "attachment");
+  return g_string_free (out, FALSE);
+}
+
+static GArray *
+pdf_get_attachments (FwDocument *doc)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  GArray *out = g_array_new (FALSE, FALSE, sizeof (FwAttachment *));
+  g_array_set_clear_func (out, fw_attachment_free_indirect);
+
+  g_mutex_lock (&self->lock);
+
+  pdf_document *pdoc = pdf_specifics (self->ctx, self->doc);
+  if (!pdoc) {
+    g_mutex_unlock (&self->lock);
+    return out;
+  }
+
+  fz_try (self->ctx) {
+    int n = pdf_xref_len (self->ctx, pdoc);
+    for (int i = 1; i < n; i++) {
+      pdf_obj *obj = NULL;
+      fz_try (self->ctx) {
+        obj = pdf_load_object (self->ctx, pdoc, i);
+        if (obj && pdf_is_embedded_file (self->ctx, obj)) {
+          pdf_filespec_params p = { 0 };
+          pdf_get_filespec_params (self->ctx, obj, &p);
+          FwAttachment *a = g_new0 (FwAttachment, 1);
+          a->name = sanitize_basename (p.filename);
+          a->mime_type = p.mimetype ? g_strdup (p.mimetype) : NULL;
+          a->size = p.size;
+          a->backend_data = GINT_TO_POINTER (i);  /* xref index */
+          g_array_append_val (out, a);
+        }
+      }
+      fz_always (self->ctx) {
+        if (obj) pdf_drop_obj (self->ctx, obj);
+      }
+      fz_catch (self->ctx) {
+        /* Skip this xref entry on any error; keep iterating. */
+      }
+    }
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: get_attachments failed: %s",
+               fz_caught_message (self->ctx));
+  }
+
+  g_mutex_unlock (&self->lock);
+  return out;
+}
+
+static gboolean
+pdf_save_attachment (FwDocument *doc, FwAttachment *attachment,
+                     const char *output_path, GError **error)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  int xref_idx = GPOINTER_TO_INT (attachment->backend_data);
+
+  if (xref_idx < 1) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         "Invalid attachment handle");
+    return FALSE;
+  }
+
+  g_mutex_lock (&self->lock);
+
+  pdf_document *pdoc = pdf_specifics (self->ctx, self->doc);
+  if (!pdoc) {
+    g_mutex_unlock (&self->lock);
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                         "Document is not a PDF");
+    return FALSE;
+  }
+
+  pdf_obj    *obj = NULL;
+  fz_buffer  *buf = NULL;
+  volatile gboolean ok = FALSE;
+  const char *errmsg = NULL;
+
+  fz_try (self->ctx) {
+    obj = pdf_load_object (self->ctx, pdoc, xref_idx);
+    if (!obj || !pdf_is_embedded_file (self->ctx, obj))
+      fz_throw (self->ctx, FZ_ERROR_GENERIC, "object is not an embedded file");
+    buf = pdf_load_embedded_file_contents (self->ctx, obj);
+    if (!buf)
+      fz_throw (self->ctx, FZ_ERROR_GENERIC, "no embedded contents");
+    fz_save_buffer (self->ctx, buf, output_path);
+    ok = TRUE;
+  }
+  fz_always (self->ctx) {
+    if (buf) fz_drop_buffer (self->ctx, buf);
+    if (obj) pdf_drop_obj (self->ctx, obj);
+  }
+  fz_catch (self->ctx) {
+    errmsg = fz_caught_message (self->ctx);
+  }
+
+  g_mutex_unlock (&self->lock);
+
+  if (!ok) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "MuPDF: %s", errmsg ? errmsg : "unknown failure");
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void
 fw_document_pdf_iface_init (FwDocumentInterface *iface)
 {
-  iface->open           = pdf_open;
-  iface->close          = pdf_close;
-  iface->get_page_count = pdf_get_page_count;
-  iface->get_page_size  = pdf_get_page_size;
-  iface->render_page    = pdf_render_page;
-  iface->get_toc        = pdf_get_toc;
-  iface->search         = pdf_search;
-  iface->get_text       = pdf_get_text;
-  iface->get_links      = pdf_get_links;
+  iface->open            = pdf_open;
+  iface->close           = pdf_close;
+  iface->get_page_count  = pdf_get_page_count;
+  iface->get_page_size   = pdf_get_page_size;
+  iface->render_page     = pdf_render_page;
+  iface->get_toc         = pdf_get_toc;
+  iface->search          = pdf_search;
+  iface->get_text        = pdf_get_text;
+  iface->get_links       = pdf_get_links;
+  iface->get_attachments = pdf_get_attachments;
+  iface->save_attachment = pdf_save_attachment;
   /* Page handle API intentionally NULL — PDF uses independent render instances
    * in pdf_render_page() for true parallel rendering. The cache falls through
    * to fw_document_render_page() which dispatches here. */

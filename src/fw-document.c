@@ -6,6 +6,7 @@
 #include "fw-document.h"
 #include "fw-document-pdf.h"
 #include "fw-document-djvu.h"
+#include "fw-document-cbr.h"
 #include "fw-debug.h"
 
 #include <gio/gio.h>
@@ -77,6 +78,27 @@ fw_link_free_indirect (gpointer data)
 {
   FwLink **pp = data;
   fw_link_free (*pp);
+}
+
+/* ── Embedded file attachment ────────────────────────────────────── */
+
+void
+fw_attachment_free (FwAttachment *a)
+{
+  if (!a)
+    return;
+  g_free (a->name);
+  g_free (a->mime_type);
+  /* backend_data is opaque to the interface — backends register a custom
+   * cleanup via direct call paths if needed. */
+  g_free (a);
+}
+
+void
+fw_attachment_free_indirect (gpointer data)
+{
+  FwAttachment **pp = data;
+  fw_attachment_free (*pp);
 }
 
 /* ── GInterface boilerplate ───────────────────────────────────────── */
@@ -200,6 +222,33 @@ fw_document_cancel_render (FwDocument *self)
     iface->cancel_render (self);
 }
 
+GArray *
+fw_document_get_attachments (FwDocument *self)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), NULL);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->get_attachments)
+    return iface->get_attachments (self);
+  return NULL;
+}
+
+gboolean
+fw_document_save_attachment (FwDocument *self, FwAttachment *attachment,
+                             const char *output_path, GError **error)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), FALSE);
+  g_return_val_if_fail (attachment != NULL, FALSE);
+  g_return_val_if_fail (output_path != NULL, FALSE);
+
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (!iface->save_attachment) {
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                         "Backend does not support attachment extraction");
+    return FALSE;
+  }
+  return iface->save_attachment (self, attachment, output_path, error);
+}
+
 /* ── Factory — pick backend by file extension ─────────────────────── */
 
 FwDocument *
@@ -215,20 +264,43 @@ fw_document_new_for_path (const char *path, GError **error)
   }
 
   FwDocument *doc = NULL;
+  const char *backend_label;
 
+  /* MuPDF dispatches PDF, CBZ/CBR/CB7/CBT, EPUB, FB2, MOBI, XPS via
+   * fz_register_document_handlers + fz_open_document. The PDF backend's
+   * open() path is format-agnostic — anything MuPDF recognizes opens here.
+   * DjVu remains separate because DjVuLibre is its own library. */
   if (g_ascii_strcasecmp (dot, ".pdf") == 0) {
     doc = FW_DOCUMENT (fw_document_pdf_new ());
+    backend_label = "PDF (MuPDF)";
+  } else if (g_ascii_strcasecmp (dot, ".cbz") == 0 ||
+             g_ascii_strcasecmp (dot, ".cb7") == 0 ||
+             g_ascii_strcasecmp (dot, ".cbt") == 0) {
+    doc = FW_DOCUMENT (fw_document_pdf_new ());
+    backend_label = "Comic (MuPDF)";
+  } else if (g_ascii_strcasecmp (dot, ".cbr") == 0) {
+    doc = FW_DOCUMENT (fw_document_cbr_new ());
+    backend_label = "Comic-RAR (libarchive)";
+  } else if (g_ascii_strcasecmp (dot, ".xps") == 0 ||
+             g_ascii_strcasecmp (dot, ".oxps") == 0) {
+    doc = FW_DOCUMENT (fw_document_pdf_new ());
+    backend_label = "XPS (MuPDF)";
+  } else if (g_ascii_strcasecmp (dot, ".epub") == 0 ||
+             g_ascii_strcasecmp (dot, ".fb2") == 0 ||
+             g_ascii_strcasecmp (dot, ".mobi") == 0) {
+    doc = FW_DOCUMENT (fw_document_pdf_new ());
+    backend_label = "Reflowable (MuPDF)";
   } else if (g_ascii_strcasecmp (dot, ".djvu") == 0 ||
              g_ascii_strcasecmp (dot, ".djv") == 0) {
     doc = FW_DOCUMENT (fw_document_djvu_new ());
+    backend_label = "DjVu";
   } else {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                  "Unsupported file type: %s", dot);
     return NULL;
   }
 
-  FW_TRACE_DOC ("opening '%s' with %s backend", path,
-                g_ascii_strcasecmp (dot, ".pdf") == 0 ? "PDF" : "DjVu");
+  FW_TRACE_DOC ("opening '%s' with %s backend", path, backend_label);
 
   if (!fw_document_open (doc, path, error)) {
     FW_TRACE_DOC ("open FAILED: %s", (*error)->message);

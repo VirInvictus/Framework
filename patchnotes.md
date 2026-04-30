@@ -2,6 +2,120 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.11.0 (2026-04-30)
+
+*Pre-Phase-9 cleanup.* Four roadmap items that had been left open across earlier phases all land in this release.
+
+---
+
+### XPS + EPUB Format Routing (Phase 7)
+The factory now dispatches `.xps` / `.oxps` / `.epub` / `.fb2` / `.mobi` to the MuPDF backend. The MuPDF backend already calls `fz_register_document_handlers` and `fz_open_document` — the work was extending the factory and calling `fz_layout_document(ctx, doc, 600, 900, 11)` for reflowable formats. `fz_is_document_reflowable` decides whether to layout: PDF/CBZ/XPS skip the call (they're fixed-layout); EPUB/FB2/MOBI take the 600×900pt @ 11pt layout. Each render-instance opens its own document so each must call `fz_layout_document` independently — without that, different render threads see different page bounds.
+
+The file-dialog filter and desktop-entry MIME types learned the new extensions and types (`application/oxps`, `application/vnd.ms-xpsdocument`, `application/epub+zip`, `application/x-fictionbook+xml`, `application/x-mobipocket-ebook`).
+
+**EPUB caveat.** Framework's pagination is whatever MuPDF's default layout produces — page breaks happen wherever the layout engine puts them, and the layout doesn't reflow on zoom. Tested cleanly on Wyrd Sisters (159-page output). For serious EPUB reading, [Foliate](https://johnfactotum.github.io/foliate/) handles reflow and font customization properly; Framework is the right choice when you want a single reader for fixed-layout PDFs and EPUBs alongside.
+
+### CBR via libarchive (Phase 7)
+Real CBR support without the `libunrar` licensing trap. A new backend (`src/fw-document-cbr.c`, ~370 lines) uses `libarchive` (BSD, GPL-compatible, already on every Fedora install) to enumerate image entries inside the RAR, sorts them by filename (= page order in every comic dump), and on `render_page` extracts that entry's bytes and feeds them to MuPDF via `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (the same v1.6 zero-copy pattern the PDF backend uses). RAR4, RAR5, ZIP, 7z, and tar archive formats all work through libarchive — the factory currently only routes `.cbr` here, but the backend is format-agnostic.
+
+Threading is the single-mutex pattern, not the PDF backend's 8-instance pattern. libarchive readers can't be safely shared across threads, and the streaming-RAR cost makes per-render archive opens dominate anyway. Each render call opens a fresh `archive *`, walks to the target entry, extracts, and closes. The velocity engine + thumbnail tier hide most of the cost during normal scrolling. Sustained scrub-to-end on a huge archive remains slow — that's a fundamental property of streaming RAR, called out as future work in the file's threading-comment block.
+
+The libunrar-hint error message is gone from the factory; its job is done.
+
+### Embedded File Extraction (Phase 6)
+PDF /EmbeddedFiles name-tree extraction. Two new methods on `FwDocumentInterface` — `get_attachments` returns a `GArray<FwAttachment*>` with each attachment's filename, MIME type, and size; `save_attachment` writes one to a destination path. The PDF backend walks the xref via `pdf_xref_len` + `pdf_load_object` + `pdf_is_embedded_file` + `pdf_get_filespec_params` (the zathura-pdf-mupdf reference pattern at `attachment.c`), and saves via `pdf_load_embedded_file_contents` + `fz_save_buffer`. DjVu and CBR backends return NULL — no equivalent attachment mechanism in those formats.
+
+A new menu entry **"Save Embedded Files…"** asks for a destination folder via `GtkFileDialog::select_folder` and saves every attachment under sanitized basenames. The sanitizer strips directory components (defeats `../../../etc/passwd`-style names), drops leading dots (no surprise dotfiles), and replaces control characters — the user-chosen output directory stays the boundary even on attacker-crafted PDFs. A summary `AdwAlertDialog` reports how many files were saved or which failed; PDFs with zero attachments show "No Embedded Files" instead.
+
+### GtkListView Migration of the TOC Sidebar (Phase 8)
+`fw-sidebar.c` rewritten end-to-end against `GtkListView` + `GtkTreeListModel` + `GtkSingleSelection`, replacing the deprecated `GtkTreeView` + `GtkTreeStore`. The build's `-Wdeprecated-declarations` warnings on the sidebar are gone. Item type is a new `FwTocItem` GObject (title, page, optional children GListStore) built from the existing `FwTocNode` tree on TOC load. The `GtkTreeListModel`'s create-child-model callback hands back each item's `children` store on demand, so the tree expands lazily.
+
+The v0.8 current-page highlight survives the migration, with one structural change: `find_best_match` now walks the underlying `FwTocItem` tree (not the flat tree-list-model, since rows for collapsed branches don't exist in the flat model). Once it picks the deepest match, a `build_path` walk produces the root-to-target path of `FwTocItem*` pointers; the highlight code expands each ancestor's `GtkTreeListRow` so the target row materializes in the flat model, then walks the model to find the row's position and calls `gtk_single_selection_set_selected` + `gtk_list_view_scroll_to`. Click navigation routes through `GtkListView::activate` → `page-requested` signal — same contract the window has handled since v1.0.
+
+---
+
+## v0.10.0 (2026-04-30)
+
+---
+
+### Empty Window State (Phase 8)
+Launching Framework with no file argument now shows an `AdwStatusPage` with the app icon, the prompt "Open a Document", and a suggested-action pill button wired directly to `app.open`. The page also tells the user they can drop a file onto the window — pulling double duty as documentation for the new drag-and-drop handler. The split view's content is now a `GtkStack` that crossfades between the empty page and the document overlay; on `fw_window_open_file` success it switches to the document view, and stays there for the window's lifetime (no reverting to empty when a doc closes — opening a new file replaces the current document, matching the rest of the single-document-per-window model).
+
+### Drag-and-Drop File Open (Phase 8)
+A `GtkDropTarget` accepting `G_TYPE_FILE` is attached to the window. On drop, the file's path is resolved with `g_file_get_path` and routed through the standard `fw_window_open_file` path — so a dropped file replaces the current document if one is open, or boots the document view from the empty state if not. Multi-file drop (drag a folder of comics onto the window) is intentionally out of scope here because Framework is one-document-per-window; multi-window file open already exists via `g_application_open` from the command line.
+
+### Printing (Phase 8)
+`Ctrl+P` now opens the system print dialog. Printing routes through `GtkPrintOperation`: `begin-print` reports the page count from the active document, `draw-page` renders the requested page via the existing `fw_document_render_page` interface (so PDF, DjVu, and CBZ all print through the same code path), and the resulting cairo surface is painted into the print context with a `cairo_scale (cr, 1/zoom, 1/zoom)` so 1 source pixel maps to 1 point on paper. Render quality is the print context's reported DPI capped at 300 — a US-letter page renders to ~33 MB, plenty for laser/inkjet output without ballooning memory on a long print job. The print dialog uses the document's basename as the job name so spool queues stay readable.
+
+### Out of Scope This Release
+**`GtkListView` migration of the TOC sidebar** stays open. The `GtkTreeView` API is technically deprecated in GTK4, and the build prints one `-Wdeprecated-declarations` per compile, but it works correctly and our v0.8 TOC-highlight walker depends on the `GtkTreeIter` traversal API. Migrating means rewriting both `populate_store` and `find_best_match` against `GtkTreeListModel` — pure churn, zero new user value, with regression risk on a feature we just shipped. Deferred to a future release where we have a reason to be in that file.
+
+---
+
+## v0.9.0 (2026-04-30)
+
+---
+
+### Comic Book Archive Support — CBZ (Phase 7)
+Framework now opens CBZ comic-book archives. The PDF backend was already format-agnostic — it calls `fz_register_document_handlers` and `fz_open_document`, both of which dispatch by format internally — so the work was almost entirely factory-side: extend `fw_document_new_for_path` to accept `.cbz` / `.cbr` / `.cb7` / `.cbt`, route them through the same MuPDF backend, and tag the trace label as "Comic (MuPDF)" so logs make sense. The 8-instance parallel render path, velocity engine, thumbnail tier, and search infrastructure all carry over for free — opening a 237-page Berserk volume gets the full multi-core render treatment with zero new code in the cache layer.
+
+A 237-page CBZ volume verified: opens in ~14 ms, the first ten pages immediately enter the parsed-handle window, and scrolling stays smooth under the existing velocity engine. Search returns no results (CBZ pages are images, no text layer), Match Count correctly reports zero, and the rest of the UI is identical to PDF behaviour.
+
+### CBR — Best-Effort with Actionable Error Message
+`.cbr` is also accepted by the factory, but the file format is RAR-compressed and most Linux distributions (including Fedora) ship MuPDF without the optional `libunrar` dependency for licensing reasons. Trying to open a CBR now produces a tailored error dialog explaining the situation and suggesting CBZ conversion, instead of MuPDF's bare "cannot find document handler". The CBR path is one `g_set_error_literal` swap in the factory — when a libunrar-enabled MuPDF is available, CBR will Just Work with no further code changes.
+
+### File Dialog & Desktop Entry MIME Wiring
+The Open dialog filter learned `*.cbz` / `*.cbr` / `*.cb7` / `*.cbt` and the corresponding MIME types (`application/vnd.comicbook+zip`, `application/vnd.comicbook-rar`, `application/x-cbz`, `application/x-cbr`). The `.desktop` file's `MimeType=` line gained the same set so file managers offer Framework as a handler for comic archives.
+
+### Out of Scope This Release
+EPUB / XPS / FB2 / MOBI — MuPDF supports them and the factory could trivially route them through the same backend, but each has format-specific UX considerations (EPUB reflow, XPS per-page sizing, MOBI proprietary parsing edge cases) that deserve their own review. Phase 7 specifically scopes "graphic novels" first; the rest stays open.
+
+---
+
+## v0.8.0 (2026-04-30)
+
+---
+
+### TOC Highlight Tracking (Phase 6)
+The sidebar now follows along as the user scrolls. `fw_sidebar_set_current_page` walks the TOC tree depth-first looking for the deepest entry whose destination page is ≤ the current page, then selects that row and scrolls it into view. The walk is recursive but bounded by the document's TOC depth (chapter / section / subsection — three deep on every textbook tested), so calling it from every scroll-tick `value-changed` callback is cheap. Ancestor nodes are auto-expanded so a deeply-nested section actually becomes visible. Programmatic selection in GTK4's `GtkTreeView` does not trigger `row-activated`, so there is no feedback loop with our existing TOC click handler.
+
+### Navigation History (Alt+Left / Alt+Right)
+Standard browser-style back/forward stacks for in-document jumps. The window keeps two `GArray`s of `(page, scroll-fraction)` entries. The back stack is pushed when the user makes an *explicit* jump — a TOC click, a page-entry edit, or an internal-link click — and the forward stack is wiped at the same moment, matching every web browser's history rule. Plain scrolling, the next/previous-page buttons, and search-hit reveal do *not* push, because scrolling away from your current spot to read more is not a "jump." Alt+Left pops back, pushing the current viewport onto forward; Alt+Right pops forward, pushing onto back. The history is per-window and cleared on document switch.
+
+### `page-jumped` Signal on `FwView`
+The view emits `page-jumped(int dest_page)` only when an internal link click triggers a navigation. The window subscribes to push the previous viewport onto the back stack — without this, link-click jumps were invisible to the navigation code (the click bypassed `go_to_page`). Search-hit reveals deliberately stay silent so navigating through 47 search matches doesn't bury the user's pre-search position under a 47-entry stack.
+
+### Sidebar Click Navigation (already shipped, now formally complete)
+TOC click navigation has worked since v1.0 via `GtkTreeView::row-activated` → `FwSidebar::page-requested` → `FwWindow::on_sidebar_page_requested`. Phase 6 marks it formally complete; the TOC click path now also pushes navigation history.
+
+---
+
+## v0.7.0 (2026-04-30)
+
+---
+
+### Async, Progressive Search (Phase 5)
+Search no longer blocks the UI. The previous `fw_search_find` was a synchronous loop calling `fz_search_page` on every page in turn — on a 1000-page textbook this froze the window for several seconds before any result appeared. The new path runs the page-by-page scan on a dedicated worker thread and posts each page's hits back to the main loop via `g_idle_add_full`, so matches appear as they're found and the UI stays responsive throughout. The scan also starts at the user's current page and wraps, so matches near where they're reading appear first.
+
+A monotonically-incrementing generation counter discards in-flight messages from cancelled scans — typing into the search bar instantly retargets the worker without races. Cancellation is cooperative via an atomic flag the worker polls between pages; cleanup is deterministic on document close, dispose, or query change.
+
+### Search Result Highlighting
+All hits paint as semi-transparent yellow overlays directly in `fw_view_snapshot`, scaled and translated into widget coordinates via the same zoom/page-position math the cache uses. The active hit (the one the count label says is "current") paints in a stronger orange tint instead of yellow so the user always knows which match `Next`/`Prev` will move them away from. Highlights re-layer correctly under text selection and link cursors, and are invalidated automatically by the existing `redraw_pending` flag — no extra repaint plumbing.
+
+### Search Navigation (F3 / Shift+F3)
+F3 jumps to the next match, Shift+F3 to the previous, with wrap-around at both ends. Both are exposed as `win.find-next` / `win.find-prev` GActions so they work whether or not the search bar is focused, and the search entry's built-in next-match/previous-match signals route to the same handlers. When the active hit changes, the view scrolls so the hit lands roughly one-third of the way down the viewport (reading context above it) and pans horizontally if the hit is offscreen due to zoom.
+
+### Match Count Label
+The search bar now shows "3 of 47" alongside the entry. While the worker is still scanning, the count appends a `+` ("3 of 47+") and the label switches to "Searching…" while results are still empty, so the user can tell the difference between "no matches yet" and "no matches at all." The Prev/Next buttons disable when no hits exist.
+
+### `FwSearch` API Reshape
+The signal-based interface is new: `hits-changed`, `current-changed`, `search-finished`. `fw_search_find()` now takes a `start_page` argument; `fw_search_clear()` is split out from `set_document` and is also called when the search bar closes; new helpers `fw_search_hits_for_page`, `fw_search_peek_hits`, `fw_search_active_index`, and `fw_search_get_current_page` let the view read state without re-iterating. `FwView` gained `fw_view_set_search` / `fw_view_reveal_active_hit` and a new owned ref to the search controller.
+
+### Roadmap: Phase 12 (Stress-Testing & Debugging Suite)
+Added a new top-level roadmap phase covering a `tests/` tree with stress tests (`stress-scrub`, `stress-zoom-storm`, `stress-multidoc`, `stress-corpus-soak`), benchmarks (`bench-render`, `bench-cache-hit-rate`, `bench-startup`), and a debugging setup (`-Dsanitize` meson option, `tests/scripts/debug.sh`, `coredump-triage.sh`, an `FW_DEBUG` log-replay tool, and `framework --self-test`). All of it is gated by a `-Dstress=true` meson option so packagers don't pay for it. None of it is built yet — the phase exists so the Phase 11 borrows have a regression net to land into.
+
+---
+
 ## v0.6.0 (2026-04-29)
 
 ### Pre-1.0 Version Regression

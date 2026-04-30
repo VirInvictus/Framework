@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Framework is a native GNOME PDF/DjVu viewer (C17, GTK4/libadwaita, Meson) with a velocity-driven pre-cache engine. Project version lives in `meson.build` (currently 1.6.0). `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
+Framework is a native GNOME multi-format document viewer (PDF, DjVu, CBZ, CBR, XPS, EPUB, FB2, MOBI) — C17, GTK4/libadwaita, Meson — with a velocity-driven pre-cache engine. Project version lives in `meson.build` (currently 0.11.0 — pre-1.0; see the v0.6.0 patchnote for why we backed off the earlier 1.x line). `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
 
 ## Build & run
 
@@ -44,9 +44,10 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 **Layered around an abstract document interface:**
 
 - `FwDocument` (interface, `src/fw-document.h`) — vtable with `open`/`close`, `get_page_count`, `get_page_size`, `render_page`, `get_toc`, `search`, `get_text`, `get_links`, plus the page-handle API (`open_page`/`close_page`/`render_page_from_handle`) that lets the cache separate parsing from rendering, and `cancel_render` for scrubbing aborts.
-- `FwDocumentPdf` (`fw-document-pdf.c`) — MuPDF backend.
+- `FwDocumentPdf` (`fw-document-pdf.c`) — MuPDF backend. Despite the name, this handles **every** MuPDF-supported format: PDF, CBZ, CB7, CBT, XPS, EPUB, FB2, MOBI. The `pdf_open` path calls `fz_register_document_handlers` + `fz_open_document`, which dispatch internally by content. Reflowable formats (EPUB / FB2 / MOBI) get an `fz_layout_document(600, 900, 11)` pass per render-instance open. Type name stayed `FwDocumentPdf` to avoid a churn-only rename; treat it as "the MuPDF backend."
 - `FwDocumentDjvu` (`fw-document-djvu.c`) — DjVuLibre backend.
-- `fw_document_new_for_path` is the factory; backend is chosen by extension.
+- `FwDocumentCbr` (`fw-document-cbr.c`) — RAR/7z/tar comics via libarchive. Single-mutex per archive (libarchive isn't thread-safe per-reader). Render path: extract entry bytes → `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (zero-copy). Page sizes default to page 0's dimensions, get corrected per-page on first render.
+- `fw_document_new_for_path` is the factory; backend is chosen by extension. PDF + ZIP-comic archives + XPS + reflowable formats → MuPDF backend; `.djvu`/`.djv` → DjVu backend; `.cbr` → libarchive backend.
 
 **The Velocity-Driven Cache (`fw-cache.c`) is the core performance differentiator** — read it before changing anything in the render path. Three tiers and a state machine:
 
@@ -64,7 +65,9 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 
 **View pipeline (`fw-view.c`, custom `GtkWidget`):** determines visible pages from scroll position, asks `FwCache` for surfaces, paints via `gtk_snapshot_append_texture` (cache hit) or grey placeholder + thumbnail (miss). Search highlights and selection rectangles are overlay layers, not re-renders. Wayland fractional scaling: render resolution is multiplied by widget scale factor (`fw_cache_set_scale_factor`) — don't paint upscaled bitmaps.
 
-**Other modules:** `fw-application.c` (single-instance `AdwApplication`, file-open dispatch), `fw-window.c` (header bar, actions, keybindings), `fw-sidebar.c` (TOC tree), `fw-search.c` (find controller), `fw-state.c` (per-document JSON state in `$XDG_DATA_HOME/framework/state.json`, LRU-pruned).
+**Other modules:** `fw-application.c` (single-instance `AdwApplication`, file-open dispatch), `fw-window.c` (header bar, actions, keybindings, search-bar UI, navigation history — two `GArray<NavEntry>` stacks pushed only on explicit jumps: TOC click, page-entry edit, internal link click; print operation; embedded-file extraction with sanitized output paths), `fw-sidebar.c` (`GtkListView` + `GtkTreeListModel` + `FwTocItem` GObject; `fw_sidebar_set_current_page` walks the underlying `FwTocItem` tree, expands ancestor `GtkTreeListRow`s, then selects the row in the flat model), `fw-search.c` (async find controller — runs the page-by-page scan on a worker thread, posts hits back via `g_idle_add_full`, emits `hits-changed` / `current-changed` / `search-finished` signals; the view subscribes to repaint highlights and reveal the active hit), `fw-state.c` (per-document JSON state in `$XDG_DATA_HOME/framework/state.json`, LRU-pruned).
+
+**`FwView` signals:** `page-jumped(int dest_page)` fires only on explicit navigation (currently just internal link clicks). Plain scroll, search-hit reveal, and `fw_view_go_to_page` from the window do *not* emit it. The window subscribes to push the previous viewport onto its history stack.
 
 ## Conventions
 

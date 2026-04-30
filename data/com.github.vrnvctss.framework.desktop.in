@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [Desktop Entry]
 Name=Framework
-Comment=View PDF and DjVu documents
+Comment=View PDF, DjVu, and comic-book documents
 Exec=framework %U
 Icon=com.github.vrnvctss.framework
 Terminal=false
 Type=Application
 Categories=GTK;GNOME;Viewer;Office;
-MimeType=application/pdf;image/vnd.djvu;image/x-djvu;
+MimeType=application/pdf;image/vnd.djvu;image/x-djvu;application/vnd.comicbook+zip;application/vnd.comicbook-rar;application/x-cbz;application/x-cbr;application/x-cb7;application/x-cbt;application/oxps;application/vnd.ms-xpsdocument;application/epub+zip;application/x-fictionbook+xml;application/x-mobipocket-ebook;
 StartupNotify=true

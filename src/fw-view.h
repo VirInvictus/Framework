@@ -8,6 +8,7 @@
 #include <gtk/gtk.h>
 #include "fw-document.h"
 #include "fw-cache.h"
+#include "fw-search.h"
 
 G_BEGIN_DECLS
 
@@ -34,5 +35,10 @@ void    fw_view_set_invert     (FwView     *self,
 void    fw_view_set_rotation   (FwView     *self,
                                 int         rotation);
 const char *fw_view_get_selected_text (FwView *self);
+
+void    fw_view_set_search        (FwView    *self,
+                                   FwSearch  *search);
+/* Scroll the viewport so the active search hit is centred. */
+void    fw_view_reveal_active_hit (FwView    *self);
 
 G_END_DECLS
