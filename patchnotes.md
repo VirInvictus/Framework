@@ -2,6 +2,13 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.6.0 (2026-04-29)
+
+### Pre-1.0 Version Regression
+Dropped the project version from `1.6.0` to `0.6.0`. The earlier 1.x numbering implied a stability and feature-completeness the project hasn't earned: Framework opens and reads PDF and DjVu correctly, but search is synchronous and incomplete (Phase 5), TOC navigation is partial (Phase 6), printing isn't wired up (Phase 8), no Flatpak ships (Phase 10), and the reference-survey borrows in Phase 11 (`fz_cookie` cancellation, cached stext, bytes-aware cache, hue-preserving recolor) are still TODO. A 1.0 tag should be earned at the end of Phase 10, not assumed at the start. Past patchnotes entries keep their historical 1.x labels — those releases happened — but the running version is now honest.
+
+---
+
 ## v1.6.0 (2026-04-17)
 
 ---

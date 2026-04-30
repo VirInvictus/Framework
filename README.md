@@ -137,21 +137,66 @@ One document per window. Multiple files open multiple windows.
 - **Not a browser.** No tabs, no multi-document within a single window
 - **Not an image viewer.** No JPEG, PNG, TIFF, SVG support
 
-## Acknowledgements
+## Influences and borrowed techniques
 
-Framework's render pipeline borrows techniques from [zathura](https://pwmt.org/projects/zathura/), [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/), and [zathura-djvu](https://pwmt.org/projects/zathura-djvu/) — whose minimalist, zero-copy approach to driving MuPDF and DjVuLibre directly into cairo surfaces informed our own. 
+Framework is a study in standing on shoulders. The following projects were studied closely and specific techniques are borrowed from each — landed today, scheduled in the roadmap, or under evaluation. Per-technique attribution lives here; per-source-file attributions stay in our SPDX headers.
 
-A special thank you goes to [SumatraPDF](https://www.sumatrapdfreader.org/) for being a major influence. Its uncompromising focus on performance, simplicity, and a "just a viewer" philosophy is the spiritual foundation of this project.
+### [SumatraPDF](https://www.sumatrapdfreader.org/) &mdash; *spiritual foundation*
+Copyright © 2006–2024 the SumatraPDF project authors. Licensed [GPL-3.0](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/COPYING).
 
-Thanks to the [MuPDF](https://mupdf.com/) and [DjVuLibre](http://djvu.sourceforge.net/) teams for the rendering engines that make this viewer possible.
+Sumatra's "just a viewer" philosophy &mdash; uncompromising performance, no editor features, no library manager, every action visible &mdash; is the design north star for Framework. Specific techniques studied:
 
-We also rely on the following excellent software:
-- [GTK](https://www.gtk.org/) and [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) for the user interface.
-- [Cairo](https://www.cairographics.org/) for high-quality surface management.
-- [GLib](https://docs.gtk.org/glib/) for core data structures and threading primitives.
-- [JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/) for state serialization.
+- **Engine abstraction layer** (`src/EngineBase.h`, `EngineMupdf.cpp`) &mdash; the shape of our `FwDocument` interface follows the same pattern.
+- **Render-cache state machine** (`src/RenderCache.cpp`) &mdash; per-thread `curReqs[]` with abort cookies, semaphore-driven worker dispatch, and the "promote duplicate request to head of queue" trick informed `fw-cache.c`.
+- **Scheduled borrows** (roadmap Phase 11): in-flight render cancellation via `fz_cookie`; bytes-aware bitmap cache cap; tile-rendering as a high-zoom fallback; opportunistic per-page text extraction during render; double-click word selection (`TextSelection.cpp` `SelectWordAt`).
 
-Finally, thanks to the [GNOME](https://www.gnome.org/) contributors for providing such a robust developer platform.
+### [Zathura](https://pwmt.org/projects/zathura/) and [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/) &mdash; *render pipeline*
+Copyright © 2009–2024 pwmt.org. Licensed [Zlib](https://github.com/pwmt/zathura/blob/develop/LICENSE).
+
+zathura's zero-copy `MuPDF`&rarr;`cairo` pipeline is the textbook minimalist implementation. Specific techniques in Framework today and planned:
+
+- **Zero-copy MuPDF render** (shipped in v1.6.0 as the v1.6 *Zero-Copy MuPDF Render* patch note; see `src/fw-document-pdf.c:render_page_direct`) &mdash; constructs the MuPDF pixmap *around* the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr`, eliminating the channel-shuffle loop entirely. Borrowed verbatim in pattern from `zathura-pdf-mupdf/render.c`.
+- **Cached `fz_stext_page` per parsed page** (planned, roadmap Phase 11) &mdash; build the structured-text page once at parse time, reuse for both selection and search. Pattern from `zathura-pdf-mupdf/page.c`.
+- **`g_thread_pool_set_sort_function` priority dispatch** (planned) &mdash; let the pool itself reorder pending jobs by `last_view_time` instead of walking a priority list. Pattern from `zathura/render.c:94`.
+- **Hue-preserving recolor** (planned) &mdash; the `colorumax` HSL pipeline that preserves diagram color cues during dark-mode inversion, instead of a destructive bitwise-NOT. Pattern from `zathura/render.c`.
+
+### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions and async search*
+Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE).
+
+Sioyek's PDF renderer is the most carefully tuned single-document Linux MuPDF reader we found.
+
+- **Closest-zoom fallback during transitions** (planned, roadmap Phase 11) &mdash; when the requested zoom level isn't ready, return the nearest-zoom rendered surface and scale it for display while the exact render proceeds. Pattern from `pdf_renderer.cpp:try_closest_rendered_page`.
+- **Async, progressive search worker** (planned) &mdash; dedicated thread that scans page-by-page using cached structured text, emitting progress every N pages. Pattern from `pdf_renderer.cpp:run_search`.
+- **Slice-based rendering for huge pages** (planned, fallback only) &mdash; render in N&times;M slices when a single surface would exceed a memory threshold. Pattern from Sioyek's `(num_h_slices, num_v_slices)` per request.
+- **Hybrid threading model** (under evaluation) &mdash; one parent `fz_context`, per-thread `fz_clone_context`, per-(thread, path) `fz_document` &mdash; sits between Sumatra's full-clone and Framework's 8-instance model on the memory/parallelism curve.
+
+### [Plato](https://github.com/baskerville/plato) &mdash; *memory-pressure reference*
+Copyright © 2017 Bastien Dejean. Licensed AGPL-3.0.
+
+Plato runs MuPDF on Kobo e-readers (single-core ARM, ~256 MB RAM). **Technique reference only** &mdash; AGPL-3.0 is not source-compatible with our GPL-3-or-later, so no code is copied. Useful as a sanity check on memory-pressure decisions: Plato uses a 32 MB MuPDF store cap, half of Framework's per-instance budget. The discrepancy seeded roadmap Phase 11's "Per-instance MuPDF store size scaling" item.
+
+### Rendering engines and runtime
+
+- **[MuPDF](https://mupdf.com/)** &mdash; PDF and structured-text rendering. Copyright © Artifex Software. Licensed [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
+- **[DjVuLibre](http://djvu.sourceforge.net/)** &mdash; DjVu rendering. Copyright © Léon Bottou et al. Licensed [GPL-2.0-or-later](https://djvu.sourceforge.net/COPYRIGHT.html).
+
+We link these as system libraries; we do not vendor or copy their source.
+
+### Platform
+
+- [GTK](https://www.gtk.org/) and [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) &mdash; UI toolkit. LGPL-2.1-or-later.
+- [Cairo](https://www.cairographics.org/) &mdash; surface management. LGPL-2.1-or-later / MPL-1.1.
+- [GLib](https://docs.gtk.org/glib/) and [JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/) &mdash; data structures, threading, JSON state. LGPL-2.1-or-later.
+
+Thanks to the [GNOME](https://www.gnome.org/) project for the platform that makes this kind of single-purpose viewer possible at all.
+
+## License
+
+Framework's source code is licensed under the [GNU General Public License, version 3 or later](LICENSE).
+
+Because Framework links against [MuPDF](https://mupdf.com/) (AGPL-3.0), the **shipping binary** is effectively AGPL-3.0 &mdash; redistributors must make corresponding source available. Framework's *source* remains GPL-3-or-later: when distributing source, recipients may choose any GPL version 3 or later.
+
+When techniques from GPL-3 sources (SumatraPDF, Sioyek) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator); the original authors are credited in this README and our SPDX headers remain `GPL-3.0-or-later`.
 
 ## Support
 

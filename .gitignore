@@ -25,6 +25,13 @@ framework-spec.md
 # Claude Code
 claude.run
 
+# Vendored reference repos (see CLAUDE.md "Reference repos" — not part of build)
+.sumatrapdf/
+.zathura-mupdf/
+.zathura/
+.sioyek/
+.plato/
+
 # OS junk
 .DS_Store
 Thumbs.db
