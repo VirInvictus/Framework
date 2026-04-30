@@ -27,7 +27,7 @@ Linux document viewers often fall into two categories: feature-heavy clients (li
 | Feature | Description |
 |---------|-------------|
 | **Velocity Engine** | Dynamic cache management that throttles render jobs based on scroll speed. |
-| **Two-Tier Cache** | Separates parsed page objects from rendered surfaces to minimize I/O. |
+| **Three-Tier Cache** | Persistent thumbnails, parsed page handles, and rendered surfaces — each evicted independently. |
 | **Parallel Rendering** | Independent MuPDF instances render pages across multiple CPU cores. |
 | **Zero-Copy DjVu** | Full DjVuLibre support with zero-copy rendering into Cairo surfaces. |
 | **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland. |
@@ -35,7 +35,7 @@ Linux document viewers often fall into two categories: feature-heavy clients (li
 ## Screenshot
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4f2a77a5-76f1-4d56-8238-a3190bb1be2e" alt="DeaDBeeF CUI Plugin Screenshot" style="max-width: 100%; border-radius: 8px;">
+  <img src="https://github.com/user-attachments/assets/4f2a77a5-76f1-4d56-8238-a3190bb1be2e" alt="Framework Screenshot" style="max-width: 100%; border-radius: 8px;">
 </p>
 
 ## Development & Build
