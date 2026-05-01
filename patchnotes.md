@@ -2,6 +2,18 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.29.0 (2026-05-01)
+
+*`bench-startup` — Phase 12.3.* New benchmark that times each corpus sample's open-to-first-paint flow:
+
+1. `fw_document_new_for_path` → `open_ms`
+2. `fw_cache_start` + priority [0] + main-loop iteration → `first_paint_ms` (the moment `fw_cache_get_texture(0)` first returns non-NULL — the actual user-visible "page 0 painted" instant)
+3. `total_ms = open + paint`
+
+Reports per-file timings as a table; built but not registered with `meson test` (latency benchmark, not pass/fail). First baseline on the canonical corpus shows MOBI's `fz_layout_document` pass dominates open time (Fall of Kings: 934 ms open, 7 ms paint), CBZ's libarchive enumeration dominates the comic open path (Berserk v25: 653 ms open, 204 ms paint), and PDF/DjVu/EPUB land under 110 ms total. The `apply_fit_width_tick` deferred-layout path that this benchmark exists to guard runs cleanly in all cases.
+
+---
+
 ## v0.28.0 (2026-05-01)
 
 *`try_closest_rendered_page` zoom transition — Phase 11 Tier 2.* Continuous Ctrl+scroll zoom no longer falls back to a single-zoom prev_texture (which got progressively blurrier as the user crossed many zoom levels). Each `CacheEntry` now retains up to 3 prior-zoom snapshots; `fw_cache_get_texture` picks the slot whose zoom is closest to the current target (matching rotation + scale_factor) and returns it for GTK to auto-scale into the current rect. A user zoom-storming across 5 levels now sees their just-rendered 2.4× snapshot scaled 1.04× to fill a 2.5× rect — sharp — instead of the original 1.0× snapshot scaled 2.5× — blurry.

@@ -42,6 +42,13 @@ bench_render = executable(
   install: false,
 )
 
+bench_startup = executable(
+  'bench-startup',
+  'bench-startup.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
 # Register as a meson test. RSS cap of 800 MB by default; override with
 # FW_STRESS_RSS_CAP_MB. Skipped automatically in CI environments without a
 # corpus path — pass FW_TEST_CORPUS_ROOT or call the binary directly.
