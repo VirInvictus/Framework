@@ -1476,6 +1476,26 @@ fw_view_get_current_page (FwView *self)
   return 0;
 }
 
+double
+fw_view_get_current_row_width (FwView *self)
+{
+  g_return_val_if_fail (FW_IS_VIEW (self), 0);
+  if (!self->page_widths || self->page_count == 0)
+    return 0;
+
+  int p = fw_view_get_current_page (self);
+  if (p < 0 || p >= self->page_count)
+    return 0;
+
+  if (view_page_is_paired (self, p)) {
+    int first  = view_pair_first (self, p);
+    int second = first + 1;
+    if (second < self->page_count)
+      return self->page_widths[first] + PAGE_GAP + self->page_widths[second];
+  }
+  return self->page_widths[p];
+}
+
 void
 fw_view_set_invert (FwView *self, gboolean invert)
 {

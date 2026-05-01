@@ -2,6 +2,16 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.27.2 (2026-05-01)
+
+*Auto-resize the window for spreads, restore on the next page.* When a wide spread becomes the active row (centerfold in a CBZ, or a paired pair wider than the viewport in facing-pages mode), the window grows horizontally so the spread fits without a horizontal scrollbar. When the user scrolls/pages past the spread back to a normal row, the window restores the width it had before we grew. The interaction tracks a single baseline width so we never shrink past the user's manual sizing — only restore the size we captured before our own grow.
+
+Compositor caveat: this uses `gtk_window_set_default_size` since GTK4 has no programmatic resize for shown windows. On most floating Wayland compositors and X11, the resize is honored. Tiling compositors may silently drop it; the `FW_DEBUG=1` `WINDOW` traces log every grow/shrink request so you can tell whether it took. Maximized and fullscreen windows are skipped — fighting the WM there isn't useful.
+
+`fw_view_get_current_row_width` is the new public query: returns the displayed pixel width of the current row, which is the active page's width when standalone or the pair width (incl. gutter) in facing-pages mode. The window's `on_scroll_changed` calls it whenever current_page changes and decides whether to grow or shrink.
+
+---
+
 ## v0.27.1 (2026-05-01)
 
 *Spread detection for facing-pages mode.* Some CBZ files store 2-page centerfold spreads as a single landscape image; v0.27.0 was naively pairing those wide pages with the next portrait page, which broke the visual flow (especially obvious in manga reading). Now an aspect-ratio test (`w/h > 1.0` → standalone spread) drives a pre-built `pair_partner[]` array, so spreads stand alone and the page that would have been their natural partner orphans cleanly. After the spread, alternation resumes on whatever page follows.

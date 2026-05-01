@@ -30,6 +30,11 @@ double  fw_view_fit_page_zoom (FwView   *self,
 void    fw_view_go_to_page   (FwView     *self,
                               int         page);
 int     fw_view_get_current_page (FwView *self);
+/* Return the displayed pixel width of the current row — the active
+ * page if standalone, or the paired-page pair width (incl. gutter) if
+ * facing-pages is on and the current page is paired. Used by the
+ * window to auto-grow when a wide spread becomes current. */
+double  fw_view_get_current_row_width (FwView *self);
 void    fw_view_set_invert     (FwView     *self,
                                 gboolean    invert);
 void    fw_view_set_rotation   (FwView     *self,

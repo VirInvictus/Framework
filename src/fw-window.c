@@ -87,6 +87,16 @@ struct _FwWindow {
    * truth for the kinetic toggle. */
   GSettings            *settings;
   gulong                settings_kinetic_handler;
+
+  /* Auto-resize for spreads. When the active row's pixel width is
+   * wider than the current window content, request a window resize so
+   * the spread (or paired row) fits without horizontal scroll. When
+   * the user scrolls past the spread back to a normal page, restore
+   * the original width. We only auto-resize when the user hasn't
+   * explicitly resized the window narrower than the spread — and the
+   * compositor still has the last word on Wayland. */
+  int                   spread_baseline_w;  /* width to restore to, 0 = none */
+  gboolean              spread_resized;     /* true while we've grown for a spread */
 };
 
 G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -214,6 +224,77 @@ page_entry_activated (GtkEntry *entry, gpointer user_data)
 
 /* ── Scroll tracking ─────────────────────────────────────────────── */
 
+/* Auto-resize the window so the active row (page or paired pair) fits
+ * without a horizontal scrollbar. Hooked to current-page changes; the
+ * compositor decides whether the resize request is honored — on
+ * tiling Wayland compositors it may be silently dropped, which is
+ * fine. The interaction has three states:
+ *
+ *   1. Active row narrower than the window — leave alone.
+ *   2. Active row wider than the window AND we haven't auto-grown yet
+ *      → save current window width as the baseline and request a
+ *      bigger size. Mark spread_resized.
+ *   3. We previously auto-grew, and the new active row is back to
+ *      "fits in baseline" → request the baseline width and clear
+ *      spread_resized.
+ *
+ * This avoids fighting the user: we never shrink past their manual
+ * sizing, only restore the baseline we captured before our own
+ * resize. Threshold of 8 px tolerance prevents oscillation on
+ * sub-pixel rounding. */
+static void
+maybe_resize_for_spread (FwWindow *self)
+{
+  if (!self->view || !self->document)
+    return;
+
+  GtkWidget *win = GTK_WIDGET (self);
+  if (!gtk_widget_get_realized (win))
+    return;
+
+  /* Don't fight the WM when the window is in a non-floating state. */
+  if (gtk_window_is_maximized (GTK_WINDOW (self))
+      || gtk_window_is_fullscreen (GTK_WINDOW (self)))
+    return;
+
+  int win_w = gtk_widget_get_width (win);
+  int win_h = gtk_widget_get_height (win);
+  if (win_w <= 0 || win_h <= 0)
+    return;
+
+  double row_w = fw_view_get_current_row_width (self->view);
+  if (row_w <= 0)
+    return;
+
+  /* Chrome (header bar, sidebar, scrollbars, padding) is the gap
+   * between the window's pixel width and the FwView's allocation. */
+  int view_w = gtk_widget_get_width (GTK_WIDGET (self->view));
+  if (view_w <= 0)
+    return;
+  int chrome_w = win_w - view_w;
+  if (chrome_w < 0)
+    chrome_w = 0;
+
+  int needed_w = (int) (row_w + 0.5) + chrome_w + 16;  /* +16 px slack for scrollbar */
+
+  if (!self->spread_resized && needed_w > win_w + 8) {
+    /* Grow for a spread. */
+    self->spread_baseline_w = win_w;
+    self->spread_resized = TRUE;
+    FW_TRACE_WINDOW ("auto-grow window: %d -> %d (row=%.0f)",
+                     win_w, needed_w, row_w);
+    gtk_window_set_default_size (GTK_WINDOW (self), needed_w, win_h);
+  } else if (self->spread_resized && needed_w + 8 < self->spread_baseline_w) {
+    /* Shrink back to baseline now that the active row fits. */
+    int baseline = self->spread_baseline_w;
+    self->spread_resized = FALSE;
+    self->spread_baseline_w = 0;
+    FW_TRACE_WINDOW ("auto-shrink window: %d -> %d (row=%.0f)",
+                     win_w, baseline, row_w);
+    gtk_window_set_default_size (GTK_WINDOW (self), baseline, win_h);
+  }
+}
+
 static void
 on_scroll_changed (GtkAdjustment *adj, gpointer user_data)
 {
@@ -228,6 +309,7 @@ on_scroll_changed (GtkAdjustment *adj, gpointer user_data)
     update_page_entry (self);
     if (self->sidebar)
       fw_sidebar_set_current_page (self->sidebar, page);
+    maybe_resize_for_spread (self);
   }
 }
 
