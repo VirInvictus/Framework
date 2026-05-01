@@ -22,6 +22,8 @@ A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. 
 
 Linux document viewers often fall into two categories: feature-heavy clients (like Okular) that bring extensive dependencies to GNOME, or minimal MuPDF wrappers that lack a functional UI. Framework fills the gap by providing a native, high-performance GNOME solution that prioritizes rendering speed and kinetic scrolling without the bloat of an editor.
 
+I'm not pretending I came up with the architecture. Framework is a deliberate synthesis: the cache + threading idioms of **SumatraPDF**, the zero-copy MuPDF→cairo pipeline and `GThreadPool` priority dispatch from **zathura-pdf-mupdf** / **zathura**, the magnifying loupe and double-spread detection from **YACReader**, and (when it lands) the native-GTK reflow architecture from **Fractal**, all glued into a minimalist libadwaita UI for GNOME. Patterns are also borrowed from Sioyek, Plato, MComix, and Komikku where they had something specific to teach. Per-pattern attribution lives in the [Influences](#influences-and-borrowed-techniques) section below — every borrow is named with its upstream file:line and the Framework version it shipped in.
+
 ## Features
 
 | Feature | Description |
@@ -196,61 +198,106 @@ One document per window. Multiple files open multiple windows.
 
 ## Influences and borrowed techniques
 
-Framework is a study in standing on shoulders. The following projects were studied closely and specific techniques are borrowed from each — landed today, scheduled in the roadmap, or under evaluation. Per-technique attribution lives here; per-source-file attributions stay in our SPDX headers.
+Framework is a study in standing on shoulders. Every concrete pattern below names the upstream project, the file:line we studied, the Framework version it shipped in, and the source file where the borrow lives — full chain of attribution so anyone can audit the lineage. Per-technique attribution lives here; per-source-file SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
-### [SumatraPDF](https://www.sumatrapdfreader.org/) &mdash; *spiritual foundation*
-Copyright © 2006–2024 the SumatraPDF project authors. Licensed [GPL-3.0](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/COPYING).
+The four projects in the opening "what this is" line — **SumatraPDF**, **zathura-pdf-mupdf** / **Zathura**, **YACReader**, and **Fractal** — are the explicit foundations: I picked the parts I liked most and glued them into one viewer. **Sioyek**, **Plato**, **MComix**, **Komikku**, and **Foliate** contributed targeted patterns or design references on top of that.
 
-Sumatra's "just a viewer" philosophy &mdash; uncompromising performance, no editor features, no library manager, every action visible &mdash; is the design north star for Framework. Specific techniques studied:
+### [SumatraPDF](https://www.sumatrapdfreader.org/) &mdash; *spiritual foundation, cache & threading*
+Copyright © 2006–2024 the SumatraPDF project authors. Licensed [GPL-3.0](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/COPYING) (compatible).
 
-- **Engine abstraction layer** (`src/EngineBase.h`, `EngineMupdf.cpp`) &mdash; the shape of our `FwDocument` interface follows the same pattern.
+Sumatra's "just a viewer" philosophy &mdash; uncompromising performance, no editor features, no library manager, every action visible &mdash; is Framework's design north star. Specific borrows:
+
+- **Engine abstraction layer** (`src/EngineBase.h`, `src/EngineMupdf.cpp`) &mdash; the shape of our `FwDocument` interface follows the same pattern. Conceptual reference, not a code copy.
 - **Render-cache state machine** (`src/RenderCache.cpp`) &mdash; per-thread `curReqs[]` with abort cookies, semaphore-driven worker dispatch, and the "promote duplicate request to head of queue" trick informed `fw-cache.c`.
-- **In-flight render cancellation via `fz_cookie`** (shipped in v0.17.0; see `src/fw-document-pdf.c:pdf_cancel_render`) &mdash; per-render `fz_cookie` published under a separate `cookies_lock` mutex so cancel never blocks on the worker; `fz_run_page` sees `cookie->abort = 1` and bails at its next checkpoint. Pattern from `EngineMupdf.cpp:3178`.
-- **Bytes-aware cache cap** (shipped in v0.16.0; see `src/fw-cache.c`) &mdash; `total_cached_bytes` tracking + 512 MB default `byte_cap` with `FW_CACHE_BYTES_CAP_MB` override, replacing the page-count window. Pattern from `RenderCache.cpp:178` (`FreeIfFull`).
-- **`try_closest_rendered_page` zoom transition** (shipped in v0.28.0; see `src/fw-cache.c`) &mdash; each `CacheEntry` retains up to 3 prior-zoom snapshots; `fw_cache_get_texture` returns the closest match by zoom for GTK to auto-scale, so continuous Ctrl+scroll zoom shows a sharp scaled preview instead of a blurry one-zoom-back fallback. Pattern from sioyek `pdf_renderer.cpp:236`.
-- **TTL+LRU hybrid eviction** (shipped in v0.26.0; see `src/fw-cache.c`) &mdash; `last_access_us` per `CacheEntry`, bumped on every cache hit; bytes-cap eviction sorts outside-priority candidates oldest-first. Pages the user just scrolled back to survive when the cap fires.
-- **Per-instance MuPDF store size scaling** (shipped in v0.26.0; see `src/fw-document-pdf.c:pdf_pick_store_size`) &mdash; the eight per-render-instance `fz_context`s size their store by file size (16/32/64/128 MB), so novels don't pay textbook overhead and textbooks aren't pinched.
-- **Auto-reload on file change** (shipped in v0.21.0; see `src/fw-window.c`) &mdash; `GFileMonitor`-driven swap with state-restore, the LaTeX/Typst killer feature. Conceptual pattern from Sumatra's `FileWatcher.cpp` reimagined in GIO idioms.
-- **Smart text selection** (shipped in v0.19/v0.20; see `src/fw-document-pdf.c:pdf_select_at` and `pdf_get_selection_quads`) &mdash; double-click word, triple-click line, per-line drag highlights via `fz_snap_selection` + `fz_highlight_selection`. Pattern adapted from `TextSelection.cpp` `FindClosestGlyph` / `SelectWordAt`.
-- **Scheduled borrows** (roadmap Phase 11+): tile-rendering as a high-zoom fallback; opportunistic per-page text extraction during render (the v0.18 stext cache populates lazily, not during render).
+- **Bytes-aware cache cap** (v0.16; `src/fw-cache.c`) &mdash; `total_cached_bytes` tracking + 512 MB default `byte_cap` with `FW_CACHE_BYTES_CAP_MB` override, replacing the page-count window. Pattern from `RenderCache.cpp:178` (`FreeIfFull`).
+- **In-flight render cancellation via `fz_cookie`** (v0.17; `src/fw-document-pdf.c:pdf_cancel_render`) &mdash; per-render `fz_cookie` published under a separate `cookies_lock` mutex so cancel never blocks on the worker; `fz_run_page` sees `cookie->abort = 1` and bails at its next checkpoint. Pattern from `EngineMupdf.cpp:3178`.
+- **Auto-reload on file change** (v0.21; `src/fw-window.c`) &mdash; `GFileMonitor`-driven swap with state-restore, the LaTeX/Typst killer feature. Conceptual pattern from Sumatra's `FileWatcher.cpp` reimagined in GIO idioms.
+- **Smart text selection** (v0.19; `src/fw-document-pdf.c:pdf_select_at` + `pdf_get_selection_quads`) &mdash; double-click word, triple-click line, per-line drag highlights. Pattern adapted from `TextSelection.cpp` `FindClosestGlyph` / `SelectWordAt`, implemented via MuPDF's `fz_snap_selection` + `fz_highlight_selection` (which do the same thing the canonical way).
 
-### [Zathura](https://pwmt.org/projects/zathura/) and [zathura-pdf-mupdf](https://pwmt.org/projects/zathura-pdf-mupdf/) &mdash; *render pipeline*
-Copyright © 2009–2024 pwmt.org. Licensed [Zlib](https://github.com/pwmt/zathura/blob/develop/LICENSE).
+### [zathura-pdf-mupdf](https://github.com/pwmt/zathura-pdf-mupdf) and [Zathura](https://pwmt.org/projects/zathura/) &mdash; *render pipeline & sandboxing*
+Copyright © 2009–2024 pwmt.org. Licensed [Zlib](https://github.com/pwmt/zathura/blob/develop/LICENSE) (compatible).
 
-zathura's zero-copy `MuPDF`&rarr;`cairo` pipeline is the textbook minimalist implementation. Specific techniques in Framework today and planned:
+zathura-pdf-mupdf's zero-copy `MuPDF`→`cairo` pipeline is the textbook minimalist implementation; the parent zathura project's render scheduler is the GLib-native blueprint Framework's cache mirrors.
 
-- **Zero-copy MuPDF render** (shipped in v1.6.0 as the v1.6 *Zero-Copy MuPDF Render* patch note; see `src/fw-document-pdf.c:render_page_direct`) &mdash; constructs the MuPDF pixmap *around* the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr`, eliminating the channel-shuffle loop entirely. Borrowed verbatim in pattern from `zathura-pdf-mupdf/render.c`.
-- **Cached `fz_stext_page` per page** (shipped in v0.18.0; see `src/fw-document-pdf.c:pdf_get_or_extract_stext`) &mdash; lazy per-document cache, populated on first text-related call. Search across 901 pages: 332 ms cold &rarr; 48 ms warm (6.85&times; speedup). Pattern from `zathura-pdf-mupdf/page.c`.
-- **`g_thread_pool_set_sort_function` priority dispatch** (shipped in v0.14.0; see `src/fw-cache.c:render_job_compare`) &mdash; the pool reorders queued jobs by `last_view_time` so the most recently prioritized page runs next. Pattern from `zathura/render.c:94`.
-- **Hue-preserving recolor** (shipped in v0.22.0; see `src/fw-view.c` snapshot path) &mdash; luminance-aware affine that flips the lightness axis while preserving each pixel's chromatic offset. Red diagrams stay red on a dark background. Conceptually similar to `zathura/render.c`'s `colorumax` HSL recolor, reduced to a 4×4 GSK matrix.
+- **Zero-copy MuPDF render** (v1.6; `src/fw-document-pdf.c:render_page_direct`) &mdash; constructs the MuPDF pixmap *around* the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr`, eliminating the channel-shuffle loop entirely. Pattern from `zathura-pdf-mupdf/render.c`.
+- **Cached `fz_stext_page` per page** (v0.18; `src/fw-document-pdf.c:pdf_get_or_extract_stext`) &mdash; lazy per-document cache populated on first text-related call. Search across 901 pages: 332 ms cold → 48 ms warm (6.85× speedup). Pattern from `zathura-pdf-mupdf/page.c`.
+- **`g_thread_pool_set_sort_function` priority dispatch** (v0.14; `src/fw-cache.c:render_job_compare`) &mdash; the pool reorders queued jobs by `last_view_time` so the most recently prioritized page runs next. Pattern from `zathura/render.c:94`.
+- **Hue-preserving recolor** (v0.22; `src/fw-view.c` snapshot path) &mdash; luminance-aware affine that flips the lightness axis while preserving each pixel's chromatic offset. Red diagrams stay red on a dark background. Conceptually similar to `zathura/render.c`'s `colorumax` HSL recolor, reduced to a 4×4 GSK matrix.
+- **Landlock LSM hardening** (v0.38; `src/fw-sandbox.c`) &mdash; drops filesystem `EXECUTE` + `MAKE_*` rights at startup so a malicious document exploiting MuPDF / DjVuLibre / libarchive into RCE can't escalate to spawning a shell or planting a backdoor. Pattern from `zathura/landlock.c`.
 
-### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions and async search*
-Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE).
+### [YACReader](https://www.yacreader.com/) &mdash; *comic-reading polish*
+Copyright © Luis Ángel San Martín. Licensed [GPL-3.0](https://github.com/YACReader/yacreader/blob/master/COPYING) (compatible).
 
-Sioyek's PDF renderer is the most carefully tuned single-document Linux MuPDF reader we found.
+YACReader is the comic reader I keep going back to on Linux; its loupe and double-spread detection are the parts I wanted in Framework.
 
-- **Closest-zoom fallback during transitions** (planned, roadmap Phase 11) &mdash; when the requested zoom level isn't ready, return the nearest-zoom rendered surface and scale it for display while the exact render proceeds. Pattern from `pdf_renderer.cpp:try_closest_rendered_page`.
-- **Async, progressive search worker** (shipped in v0.7.0; see `src/fw-search.c`) &mdash; dedicated worker thread that scans page-by-page and posts hits back to the main loop via signals as they're found, with generation-counter cancellation when the query changes. Pattern from `pdf_renderer.cpp:run_search` (which emits `search_advance` every 16 pages).
-- **Slice-based rendering for huge pages** (planned, fallback only) &mdash; render in N&times;M slices when a single surface would exceed a memory threshold. Pattern from Sioyek's `(num_h_slices, num_v_slices)` per request.
-- **Hybrid threading model** (under evaluation) &mdash; one parent `fz_context`, per-thread `fz_clone_context`, per-(thread, path) `fz_document` &mdash; sits between Sumatra's full-clone and Framework's 8-instance model on the memory/parallelism curve.
+- **Magnifying loupe** (v0.24; `src/fw-view.c` snapshot path) &mdash; circular zoom-around-cursor viewport, pure GPU work via `gtk_snapshot_push_rounded_clip` + scale transform + texture re-append. F7 toggle. Pattern from `YACReader/magnifying_glass.cpp`.
+- **Aspect-ratio double-spread detection** (v0.27.1; `src/fw-view.c::view_page_is_spread`) &mdash; pages with `w/h > 1.0` are treated as pre-rendered spreads and stand alone in facing-pages mode, with the page that would have been their natural partner orphaning so alternation resumes after.
+- **Filename-based double-spread detection** (v0.37; `src/fw-document-cbr.c::cbr_is_spread_filename`) &mdash; complements the aspect-ratio test by catching scanlation rips where the spread image has portrait dimensions but the filename concatenates two consecutive page numbers (`chapter01_034035.jpg`). Direct port of YACReader's algorithm at `common/comic.cpp:925-1028`.
+
+### [Fractal](https://gitlab.gnome.org/World/fractal) &mdash; *native GTK reflow architecture (Phase 13.1)*
+Copyright © 2017–2024 Fractal contributors. Licensed [GPL-3.0](https://gitlab.gnome.org/World/fractal/-/blob/main/LICENSE) (compatible).
+
+Fractal is a Matrix chat client — totally unrelated domain — but its `GListModel` + `GtkSignalListItemFactory` + per-row widget pattern is exactly what reflowed EPUB / MOBI / AZW3 / FB2 / TXT chapters want. The Phase 13.1 rewrite (`docs/fractal-rewrite.md`) is named for it.
+
+- **Dynamic-height list-model pattern** (planned, Phase 13.1) &mdash; structurally-typed items (paragraph, heading, image, blockquote, list, code) rendered into native widgets that wrap text natively, instead of pre-rendered to pixmaps. Pattern from `.fractal/src/utils/grouping_list_model/`.
+- **Per-row widget factory idioms** (planned, Phase 13.1) &mdash; map block type → widget choice (`GtkLabel` for text, `GtkPicture` for images, etc.) via `GtkSignalListItemFactory`. Pattern from `.fractal/src/components/rows/`.
+
+### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions, async search, threading hybrid*
+Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE) (compatible).
+
+Sioyek's `pdf_renderer.cpp` is the most carefully tuned single-document Linux MuPDF reader I found.
+
+- **`try_closest_rendered_page` zoom transition** (v0.28; `src/fw-cache.c::fw_cache_get_texture`) &mdash; each `CacheEntry` retains up to 3 prior-zoom snapshots; nearest-zoom slot returned for GTK to auto-scale, so continuous Ctrl+scroll zoom shows a sharp preview instead of a blurry one-zoom-back fallback. Pattern from `pdf_renderer.cpp:236`.
+- **TTL+LRU hybrid eviction** (v0.26; `src/fw-cache.c`) &mdash; `last_access_us` per `CacheEntry` bumped on every hit; bytes-cap eviction sorts outside-priority candidates oldest-first. Pattern from `pdf_renderer.cpp:269` `delete_old_pages`.
+- **Async, progressive search worker** (v0.7; `src/fw-search.c`) &mdash; dedicated worker thread scans page-by-page and posts hits back to the main loop via signals as they're found, with generation-counter cancellation. Pattern from `pdf_renderer.cpp::run_search`.
+- **Hybrid threading model** (validated as not currently needed in v0.36; tracked as fallback) &mdash; one parent `fz_context`, per-thread `fz_clone_context`, per-(thread, path) `fz_document`. Sits between Sumatra's full-clone and Framework's 8-independent-document model on the memory/parallelism curve. Stays as a roadmap option if a memory-constrained deployment target ever shows up.
 
 ### [Plato](https://github.com/baskerville/plato) &mdash; *memory-pressure reference*
 Copyright © 2017 Bastien Dejean. Licensed AGPL-3.0.
 
-Plato runs MuPDF on Kobo e-readers (single-core ARM, ~256 MB RAM). **Technique reference only** &mdash; AGPL-3.0 is not source-compatible with our GPL-3-or-later, so no code is copied. Useful as a sanity check on memory-pressure decisions: Plato uses a 32 MB MuPDF store cap, half of Framework's per-instance budget. The discrepancy seeded roadmap Phase 11's "Per-instance MuPDF store size scaling" item.
+Plato runs MuPDF on Kobo e-readers (single-core ARM, ~256 MB RAM). **Technique reference only** &mdash; AGPL-3.0 is not source-compatible with our GPL-3-or-later, so no code is copied.
 
-### Rendering engines and runtime
+- **Per-instance MuPDF store size scaling** (v0.26; `src/fw-document-pdf.c:pdf_pick_store_size`) &mdash; Plato uses a 32 MB MuPDF store cap (`crates/core/src/document/mupdf_sys.rs:37`), half of what Sumatra's `FZ_STORE_DEFAULT` and Framework's biggest tier pick. The discrepancy seeded Framework's file-size-aware ladder (16/32/64/128 MB) so novels don't pay textbook overhead and textbooks aren't pinched. Sioyek (lets MuPDF pick) and Sumatra (uses default) were the other two reference points.
 
-- **[MuPDF](https://mupdf.com/)** &mdash; PDF and structured-text rendering. Copyright © Artifex Software. Licensed [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
-- **[DjVuLibre](http://djvu.sourceforge.net/)** &mdash; DjVu rendering. Copyright © Léon Bottou et al. Licensed [GPL-2.0-or-later](https://djvu.sourceforge.net/COPYRIGHT.html).
+### [MComix](https://sourceforge.net/projects/mcomix/) &mdash; *manga RTL navigation*
+Copyright © Pontus Ekberg et al. Licensed [GPL-2.0-or-later](https://sourceforge.net/projects/mcomix/) (compatible; combined work distributable under GPL-3-or-later).
 
-We link these as system libraries; we do not vendor or copy their source.
+- **Manga mode RTL navigation** (v0.27; `src/fw-window.c::on_key_pressed`) &mdash; F4 toggle that swaps Left/Right arrow page-nav semantics: Left advances, Right goes back, following the reading order of Japanese manga. Conceptual pattern from MComix's `event.py`. Combined with facing-pages, also flips left/right within each pair so the lower-numbered page sits on the right.
 
-### Platform
+### [Komikku](https://gitlab.com/valos/Komikku/) &mdash; *manga / webtoon reader UX*
+Copyright © Valéry Febvre et al. Licensed [GPL-3.0-or-later](https://gitlab.com/valos/Komikku/-/blob/main/COPYING) (compatible).
 
-- [GTK](https://www.gtk.org/) and [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) &mdash; UI toolkit. LGPL-2.1-or-later.
-- [Cairo](https://www.cairographics.org/) &mdash; surface management. LGPL-2.1-or-later / MPL-1.1.
-- [GLib](https://docs.gtk.org/glib/) and [JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/) &mdash; data structures, threading, JSON state. LGPL-2.1-or-later.
+Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX work.
+
+- **Webtoon mode (zero-gap continuous strip)** (v0.27; `src/fw-view.c::recompute_layout`) &mdash; F5 toggle drops `PAGE_GAP` to zero so vertically-laid-out long-strip comics stitch into a seamless single canvas. Conceptual pattern from Komikku's reader pager.
+- **Facing pages with cover-standalone** (v0.27; `src/fw-view.c::view_page_is_paired`) &mdash; F10 toggle pairs pages 1+2, 3+4, etc., with page 0 as the standalone cover. Mirrors how a physical book opens.
+- **Phase 13.1 reader-pager pattern reference** (planned) &mdash; secondary reference for the Fractal-style EPUB reflow rewrite, alongside Fractal itself. See `.komikku/komikku/reader/pager/`.
+
+### [Foliate](https://johnfactotum.github.io/foliate/) &mdash; *feature-complete ebook UX (no code borrows)*
+Copyright © John Factotum. Licensed [GPL-3.0-or-later](https://github.com/johnfactotum/foliate/blob/master/LICENSE) (compatible, but unused).
+
+Foliate is the serious GNOME ebook reader — annotation, sync, DRM-aware conversion, full publisher CSS. Their stack is WebKitGTK + JavaScript (ebook.js), so the implementation patterns don't transfer to native GTK and **no code is borrowed**. Mentioned here because Foliate is the explicit "we are not trying to replace this" reference in `docs/fractal-rewrite.md`: Framework's reflow mode is "open this EPUB cleanly without launching another app," not "be the best ebook reader on Linux."
+
+### Rendering engines (system libraries, no source vendored)
+
+- **[MuPDF](https://mupdf.com/)** — PDF / XPS / EPUB / MOBI / FB2 / CBZ rendering, structured-text extraction, font/image stores. Copyright © Artifex Software. Licensed [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html). The shipping binary is effectively AGPL because of this link — see the [License](#license) section.
+- **[DjVuLibre](http://djvu.sourceforge.net/)** — DjVu rendering. Copyright © Léon Bottou et al. Licensed [GPL-2.0-or-later](https://djvu.sourceforge.net/COPYRIGHT.html).
+- **[libarchive](https://www.libarchive.org/)** — RAR / 7-Zip / tar / ZIP enumeration for the CBR backend (so we can ship CBR support without the libunrar licensing trap). Copyright © Tim Kientzle et al. Licensed [BSD-2-Clause](https://github.com/libarchive/libarchive/blob/master/COPYING).
+
+### Platform (system libraries, no source vendored)
+
+- **[GTK](https://www.gtk.org/)** (4.16+) and **[libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)** (1.7+) — UI toolkit. LGPL-2.1-or-later.
+- **[Cairo](https://www.cairographics.org/)** (1.18+) — image surface management, the buffer MuPDF and DjVuLibre render directly into. LGPL-2.1-or-later / MPL-1.1.
+- **[GLib](https://docs.gtk.org/glib/)** (2.82+) — data structures, threading (`GThreadPool`), GObject, async I/O via GIO (file monitoring, archives, portals). LGPL-2.1-or-later.
+- **[JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/)** (1.10+) — per-document state persistence at `$XDG_DATA_HOME/framework/state.json`. LGPL-2.1-or-later.
+- **[Pango](https://docs.gtk.org/Pango/)** (via GTK) — text layout for the search bar and dialogs (and the planned Phase 13.1 reflow mode). LGPL-2.1-or-later.
+- **[Linux kernel Landlock LSM](https://landlock.io/)** (kernel 5.13+, ABI 1+) — process-scoped filesystem sandboxing applied at startup. Optional at runtime; the binary degrades to a no-op on older kernels.
+
+### Tooling
+
+- **[Meson](https://mesonbuild.com/)** (1.4+) and **[Ninja](https://ninja-build.org/)** — build system.
+- **[gettext](https://www.gnu.org/software/gettext/)** — i18n scaffolding (active translations are TBD; the infrastructure is wired).
+- **[gcc](https://gcc.gnu.org/)** / **[clang](https://clang.llvm.org/)** + **[AddressSanitizer / UndefinedBehaviorSanitizer](https://github.com/google/sanitizers)** — used during development; not shipping deps.
 
 Thanks to the [GNOME](https://www.gnome.org/) project for the platform that makes this kind of single-purpose viewer possible at all.
 
@@ -260,7 +307,7 @@ Framework's source code is licensed under the [GNU General Public License, versi
 
 Because Framework links against [MuPDF](https://mupdf.com/) (AGPL-3.0), the **shipping binary** is effectively AGPL-3.0 &mdash; redistributors must make corresponding source available. Framework's *source* remains GPL-3-or-later: when distributing source, recipients may choose any GPL version 3 or later.
 
-When techniques from GPL-3 sources (SumatraPDF, Sioyek) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator); the original authors are credited in this README and our SPDX headers remain `GPL-3.0-or-later`.
+When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Fractal, Komikku) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator). Zlib techniques (Zathura, zathura-pdf-mupdf) and GPL-2-or-later techniques (MComix) are also cleanly compatible. Plato (AGPL-3.0) is technique-reference only — no code is copied. The original authors are credited in the [Influences](#influences-and-borrowed-techniques) section above and our SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
 ## Support
 

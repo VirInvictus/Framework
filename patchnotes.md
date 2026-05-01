@@ -2,6 +2,31 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.39.1 (2026-05-01)
+
+*Comprehensive attribution sweep across `README.md`.* Reframed the project's opening to be transparent that Framework is a deliberate synthesis — SumatraPDF's cache + threading idioms, zathura-pdf-mupdf's zero-copy MuPDF→cairo pipeline + Zathura's `GThreadPool` priority dispatch, YACReader's loupe + double-spread detection, and (Phase 13.1) Fractal's native-GTK reflow architecture, glued into a minimalist libadwaita UI. Sioyek, Plato, MComix, Komikku, Foliate listed as additional pattern sources.
+
+### Per-pattern attribution overhaul
+
+The "Influences and borrowed techniques" section now names every borrow's: **upstream project**, **upstream file:line**, **Framework version it shipped in**, and **Framework source file** the borrow lives in. Several misattributions corrected — the multi-zoom retention (`try_closest_rendered_page`) and TTL+LRU eviction were filed under SumatraPDF but they're actually Sioyek's. The per-instance store sizing was three-way (Plato's tight cap + Sumatra's default + Sioyek's auto), now correctly attributed.
+
+### New attribution sections
+
+- **YACReader** — was missing entirely. Now credited for the magnifying loupe (v0.24), aspect-ratio spread detection (v0.27.1), and filename-based spread detection (v0.37).
+- **Fractal** — was buried in the design doc. Now front-and-centre as the named architectural foundation for Phase 13.1 reflow.
+- **MComix** — credited for the manga RTL key-swap concept (v0.27).
+- **Komikku** — credited for webtoon mode + facing-pages (v0.27) and for the Phase 13.1 reader-pager pattern reference.
+- **Foliate** — listed as the explicit "we are not trying to replace this" reference. No code borrows; included for transparency about the ebook reader space.
+- **Zathura landlock** — v0.38 borrow added to the Zathura section.
+
+### Library credits broadened
+
+System libraries section now spells out every runtime dep: MuPDF, DjVuLibre, libarchive (rendering/format engines); GTK4, libadwaita, Cairo, GLib, JSON-GLib, Pango (platform); Linux kernel Landlock LSM (optional sandbox). Plus a small Tooling section for Meson, Ninja, gettext, and the dev sanitizers. Build-deps tables earlier in the README already list the same set; this section grounds them in their licenses.
+
+No code changes.
+
+---
+
 ## v0.39.0 (2026-05-01)
 
 *Reference-repo cleanup audit.* Seven of the nine vendored upstream checkouts have been mined for everything Framework can reasonably borrow; this version removes them from disk and from `.gitignore` after one last audit sweep that surfaced two more borrows worth shipping (v0.37 YACReader filename-spread, v0.38 Zathura landlock).
