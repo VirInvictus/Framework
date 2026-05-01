@@ -2,6 +2,25 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.34.0 (2026-05-01)
+
+*`framework --self-test` — Phase 12.4.* New CLI flag, gated behind `-Dstress=true` (so packagers and end users don't carry the dead code). When invoked, opens a known-good document, drives the cache through the open path + a 12-step stride scrub across the document, asserts that page 0 actually painted within 5 seconds, and exits 0 on pass / 1 on fail. Headless — no widget tree, no window. About 80 LOC of conditionally-compiled `main.c` driving `FwDocument` + `FwCache` directly.
+
+```
+$ ./builddir/src/framework --self-test
+self-test: opening /home/bdkl/docs/Calibre Library/.../Effective Java - Joshua Bloch.pdf
+self-test: 901 pages
+self-test: PASS
+```
+
+### Hash baseline dropped
+The original spec called for hashing the rendered first-page surface against a stored baseline. In practice that hash is too brittle across MuPDF versions and platform fonts to be useful CI signal — every legitimate upstream font/rendering change false-positives. The smoke gate checks the property that *actually* breaks on toolchain regressions: "binary opens, page 0 paints, no crashes." Cleaner signal, no per-arch baseline maintenance.
+
+### Build wiring
+New `FW_STRESS_BUILD` config define driven by the existing `-Dstress=true` meson option. Non-stress builds reject `--self-test` with exit 2 and a clear message — no dead code in the shipping binary.
+
+---
+
 ## v0.33.0 (2026-05-01)
 
 *`tests/scripts/trace-replay.sh` — Phase 12.4.* Renders an `FW_DEBUG=1` log to an SVG timeline. Five horizontal tracks aligned to a shared time axis:
