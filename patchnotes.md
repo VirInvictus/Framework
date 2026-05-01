@@ -2,6 +2,22 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.33.0 (2026-05-01)
+
+*`tests/scripts/trace-replay.sh` — Phase 12.4.* Renders an `FW_DEBUG=1` log to an SVG timeline. Five horizontal tracks aligned to a shared time axis:
+
+1. **state** — Cache render-state bands (green = STATIC, yellow = CRUISING, red = SCRUBBING) running edge-to-edge so you see velocity transitions at a glance.
+2. **zoom** — Vertical orange tick at every `fw_cache_start` with the new zoom value labeled.
+3. **w-start** — Green tick per worker dispatch (one tick per `worker start: page=N` trace line).
+4. **w-done** — Blue tick per worker completion.
+5. **evict** — Red triangle at every byte-cap eviction event.
+
+Pure bash + awk, no Python or extra deps. Reads from a file argument or stdin and emits SVG to stdout. The 0.5 s tick grid + total runtime + event counts in the bottom-right give you a "did anything go wrong here" read at a glance — answers questions like "why did rendering stall for 200ms" without scrolling through hundreds of trace lines.
+
+Usage: `FW_DEBUG=1 ./builddir/src/framework <doc> 2> trace.log; tests/scripts/trace-replay.sh trace.log > trace.svg`
+
+---
+
 ## v0.32.0 (2026-05-01)
 
 *`tests/scripts/coredump-triage.sh` — Phase 12.4.* Non-interactive coredump capture. Given a PID, a coredumpctl matchid, no argument (= latest framework crash), or `--core <file>` for a local core file, writes a timestamped triage directory under `~/.local/share/framework/triage/<UTC-timestamp>/` containing:
