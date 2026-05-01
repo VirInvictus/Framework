@@ -2,6 +2,22 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.32.0 (2026-05-01)
+
+*`tests/scripts/coredump-triage.sh` — Phase 12.4.* Non-interactive coredump capture. Given a PID, a coredumpctl matchid, no argument (= latest framework crash), or `--core <file>` for a local core file, writes a timestamped triage directory under `~/.local/share/framework/triage/<UTC-timestamp>/` containing:
+
+- `coredumpctl-info.txt` — full `coredumpctl info` for the dump (PID, signal, command line, loaded modules)
+- `commandline.txt` — the original argv extracted from the info output
+- `full-gdb.txt` — `gdb -batch` session against the dumped core (`thread apply all bt full` + registers + proc mappings)
+- `threads-bt.txt` — per-thread bt slice extracted from the gdb output
+- `cache-state.txt` — placeholder; the FwCache pretty-printer is roadmap follow-up
+
+Implementation note: `coredumpctl debug` interleaves its own info text with gdb's output and isn't reliable for capture, so the script extracts the core via `coredumpctl dump --output` and runs gdb directly against `(builddir/src/framework, core-file)`. Build-ID mismatches between the running binary and the dumped core produce a warning but don't block — most frames still resolve when symbols match.
+
+Stays out of `meson test` (debugging utility, not a regression check).
+
+---
+
 ## v0.31.0 (2026-05-01)
 
 *`tests/scripts/debug.sh` — Phase 12.4.* One-shot gdb wrapper for crash investigation. Runs `./builddir/src/framework` under `gdb -batch` with the breakpoints from `tests/scripts/framework.gdb` pre-loaded:
