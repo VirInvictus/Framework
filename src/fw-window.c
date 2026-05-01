@@ -880,6 +880,14 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   add_shortcut_row (g_view, "Crop margins",     "F6");
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_view);
 
+  AdwPreferencesGroup *g_comic =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_comic, "Comic Layout");
+  add_shortcut_row (g_comic, "Manga mode (RTL)",      "F4");
+  add_shortcut_row (g_comic, "Webtoon mode",          "F5");
+  add_shortcut_row (g_comic, "Facing pages",          "F10");
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_comic);
+
   AdwPreferencesGroup *g_sel =
     ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
   adw_preferences_group_set_title (g_sel, "Selection");
@@ -1069,12 +1077,25 @@ on_key_pressed (GtkEventControllerKey *controller,
     }
     return TRUE;
   case GDK_KEY_Left:
+    /* Manga mode: Left=next page (RTL reading order). Otherwise the
+     * arrow scrolls horizontally, which matters for zoomed-in PDFs
+     * wider than the viewport. */
+    if (self->settings
+        && g_settings_get_boolean (self->settings, "manga-mode")) {
+      go_to_page (self, self->current_page + 1);
+      return TRUE;
+    }
     if (hadj) {
       double v = gtk_adjustment_get_value (hadj);
       gtk_adjustment_set_value (hadj, v - SCROLL_STEP);
     }
     return TRUE;
   case GDK_KEY_Right:
+    if (self->settings
+        && g_settings_get_boolean (self->settings, "manga-mode")) {
+      go_to_page (self, self->current_page - 1);
+      return TRUE;
+    }
     if (hadj) {
       double v = gtk_adjustment_get_value (hadj);
       gtk_adjustment_set_value (hadj, v + SCROLL_STEP);
@@ -1205,6 +1226,14 @@ fw_window_constructed (GObject *object)
   g_menu_append (menu, "Reading Ruler", "win.reading-ruler");
   g_menu_append (menu, "Magnifying Loupe", "win.loupe");
   g_menu_append (menu, "Crop Margins", "win.crop-margins");
+
+  GMenu *comic_section = g_menu_new ();
+  g_menu_append (comic_section, "Manga Mode (RTL)",        "win.manga-mode");
+  g_menu_append (comic_section, "Webtoon Mode",            "win.webtoon-mode");
+  g_menu_append (comic_section, "Facing Pages",            "win.facing-pages");
+  g_menu_append_submenu (menu, "Comic Layout", G_MENU_MODEL (comic_section));
+  g_object_unref (comic_section);
+
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
   g_menu_append (menu, "Document Properties…", "win.properties");
@@ -1453,6 +1482,18 @@ fw_window_constructed (GObject *object)
     g_autoptr (GAction) crop_action =
       g_settings_create_action (self->settings, "crop-margins");
     g_action_map_add_action (G_ACTION_MAP (self), crop_action);
+
+    g_autoptr (GAction) manga_action =
+      g_settings_create_action (self->settings, "manga-mode");
+    g_action_map_add_action (G_ACTION_MAP (self), manga_action);
+
+    g_autoptr (GAction) webtoon_action =
+      g_settings_create_action (self->settings, "webtoon-mode");
+    g_action_map_add_action (G_ACTION_MAP (self), webtoon_action);
+
+    g_autoptr (GAction) facing_action =
+      g_settings_create_action (self->settings, "facing-pages");
+    g_action_map_add_action (G_ACTION_MAP (self), facing_action);
 
     /* Apply kinetic-scrolling to the scrolled window now and on every
      * change. The previous hardcoded TRUE is now driven by the user's

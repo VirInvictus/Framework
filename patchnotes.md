@@ -2,6 +2,34 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.27.0 (2026-05-01)
+
+*Comic-reader trio + roadmap reorg.* Phase 13's three layout modes — Manga, Webtoon, Facing Pages — land together since they all touch `FwView::recompute_layout` and the snapshot path. Plus the long-stale "Hermitage" rename fixed in roadmap, and the 1.0 release section moved to the end of the document where it actually belongs given how far the 0.x sprint has gone.
+
+---
+
+### Manga Mode (Phase 13)
+New `manga-mode` GSettings boolean, **F4** shortcut, "Manga Mode (RTL)" entry under the new Comic Layout submenu. When on, the directional page-nav keys swap — Left Arrow advances to next page, Right Arrow goes to previous — following the reading order of Japanese manga. Pure scroll geometry is unaffected (vertical layout doesn't change), so the toggle is purely about RTL nav semantics. Combined with facing-pages, also flips left/right within each pair so the lower-numbered page sits on the right.
+
+The implementation lives entirely in `fw-window.c::on_key_pressed` (key swap) and `fw-view.c::view_page_is_paired`/snapshot-x (paired-layout flip) — about a dozen lines of behavior change for a feature that lights up an entire genre of content.
+
+### Webtoon Mode (Phase 13)
+New `webtoon-mode` GSettings boolean, **F5** shortcut. Drops `PAGE_GAP` to zero in `recompute_layout` so vertically-laid-out long-strip comics stitch into a seamless single canvas — designed for Korean webtoons and other formats where the artist composes across page boundaries. No-op when facing-pages is also active (mutually exclusive layouts).
+
+Layout-anchor preservation: toggling webtoon mode runs through `view_apply_layout_change`, which captures `(page, intra-page-fraction)` before the layout change and restores after — so flipping the toggle mid-document keeps you in the same place rather than jumping to a different page.
+
+### Facing Pages (Phase 13)
+New `facing-pages` GSettings boolean, **F10** shortcut. Two pages per row, page 0 standalone as cover, then 1+2, 3+4, etc. — matches how a physical book opens. Added a pair-aware layout helper (`view_page_is_paired`/`view_pair_first`) that the snapshot path, click-to-doc mapping, and `fw_view_get_current_page` all consult so the rest of the view code doesn't have to reason about pairs. Pair height = max of the two pages (handles mismatched dimensions cleanly); pair width tracked through `max_width` so `GtkScrolledWindow` provides a horizontal scrollbar when a pair is wider than the viewport.
+
+Combined with manga mode: lower-numbered page sits on the right within each pair. Combined with crop margins or zoom: same `(page, frac)` anchor preservation kicks in via `view_apply_layout_change`.
+
+### Roadmap Cleanup
+- Moved Phase 10 (1.0 Release) to the end of the document and renumbered to Phase 15. The roadmap had grown a v0.27 worth of features past the original 1.0 landing slot; the section was actively misleading where it sat.
+- Replaced `dev.hermitage.Hermitage.desktop` (stale name from a previous project iteration) with the actual `io.github.virinvictus.framework.desktop`.
+- Removed a duplicate `stress-zoom-storm` entry left over from the v0.15 sprint.
+
+---
+
 ## v0.26.0 (2026-05-01)
 
 *Cache and bench batch — Phase 11 Tiers 2 and 3, plus Phase 12.2 and 12.3 fill out the test harness.* Four roadmap items shipped together: per-instance MuPDF store size scaling, TTL+LRU hybrid cache eviction, a new render-latency benchmark, and a full-corpus soak test.

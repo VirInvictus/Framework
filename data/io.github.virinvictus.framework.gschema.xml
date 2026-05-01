@@ -60,5 +60,43 @@
       </description>
     </key>
 
+    <key name="manga-mode" type="b">
+      <default>false</default>
+      <summary>Right-to-left page navigation (manga reading order)</summary>
+      <description>
+        When true, swap the directional page-navigation keys: Right Arrow
+        moves to the previous page and Left Arrow moves to the next page,
+        following the reading order of Japanese manga and Hebrew/Arabic
+        documents. Combined with facing-pages mode, also flips the
+        left/right layout within a pair so the right-hand page is the
+        odd-numbered one. Toggleable from the primary menu or via F4.
+      </description>
+    </key>
+
+    <key name="webtoon-mode" type="b">
+      <default>false</default>
+      <summary>Seamless vertical strip layout (webtoon reading mode)</summary>
+      <description>
+        When true, drop the inter-page gap to zero so vertically-laid-out
+        comics stitch into a single seamless strip. Designed for Korean
+        webtoons and other long-strip formats where the artist composes
+        across page boundaries. Has no visual effect when facing-pages is
+        also active. Toggleable from the primary menu or via F5.
+      </description>
+    </key>
+
+    <key name="facing-pages" type="b">
+      <default>false</default>
+      <summary>Lay out pages side-by-side in pairs</summary>
+      <description>
+        When true, render two pages per row (page 0 paired with 1, 2 with
+        3, etc.) with a small gutter between them. Useful for comics with
+        artwork that spans facing pages and for two-up reading of novels.
+        With manga-mode also active, the pair order flips so the
+        odd-numbered page sits on the left and the even-numbered page on
+        the right. Toggleable from the primary menu or via F10.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

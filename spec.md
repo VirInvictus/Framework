@@ -588,7 +588,7 @@ These are explicitly deferred. Do not implement before 1.0. Listed here only to 
 - **Thumbnail sidebar** (alternative sidebar mode alongside TOC).
 - **Annotations** (highlight, underline — stored externally, not modifying the document).
 - **Presentation mode** (page-at-a-time, no chrome, slide-show style).
-- **Single-page and facing-pages view modes** for general documents (the current default is continuous vertical scroll). Comic-book facing pages and webtoon (infinite vertical canvas) modes are tracked in roadmap Phase 13.
+- **Single-page view mode** for general documents (the current default is continuous vertical scroll). Facing-pages, manga, and webtoon modes shipped in v0.27 — see Phase 13 in `roadmap.md`.
 - **Smooth pinch-to-zoom** on touchscreens.
 - **Configurable keybindings** via GSettings.
 - **Fractal-style EPUB reflow.** Bypass MuPDF's fixed-layout engine for reflowables and map structural blocks into a `GListModel` rendered via `GtkListView` with native GTK widgets (`GtkLabel` + Pango). True reflow on resize and native text selection. Tracked in roadmap Phase 13.

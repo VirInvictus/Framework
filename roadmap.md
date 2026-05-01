@@ -114,15 +114,6 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **Document Properties Dialog** — `AdwDialog` driven by a new `get_metadata` interface method. PDF backend extracts via `fz_lookup_metadata` (Title/Author/Subject/Keywords/Creator/Producer/CreationDate/ModDate + format/encryption); DjVu and CBR fall back to filename, size (`g_format_size`), pages, and extension-derived format. PDF date strings (`D:YYYYMMDD…`) are parsed to human-readable form. (v0.12)
 - [x] **Keyboard Shortcuts Dialog** — Custom `AdwDialog` containing `AdwPreferencesPage` groups (File / Navigation / Zoom & Rotation / Search / View / Selection) with `GtkShortcutLabel` rows. Wired to `win.show-help-overlay` (the conventional GTK action), bound to `Ctrl+?` and `F1`. Avoids `GtkShortcutsWindow` (deprecated in GTK 4.18). (v0.12)
 
-## Phase 10: The 1.0 Release (Concrete)
-*Getting it out the door.*
-
-- [ ] **Application Assets** — Finalize SVG icon and `dev.hermitage.Hermitage.desktop` file.
-- [ ] **AppStream Metadata** — Write the XML for software centers.
-- [ ] **Flatpak Manifest** — Build the GNOME 50 Flatpak. Test strict container compilation for MuPDF/DjVuLibre.
-- [ ] **Permissions Audit** — Lock down the Flatpak sandbox. File access only via portal, no unnecessary network access.
-- [ ] **Tag 1.0.0 & Release**
-
 ## Phase 11: Reference-Repo Borrows
 *Wins identified by surveying SumatraPDF, Zathura, zathura-pdf-mupdf, Sioyek, Plato, and the canonical mupdf-gl viewer. Each item names **the source code to study** in the reference repo and **the Framework target** where the change lands (see `CLAUDE.md` "Reference repos" for the per-repo file map and license matrix). Ranked by ROI, not chronology — promote items into earlier phases when they ship. Line numbers are accurate at the time of writing; verify with `grep` if drifted.*
 
@@ -179,7 +170,6 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 
 - [x] **`stress-scrub`** — opens a document headlessly via `FwDocument` + `FwCache` (no widget tree; `view_widget = NULL`). Simulates worst-case scrub: 0 → last page in 500 ms (50 steps × 10 ms), 5 × back-and-forth, 3 s settle. Asserts no crashes, peak RSS under `FW_STRESS_RSS_CAP_MB` (default 800 MB), workers drain to idle. **Verified clean across all six backends** — PDF, DjVu, EPUB, MOBI, CBZ, CBR — both natively and under `-Dsanitize=address`. The CBZ run (Berserk v25, 212 pages) peaks at 789 MB under ASan, confirming the bytes-aware cache cap below is genuinely needed for comic-heavy use. The CBR run (From Hell, 583 pages, RAR-streamed) renders very few surfaces during the test window — the streaming-RAR cost noted in `fw-document-cbr.c` is real. (v0.15)
 - [x] **`stress-zoom-storm`** — pins a single page in priority and runs 50 zoom cycles across realistic zoom levels (25%–400%, alternating direction). Each cycle bumps `render_gen`, exercises the v1.4 `prev_surface` stash and the v1.5 texture-before-surface unref ordering. Peak RSS during transition is allowed to be high (a typical run hits ~1.2 GB on the Effective Java sample); the leak signal is **post-settle current RSS** read from `/proc/self/status` (not `getrusage`'s high-water mark). Cap is `FW_STRESS_RSS_CAP_MB` (default 1024 MB). Verified clean natively and under `-Dsanitize=address`. The post-storm RSS drops from ~1218 MB peak to ~660 MB, confirming the prev_surface lifecycle correctly releases transient memory. (v0.15)
-- [ ] **`stress-zoom-storm`** — page 0 → 50 alternating Ctrl+Plus / Ctrl+Minus across the full zoom range (10%–1000%). Confirms `prev_texture` slot doesn't double-pin surfaces; counts `pixmap → cairo_surface_t` allocations vs. frees via a debug counter exported when `-Dstress=true`. Catches the bug class where a zoom-storm leaks one surface per cycle.
 - [x] **`stress-multidoc`** — Sequential 50 open/close cycles across the 6-format corpus + parallel 10-instance phase + reverse-order dispose. Caught a real leak on first run: `g_thread_pool_free(pool, immediate=TRUE, ...)` was discarding queued `RenderJob` structs without invoking their workers' free path. Fixed by switching to `immediate=FALSE` so workers drain the queue via the cancel-bail path. ASan-clean after fix. Registered in `meson test`. (v0.25)
 - [x] **`stress-corpus-soak`** — Full-corpus walk: opens each of the seven canonical samples (PDF×2, DjVu, EPUB, MOBI, CBZ, CBR), pushes priority on every fifth page through the cache up to 200 pages per doc, asserts no crashes / no open failures / peak RSS under 1.8 GB. Registered with `meson test`; clean under ASan+UBSan. The `--max-time` and per-file timing JSON are deferred — current shape is sufficient as a regression net for backend coverage. (v0.26)
 
@@ -201,9 +191,9 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 *Structural shifts for specific formats beyond the single-canvas raster paradigm. Focus on rich aesthetics and format-specific native behaviors.*
 
 - [ ] **Fractal-Style EPUB Reflow** — Bypass MuPDF's fixed-layout engine for EPUBs (and reflowables). Parse the XHTML/DOM and map structural blocks into a `GListModel`, rendered via `GtkListView` using native GTK widgets (`GtkLabel` with Pango). This provides true reflow on window resize, native text selection, drops heavy Cairo surface caching, and achieves a gorgeous, modern aesthetic identical to Fractal's list architecture.
-- [ ] **Comic Facing Pages (Left/Right)** — For CBR/CBZ archives, implement a two-up facing pages layout (left/right). Requires adjusting the `FwView` geometry math and cache eviction window to handle two active `RenderJob` instances side-by-side, preserving aspect ratios and handling mismatched page dimensions gracefully.
-- [ ] **Manga Mode (Right-to-Left)** — Borrowed from MComix/Komikku. Invert keyboard navigation (Right Arrow = previous page, Left Arrow = next page) and default the horizontal scrollbar to the right edge. Crucial for Japanese comics.
-- [ ] **Webtoon Mode (Infinite Canvas)** — Borrowed from Komikku. A specialized continuous vertical view where the Y-gap between pages is exactly `0px`, stitching long-strip comics into a seamless vertical scroll.
+- [x] **Comic Facing Pages (Left/Right)** — `FwView::facing_pages` GSettings boolean (F10, primary menu under Comic Layout). `recompute_layout` builds pair y_offsets (page 0 standalone as cover, then 1+2, 3+4, ...); the snapshot path centers the pair as a unit with a fixed gutter; `view_pair_first` is consulted by `fw_view_get_current_page` so the header label tracks the lower-numbered page of the active pair. Mismatched page heights handled — pair height = max(h0, h1). Click-to-doc mapping (`fw_view_widget_to_doc`) walks both pages of the row before falling through. (v0.27)
+- [x] **Manga Mode (Right-to-Left)** — `FwView::manga_mode` GSettings boolean (F4, primary menu). When on, Left Arrow advances to next page and Right Arrow goes to previous (RTL reading order). Combined with facing-pages, also flips left/right within each pair so the lower-numbered page sits on the right. Pure scroll behavior unaffected when facing-pages is off — only directional page-nav keys swap. (v0.27)
+- [x] **Webtoon Mode (Infinite Canvas)** — `FwView::webtoon_mode` GSettings boolean (F5, primary menu). Drops `PAGE_GAP` to zero in `recompute_layout` so vertically-laid-out long-strip comics stitch into a seamless single canvas. No-op when facing-pages is also active. (v0.27)
 
 ## Phase 14: Best-in-Class UX (The "Sumatra Clone" Polish)
 *Features identified across reference repositories that elevate the viewer from 'functional' to 'exceptional'. Translated into native GTK/GNOME idioms.*
@@ -222,13 +212,21 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - **Plato**: e-ink-specific UI; `framebuffer/` direct-to-fb rendering; single-threaded `Rc<Context>` model (loses our parallelism).
 - **mupdf-gl**: single-threaded design; in-tree custom UI toolkit.
 
+## Phase 15: The 1.0 Release (Concrete)
+*Getting it out the door. Moved to the end after the 0.x sprint outgrew its original landing slot — Brandon explicitly does not want flathub submission until the rest of the roadmap is closed out.*
+
+- [ ] **Application Assets** — Finalize SVG icon and `io.github.virinvictus.framework.desktop` file.
+- [ ] **AppStream Metadata** — Write the XML for software centers.
+- [ ] **Flatpak Manifest** — Build the GNOME 50 Flatpak. Test strict container compilation for MuPDF/DjVuLibre.
+- [ ] **Permissions Audit** — Lock down the Flatpak sandbox. File access only via portal, no unnecessary network access.
+- [ ] **Tag 1.0.0 & Release**
+
 ---
 
 ## Deferred (v2.0+ / Strictly Out of Scope for 1.0)
 *Listed so the architecture doesn't preclude them, but forbidden from development until 1.0 ships.*
 
 - [ ] Single page view mode
-- [ ] Facing pages view mode (PDFs/general docs — see Phase 13 for Comic facing pages)
 - [ ] Thumbnail sidebar (alternative to TOC)
 - [ ] Annotations (highlight, underline — stored externally)
 - [ ] Presentation mode (page-at-a-time, no chrome)

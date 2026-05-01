@@ -36,6 +36,7 @@ Linux document viewers often fall into two categories: feature-heavy clients (li
 | **Smart Text Selection** | Double-click selects a word, triple-click selects a line. Drag selection follows reading order across line wraps with per-line highlight rectangles. |
 | **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
+| **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
 
 ## Screenshot
 
@@ -94,6 +95,14 @@ Framework is strictly a **viewer**. It is not an editor (no annotations), not a 
 | Reading ruler | F8 |
 | Magnifying loupe | F7 |
 | Crop margins | F6 |
+
+### Comic Layout
+
+| Action | Shortcut |
+|--------|----------|
+| Manga mode (RTL) | F4 |
+| Webtoon mode | F5 |
+| Facing pages | F10 |
 
 ### Search
 

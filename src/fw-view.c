@@ -107,6 +107,17 @@ struct _FwView {
   double       crop_t_frac;     /* fraction of height trimmed from top */
   double       crop_b_frac;     /* fraction of height trimmed from bottom */
   gulong       crop_changed_handler;
+
+  /* Comic reading modes (Phase 13). All three are layout-affecting
+   * GSettings booleans toggleable from the menu and via F-keys; they
+   * compose so e.g. manga + facing-pages flips pair order while keeping
+   * the side-by-side layout. */
+  gboolean     manga_mode;      /* RTL nav: Left=next, Right=prev */
+  gboolean     webtoon_mode;    /* PAGE_GAP=0 — seamless vertical strip */
+  gboolean     facing_pages;    /* two pages per row, page 0 standalone */
+  gulong       manga_changed_handler;
+  gulong       webtoon_changed_handler;
+  gulong       facing_changed_handler;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -259,6 +270,32 @@ update_adjustments (FwView *self)
 
 /* ── Recompute layout ─────────────────────────────────────────────── */
 
+/* Pair-aware layout helpers — kept tight so the rest of the view code
+ * doesn't have to reason about facing-pages mode. The convention is
+ * "page 0 stands alone; pages 1+2, 3+4, ... pair up", which matches how
+ * physical books / comics open (first page is the cover on the right
+ * for LTR, on the left for manga). */
+static gboolean
+view_page_is_paired (FwView *self, int i)
+{
+  if (!self->facing_pages || i <= 0 || i >= self->page_count)
+    return FALSE;
+  /* Pair (1,2), (3,4), (5,6), ... — odd-numbered i is the first of a
+   * pair when there's a successor; even-numbered i is the second of a
+   * pair when there's a predecessor. */
+  if (i % 2 == 1)
+    return i + 1 < self->page_count;
+  return TRUE;  /* even, i > 0 → second of pair */
+}
+
+static int
+view_pair_first (FwView *self, int i)
+{
+  if (!view_page_is_paired (self, i))
+    return i;
+  return (i % 2 == 1) ? i : (i - 1);
+}
+
 static void
 recompute_layout (FwView *self)
 {
@@ -275,6 +312,8 @@ recompute_layout (FwView *self)
   self->total_height = 0;
   self->max_width    = 0;
 
+  /* Per-page intrinsic geometry first — y_offsets are computed in a
+   * second pass so facing-pages can pair adjacent rows. */
   for (int i = 0; i < self->page_count; i++) {
     double w, h;
     fw_document_get_page_size (self->document, i, &w, &h);
@@ -303,14 +342,39 @@ recompute_layout (FwView *self)
 
     self->page_widths[i]  = w * self->zoom * crop_w_factor;
     self->page_heights[i] = h * self->zoom * crop_h_factor;
-    self->page_y_offsets[i] = self->total_height;
+  }
 
-    if (self->page_widths[i] > self->max_width)
-      self->max_width = self->page_widths[i];
+  /* Webtoon mode stitches pages with no inter-page gap; facing-pages
+   * keeps the gap between rows (and a fixed gutter between paired
+   * pages, drawn in the snapshot path). */
+  double row_gap = self->webtoon_mode ? 0.0 : PAGE_GAP;
 
-    self->total_height += self->page_heights[i];
-    if (i < self->page_count - 1)
-      self->total_height += PAGE_GAP;
+  int i = 0;
+  while (i < self->page_count) {
+    if (self->facing_pages && i > 0 && i + 1 < self->page_count) {
+      /* Pair (i, i+1) — both share the same y_offset; row height is
+       * the taller of the two; pair width includes the gutter so
+       * max_width tracks paired layouts correctly. */
+      double pair_h = MAX (self->page_heights[i], self->page_heights[i + 1]);
+      double pair_w = self->page_widths[i] + PAGE_GAP + self->page_widths[i + 1];
+
+      self->page_y_offsets[i]     = self->total_height;
+      self->page_y_offsets[i + 1] = self->total_height;
+      self->total_height += pair_h;
+
+      if (pair_w > self->max_width)
+        self->max_width = pair_w;
+
+      i += 2;
+    } else {
+      self->page_y_offsets[i] = self->total_height;
+      self->total_height += self->page_heights[i];
+      if (self->page_widths[i] > self->max_width)
+        self->max_width = self->page_widths[i];
+      i += 1;
+    }
+    if (i < self->page_count)
+      self->total_height += row_gap;
   }
 
   update_adjustments (self);
@@ -402,12 +466,41 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
      * every normal page off-center. If THIS page fits in the viewport,
      * center it there; if it's wider than the viewport, fall back to
      * canvas-relative positioning (centered in `max_width`) so the
-     * horizontal scrollbar still spans the doc's widest content. */
+     * horizontal scrollbar still spans the doc's widest content.
+     *
+     * Facing-pages mode overrides the single-page centering: the row
+     * is the pair (left | right) with a fixed gutter, centered as a
+     * unit. Manga mode flips left/right within the pair. */
     double x;
-    if (pw <= widget_width)
+    if (view_page_is_paired (self, i)) {
+      int first  = view_pair_first (self, i);
+      int second = first + 1;
+      double pw_first  = self->page_widths[first];
+      double pw_second = self->page_widths[second];
+      double pair_w    = pw_first + PAGE_GAP + pw_second;
+
+      double pair_x;
+      if (pair_w <= widget_width)
+        pair_x = (widget_width - pair_w) / 2.0;
+      else
+        pair_x = (self->max_width - pair_w) / 2.0 - scroll_x;
+
+      /* Manga reading order: lower-numbered page on the right, higher
+       * on the left. Otherwise: lower on the left. */
+      double x_first, x_second;
+      if (self->manga_mode) {
+        x_first  = pair_x + pw_second + PAGE_GAP;
+        x_second = pair_x;
+      } else {
+        x_first  = pair_x;
+        x_second = pair_x + pw_first + PAGE_GAP;
+      }
+      x = (i == first) ? x_first : x_second;
+    } else if (pw <= widget_width) {
       x = (widget_width - pw) / 2.0;
-    else
+    } else {
       x = (self->max_width - pw) / 2.0 - scroll_x;
+    }
     double y = py - scroll_y;
 
     graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
@@ -774,19 +867,39 @@ fw_view_widget_to_doc (FwView *self, double widget_x, double widget_y,
     if (abs_y < py || abs_y > py + ph)
       continue;
 
-    /* Compute page X position (mirrors snapshot centering logic) */
+    /* Compute page X position (mirrors snapshot centering logic).
+     * In facing-pages mode the row is the pair, so we resolve x via
+     * the same pair-aware path the snapshot uses; otherwise we center
+     * the standalone page. */
     double page_x;
-    if (pw <= widget_width)
+    if (view_page_is_paired (self, i)) {
+      int first  = view_pair_first (self, i);
+      int second = first + 1;
+      double pw_first  = self->page_widths[first];
+      double pw_second = self->page_widths[second];
+      double pair_w    = pw_first + PAGE_GAP + pw_second;
+      double pair_x;
+      if (pair_w <= widget_width)
+        pair_x = (widget_width - pair_w) / 2.0;
+      else
+        pair_x = (self->max_width - pair_w) / 2.0 - scroll_x;
+
+      if (self->manga_mode)
+        page_x = (i == first) ? pair_x + pw_second + PAGE_GAP : pair_x;
+      else
+        page_x = (i == first) ? pair_x : pair_x + pw_first + PAGE_GAP;
+    } else if (pw <= widget_width) {
       page_x = (widget_width - pw) / 2.0;
-    else
+    } else {
       page_x = (self->max_width - pw) / 2.0 - scroll_x;
+    }
 
     double rel_x = widget_x - page_x;
     double rel_y = abs_y - py;
 
     /* Check bounds */
     if (rel_x < 0 || rel_x > pw || rel_y < 0 || rel_y > ph)
-      return FALSE;
+      continue;  /* may be the other half of a pair */
 
     /* Convert from zoomed pixels to document points */
     if (out_page)  *out_page  = i;
@@ -1291,10 +1404,13 @@ fw_view_get_current_page (FwView *self)
 
   double scroll_y = gtk_adjustment_get_value (self->vadjustment);
 
-  /* Find the page whose top is closest to (but not past) the viewport top */
+  /* Find the page whose top is closest to (but not past) the viewport top.
+   * In facing-pages mode both pages of a pair share a y_offset; we
+   * report the lower-numbered page as the current one (so the header
+   * label tracks the same page the user thinks of as "current"). */
   for (int i = self->page_count - 1; i >= 0; i--) {
     if (self->page_y_offsets[i] <= scroll_y + 1.0)
-      return i;
+      return view_pair_first (self, i);
   }
   return 0;
 }
@@ -1480,9 +1596,18 @@ fw_view_dispose (GObject *object)
       g_signal_handler_disconnect (self->settings, self->loupe_changed_handler);
     if (self->crop_changed_handler)
       g_signal_handler_disconnect (self->settings, self->crop_changed_handler);
+    if (self->manga_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->manga_changed_handler);
+    if (self->webtoon_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->webtoon_changed_handler);
+    if (self->facing_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->facing_changed_handler);
     self->ruler_changed_handler = 0;
     self->loupe_changed_handler = 0;
     self->crop_changed_handler = 0;
+    self->manga_changed_handler = 0;
+    self->webtoon_changed_handler = 0;
+    self->facing_changed_handler = 0;
     g_clear_object (&self->settings);
   }
   g_clear_object (&self->document);
@@ -1563,6 +1688,72 @@ on_loupe_setting_changed (GSettings *settings, const char *key, gpointer user_da
   self->loupe = g_settings_get_boolean (settings, "loupe");
   FW_TRACE_VIEW ("loupe=%d", self->loupe);
   gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+/* Common path for the three layout-affecting comic-mode toggles
+ * (manga, webtoon, facing-pages). Each one changes total_height /
+ * y_offsets so we capture the (page, intra-page-fraction) anchor
+ * before re-laying-out and restore it after — same pattern as
+ * fw_view_set_zoom and on_crop_setting_changed. */
+static void
+view_apply_layout_change (FwView *self)
+{
+  int anchor_page = -1;
+  double anchor_frac_y = 0;
+  if (self->vadjustment && self->page_y_offsets && self->page_count > 0) {
+    double scroll_y = gtk_adjustment_get_value (self->vadjustment);
+    anchor_page = fw_view_get_current_page (self);
+    if (anchor_page >= 0 && anchor_page < self->page_count
+        && self->page_heights[anchor_page] > 0) {
+      anchor_frac_y = (scroll_y - self->page_y_offsets[anchor_page])
+                    / self->page_heights[anchor_page];
+      if (anchor_frac_y < 0) anchor_frac_y = 0;
+      if (anchor_frac_y > 1) anchor_frac_y = 1;
+    }
+  }
+
+  recompute_layout (self);
+
+  if (anchor_page >= 0 && self->vadjustment && self->page_y_offsets) {
+    double new_val = self->page_y_offsets[anchor_page]
+                   + anchor_frac_y * self->page_heights[anchor_page];
+    gtk_adjustment_set_value (self->vadjustment, new_val);
+  }
+
+  update_cache_priority (self);
+}
+
+static void
+on_manga_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->manga_mode = g_settings_get_boolean (settings, "manga-mode");
+  FW_TRACE_VIEW ("manga-mode=%d", self->manga_mode);
+  /* Manga only flips left/right within paired layouts — pure scroll
+   * geometry doesn't change unless facing-pages is also on. Cheap
+   * redraw is enough; layout-anchor preservation isn't needed. */
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+static void
+on_webtoon_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->webtoon_mode = g_settings_get_boolean (settings, "webtoon-mode");
+  FW_TRACE_VIEW ("webtoon-mode=%d", self->webtoon_mode);
+  view_apply_layout_change (self);
+}
+
+static void
+on_facing_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->facing_pages = g_settings_get_boolean (settings, "facing-pages");
+  FW_TRACE_VIEW ("facing-pages=%d", self->facing_pages);
+  view_apply_layout_change (self);
 }
 
 static void
@@ -1687,13 +1878,17 @@ fw_view_init (FwView *self)
   self->zoom = 1.0;
   self->sel_page = -1;
 
-  /* Settings — reading-ruler, loupe, and crop-margins toggle live;
+  /* Settings — reading-ruler, loupe, crop-margins, and the Phase 13
+   * comic modes (manga / webtoon / facing-pages) all toggle live;
    * kinetic-scrolling is owned by FwWindow. */
   self->settings = g_settings_new (APP_ID);
   self->reading_ruler = g_settings_get_boolean (self->settings,
                                                  "reading-ruler");
   self->loupe = g_settings_get_boolean (self->settings, "loupe");
   self->crop_margins = g_settings_get_boolean (self->settings, "crop-margins");
+  self->manga_mode    = g_settings_get_boolean (self->settings, "manga-mode");
+  self->webtoon_mode  = g_settings_get_boolean (self->settings, "webtoon-mode");
+  self->facing_pages  = g_settings_get_boolean (self->settings, "facing-pages");
   self->ruler_changed_handler = g_signal_connect (
     self->settings, "changed::reading-ruler",
     G_CALLBACK (on_ruler_setting_changed), self);
@@ -1703,6 +1898,15 @@ fw_view_init (FwView *self)
   self->crop_changed_handler = g_signal_connect (
     self->settings, "changed::crop-margins",
     G_CALLBACK (on_crop_setting_changed), self);
+  self->manga_changed_handler = g_signal_connect (
+    self->settings, "changed::manga-mode",
+    G_CALLBACK (on_manga_setting_changed), self);
+  self->webtoon_changed_handler = g_signal_connect (
+    self->settings, "changed::webtoon-mode",
+    G_CALLBACK (on_webtoon_setting_changed), self);
+  self->facing_changed_handler = g_signal_connect (
+    self->settings, "changed::facing-pages",
+    G_CALLBACK (on_facing_setting_changed), self);
 
   /* Scroll handling is left to GtkScrolledWindow's native path — that
    * way diagonal trackpad motion (which Wayland delivers as paired
