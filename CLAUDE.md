@@ -27,12 +27,14 @@ meson compile -C builddir
 GSETTINGS_SCHEMA_DIR=builddir/data ./builddir/tests/stress/stress-scrub <pdf>
 ```
 
-Sanitizer builds use the `-Dsanitize=` array option (choices: `address`, `undefined`, `leak`, `thread`). ASan works out of the box on Brandon's Fedora; `undefined`/`leak`/`thread` require `sudo dnf install libubsan liblsan libtsan` first.
+Sanitizer builds use the `-Dsanitize=` array option (choices: `address`, `undefined`, `leak`, `thread`). `address` and `undefined` are the standard dev combo and are confirmed clean across all three stress tests; `liblsan` and `libtsan` are not installed on Brandon's Fedora and would need `sudo dnf install` first if you want them.
 
 ```sh
-meson configure builddir -Dsanitize=address
+meson configure builddir -Dsanitize=address,undefined
 meson compile -C builddir
-GSETTINGS_SCHEMA_DIR=builddir/data ./builddir/tests/stress/stress-scrub <pdf>
+GSETTINGS_SCHEMA_DIR=builddir/data \
+  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+  ./builddir/tests/stress/stress-scrub <pdf>
 # revert: meson configure builddir -Dsanitize=
 ```
 
