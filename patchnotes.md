@@ -2,6 +2,27 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.23.0 (2026-05-01)
+
+*Reading ruler (Phase 14).* Toggleable mode that dims everything except a horizontal band tracking the cursor — keeps the eye on the active line in dense technical reading. Pattern conceptually borrowed from Sioyek's "visual mark"; reduced to a couple of `GskColorNode`s above and below a clear band.
+
+---
+
+### Reading Ruler
+A `reading-ruler` GSettings boolean (default off) drives a render-time overlay: when active, paint two semi-transparent black rects above and below a ~56-px-tall clear band that follows the mouse Y. No clipping, no shaders — just two `gtk_snapshot_append_color` calls per frame. Tracking is via the existing `on_motion` controller, which queues a redraw when the ruler is active.
+
+Toggle paths:
+- **F8** keyboard shortcut.
+- **Reading Ruler** entry in the primary menu.
+- The setting persists across sessions; the menu checkmark and the F8 toggle stay in sync via `g_settings_create_action`.
+
+The shortcut sits naturally in the F-key range with F9 (sidebar) and F11 (fullscreen) — view-mode toggles all live there.
+
+### Documented in app and README
+The Keyboard Shortcuts dialog (`Ctrl+?` / `F1`) gained a "Reading ruler — F8" row in the View group. The README's Keyboard Shortcuts → View table has the same row. Both stay in sync with the actual binding.
+
+---
+
 ## v0.22.0 (2026-05-01)
 
 *Hue-preserving recolor for Ctrl+I.* The previous dark-mode toggle was a per-channel bitwise NOT — accurate for "white text on white page" but destructive for any document with chromatic content. Red diagrams turned cyan, blue plots turned yellow, syntax-highlighted source code lost every color cue. Replaced with a luminance-aware affine transform that flips the lightness axis while keeping each pixel's chromatic component intact.

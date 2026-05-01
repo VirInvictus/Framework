@@ -18,5 +18,16 @@
       </description>
     </key>
 
+    <key name="reading-ruler" type="b">
+      <default>false</default>
+      <summary>Highlight the active reading line</summary>
+      <description>
+        When true, dim the page everywhere except a horizontal band that
+        tracks the mouse cursor. Useful for dense technical reading where
+        keeping your eye on the active line is the failure mode. Toggleable
+        from the primary menu; the setting persists across sessions.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

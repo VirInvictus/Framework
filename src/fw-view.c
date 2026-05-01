@@ -84,7 +84,15 @@ struct _FwView {
    * signal so the toggle takes effect without restart. */
   GSettings   *settings;
   gulong       settings_changed_handler;
+  gulong       ruler_changed_handler;
   gboolean     kinetic_scrolling;
+
+  /* Reading ruler — when active, paint a dark dimming overlay over the
+   * whole widget with a clear horizontal band tracking the mouse Y.
+   * Helps keep the eye on the active line in dense technical reading. */
+  gboolean     reading_ruler;
+  double       ruler_y;          /* widget-coordinate Y of the cursor */
+  gboolean     ruler_y_valid;    /* FALSE before first motion event */
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -482,6 +490,34 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
       }
     }
   }
+
+  /* Reading-ruler overlay: dim everything except a horizontal band that
+   * tracks the cursor. Painted last so it sits above pages, selection,
+   * and search highlights. The clear band is opt-out by simply not
+   * painting over it; we paint two dark rects above and below. */
+  if (self->reading_ruler && self->ruler_y_valid) {
+    int widget_w = gtk_widget_get_width (widget);
+    int widget_h = gtk_widget_get_height (widget);
+    if (widget_w > 0 && widget_h > 0) {
+      const float band_half = 28.0f;     /* ~one printed line at default zoom */
+      float top    = (float) self->ruler_y - band_half;
+      float bottom = (float) self->ruler_y + band_half;
+      if (top < 0) top = 0;
+      if (bottom > (float) widget_h) bottom = (float) widget_h;
+
+      GdkRGBA dim = { 0.0f, 0.0f, 0.0f, 0.55f };
+
+      if (top > 0) {
+        graphene_rect_t r_top = GRAPHENE_RECT_INIT (0, 0, (float) widget_w, top);
+        gtk_snapshot_append_color (snapshot, &dim, &r_top);
+      }
+      if (bottom < (float) widget_h) {
+        graphene_rect_t r_bot = GRAPHENE_RECT_INIT (
+          0, bottom, (float) widget_w, (float) widget_h - bottom);
+        gtk_snapshot_append_color (snapshot, &dim, &r_bot);
+      }
+    }
+  }
 }
 
 /* ── GtkScrollable interface ──────────────────────────────────────── */
@@ -776,6 +812,14 @@ on_motion (GtkEventControllerMotion *controller, double x, double y,
       gtk_widget_set_cursor_from_name (GTK_WIDGET (self), "text");
   } else {
     gtk_widget_set_cursor (GTK_WIDGET (self), NULL);
+  }
+
+  /* Reading-ruler: re-paint to follow the cursor. The ruler is widget-
+   * relative (not page-relative) so we track the full widget Y. */
+  if (self->reading_ruler) {
+    self->ruler_y = y;
+    self->ruler_y_valid = TRUE;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
   }
 }
 
@@ -1194,7 +1238,10 @@ fw_view_dispose (GObject *object)
   if (self->settings) {
     if (self->settings_changed_handler)
       g_signal_handler_disconnect (self->settings, self->settings_changed_handler);
+    if (self->ruler_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->ruler_changed_handler);
     self->settings_changed_handler = 0;
+    self->ruler_changed_handler = 0;
     g_clear_object (&self->settings);
   }
   g_clear_object (&self->document);
@@ -1264,6 +1311,16 @@ on_kinetic_setting_changed (GSettings *settings, const char *key, gpointer user_
   FwView *self = user_data;
   self->kinetic_scrolling = g_settings_get_boolean (settings, "kinetic-scrolling");
   FW_TRACE_VIEW ("kinetic-scrolling=%d", self->kinetic_scrolling);
+}
+
+static void
+on_ruler_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->reading_ruler = g_settings_get_boolean (settings, "reading-ruler");
+  FW_TRACE_VIEW ("reading-ruler=%d", self->reading_ruler);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static gboolean
@@ -1340,14 +1397,19 @@ fw_view_init (FwView *self)
   self->zoom = 1.0;
   self->sel_page = -1;
 
-  /* Settings — bind kinetic-scrolling live so the toggle in the menu
-   * takes effect without restarting the app. */
+  /* Settings — bind kinetic-scrolling and reading-ruler live so menu
+   * toggles take effect without restarting the app. */
   self->settings = g_settings_new (APP_ID);
   self->kinetic_scrolling = g_settings_get_boolean (self->settings,
                                                      "kinetic-scrolling");
+  self->reading_ruler = g_settings_get_boolean (self->settings,
+                                                 "reading-ruler");
   self->settings_changed_handler = g_signal_connect (
     self->settings, "changed::kinetic-scrolling",
     G_CALLBACK (on_kinetic_setting_changed), self);
+  self->ruler_changed_handler = g_signal_connect (
+    self->settings, "changed::reading-ruler",
+    G_CALLBACK (on_ruler_setting_changed), self);
 
   /* Scroll controller — capture-phase so we see wheel/trackpad events
    * before the parent GtkScrolledWindow's bubble-phase handler. The

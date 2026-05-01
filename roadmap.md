@@ -217,9 +217,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **Margin Cropping (from Plato / Sioyek)** — E-ink readers and advanced viewers often auto-crop white margins to maximize text size on small laptop screens.
   - **Study:** sioyek `.sioyek/scripts/dual_panelify.py` (crop algorithms).
   - *GTK Implementation:* Add a "Crop Margins" toggle. When active, scan the first few pages using MuPDF to calculate a unified content bounding box. Apply a translation matrix during the `fw_view_snapshot` phase to hide the whitespace margins globally.
-- [ ] **Visual Ruler / Reading Mark (from Sioyek)** — Sioyek features a "visual mark" that darkens the page except for the active reading line to help users keep their place in dense technical PDFs.
-  - **Study:** sioyek `.sioyek/pdf_viewer/main_widget.cpp` (visual mark overlay logic).
-  - *GTK Implementation:* A toggleable mode in `FwView` that appends a semi-transparent black `GskColorNode` over the whole screen, with a masked-out horizontal band that tracks the mouse Y-coordinate.
+- [x] **Visual Ruler / Reading Mark (from Sioyek)** — Two semi-transparent black `gtk_snapshot_append_color` rects above and below a ~56-px clear band tracking mouse Y, gated by a `reading-ruler` GSettings boolean (default off). Toggleable via the **Reading Ruler** primary-menu entry or the **F8** keyboard shortcut. The shortcut is documented in the in-app Keyboard Shortcuts dialog and in `README.md`. Setting persists; menu checkmark and F8 stay in sync via `g_settings_create_action`. (v0.23)
 - [ ] **Interactive Loupe / Magnifying Glass (from YACReader)** — Useful for dense comic panels or small text where global zoom is too disruptive.
   - **Study:** yacreader `.yacreader/YACReader/magnifying_glass.cpp` and `magnifying_glass.h`.
   - *GTK Implementation:* Render a secondary `GtkSnapshot` clipped to a circular mask centered on the cursor, scaling the underlying Cairo surface texture by a user-defined multiplier (e.g., 2.5x).
