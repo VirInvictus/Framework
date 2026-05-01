@@ -2,6 +2,20 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.31.0 (2026-05-01)
+
+*`tests/scripts/debug.sh` — Phase 12.4.* One-shot gdb wrapper for crash investigation. Runs `./builddir/src/framework` under `gdb -batch` with the breakpoints from `tests/scripts/framework.gdb` pre-loaded:
+
+- `fz_throw` — every MuPDF `fz_try`/`fz_catch` raise (catches the silent-warning ones too)
+- `cache_entry_free` — every page eviction
+- `submit_next_jobs` — every render-worker dispatch with priority info
+
+Print + continue rather than stop, so the program runs through to whatever crash you're chasing and a full multi-thread `thread apply all bt` fires at the end. `GSETTINGS_SCHEMA_DIR` is auto-set so the binary doesn't abort on the missing-schema lookup. Forwards `FW_DEBUG=1` if set.
+
+Usage: `tests/scripts/debug.sh <doc>` — same arg shape as the binary.
+
+---
+
 ## v0.30.0 (2026-05-01)
 
 *`bench-cache-hit-rate` — Phase 12.3.* Drives the cache through three synthetic scroll patterns and reports the hit ratio at each render-state band:
