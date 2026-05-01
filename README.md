@@ -207,7 +207,7 @@ zathura's zero-copy `MuPDF`&rarr;`cairo` pipeline is the textbook minimalist imp
 - **Zero-copy MuPDF render** (shipped in v1.6.0 as the v1.6 *Zero-Copy MuPDF Render* patch note; see `src/fw-document-pdf.c:render_page_direct`) &mdash; constructs the MuPDF pixmap *around* the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr`, eliminating the channel-shuffle loop entirely. Borrowed verbatim in pattern from `zathura-pdf-mupdf/render.c`.
 - **Cached `fz_stext_page` per page** (shipped in v0.18.0; see `src/fw-document-pdf.c:pdf_get_or_extract_stext`) &mdash; lazy per-document cache, populated on first text-related call. Search across 901 pages: 332 ms cold &rarr; 48 ms warm (6.85&times; speedup). Pattern from `zathura-pdf-mupdf/page.c`.
 - **`g_thread_pool_set_sort_function` priority dispatch** (shipped in v0.14.0; see `src/fw-cache.c:render_job_compare`) &mdash; the pool reorders queued jobs by `last_view_time` so the most recently prioritized page runs next. Pattern from `zathura/render.c:94`.
-- **Hue-preserving recolor** (planned) &mdash; the `colorumax` HSL pipeline that preserves diagram color cues during dark-mode inversion, instead of a destructive bitwise-NOT. Pattern from `zathura/render.c`.
+- **Hue-preserving recolor** (shipped in v0.22.0; see `src/fw-view.c` snapshot path) &mdash; luminance-aware affine that flips the lightness axis while preserving each pixel's chromatic offset. Red diagrams stay red on a dark background. Conceptually similar to `zathura/render.c`'s `colorumax` HSL recolor, reduced to a 4×4 GSK matrix.
 
 ### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions and async search*
 Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE).

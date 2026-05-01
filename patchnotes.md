@@ -2,6 +2,30 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.22.0 (2026-05-01)
+
+*Hue-preserving recolor for Ctrl+I.* The previous dark-mode toggle was a per-channel bitwise NOT — accurate for "white text on white page" but destructive for any document with chromatic content. Red diagrams turned cyan, blue plots turned yellow, syntax-highlighted source code lost every color cue. Replaced with a luminance-aware affine transform that flips the lightness axis while keeping each pixel's chromatic component intact.
+
+---
+
+### Hue-Preserving Lightness Inversion (Phase 11 Tier 2)
+For each pixel, compute BT.601 luma `Y = 0.299R + 0.587G + 0.114B`, then offset every channel by `(1 - 2Y)`:
+
+```
+R' = R + (1 - 2Y) =  0.402·R − 1.174·G − 0.228·B + 1
+G' = G + (1 - 2Y) = −0.598·R − 0.174·G − 0.228·B + 1
+B' = B + (1 - 2Y) = −0.598·R − 1.174·G + 0.772·B + 1
+```
+
+The chromatic offset (R−Y, G−Y, B−Y) is preserved by construction; only the lightness axis flips. White (Y=1) → near-black, black (Y=0) → near-white, red (Y=0.299) stays red but on a dark background. Implemented as a single `gtk_snapshot_push_color_matrix` — no shader work, GPU-side, the same lifecycle as the v0.14 GPU color inversion. GSK clamps out-of-gamut output to [0,1] for free.
+
+Pattern conceptually similar to zathura's `colorumax` HSL recolor (`zathura/render.c:495+`), but reduced to a 4×4 affine that fits the existing GTK4 GPU path. Configurable theme colors (`recolor-light` / `recolor-dark` GSettings keys) — the full zathura-style customization — stay open as a follow-up; the current implementation hardcodes the standard "white background → black background" mapping which is what 95% of dark-mode users actually want.
+
+### Tested
+ASan + UBSan clean across all three stress tests. The change is rendering-only — no cache, document, or selection paths touched.
+
+---
+
 ## v0.21.1 (2026-05-01)
 
 *Bugfixes and post-session cleanup.* No new features — just sanding down the rough spots that accumulated across the v0.12 → v0.21 sprint.

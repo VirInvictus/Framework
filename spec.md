@@ -544,14 +544,15 @@ No export-to-PDF (the document already is a PDF). No "save as" anything.
 
 ---
 
-## 11. Invert Colors
+## 11. Invert Colors (Hue-Preserving Recolor)
 
-Simple color inversion for reading in dark environments:
+Dark-mode display for reading in low-light environments:
 
-- Invert the rendered cairo surface pixel data (bitwise NOT on RGB channels, preserve alpha)
-- Applied at the rendering/display stage, not at the document level
-- Toggle via menu or `Ctrl+I`
-- State saved in preferences (global) not per-document
+- **Luminance-aware affine transform** applied via `gtk_snapshot_push_color_matrix` — for each pixel compute BT.601 luma `Y = 0.299R + 0.587G + 0.114B`, then offset each channel by `(1 − 2Y)`. Equivalent to flipping the lightness axis while preserving the chromatic component (R−Y, G−Y, B−Y) of every pixel.
+- White → near-black (background darkens), black → near-white (text lightens), red stays red on the new dark background, blue plots stay blue. Diagrams and syntax-highlighted code keep their meaning.
+- Applied GPU-side at snapshot time, not by re-rendering surfaces — toggling is instant with no cache invalidation.
+- Toggle via menu or `Ctrl+I`. State is per-window for the session; not persisted across launches in the current schema.
+- Future: configurable `recolor-light` / `recolor-dark` GSettings keys for full theme customization (v0.22 hardcodes the standard white↔black mapping).
 
 ---
 

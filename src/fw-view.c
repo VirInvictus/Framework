@@ -376,13 +376,34 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
     if (texture) {
       if (self->invert_colors) {
+        /* Hue-preserving lightness inversion (Phase 11 Tier 2).
+         *
+         * The previous implementation was a bitwise NOT (R'=1-R etc.),
+         * which inverts every channel independently — that turns red
+         * diagrams into cyan and code-syntax red strings into cyan
+         * strings, destroying the document's chromatic information.
+         *
+         * The replacement computes BT.601 luma Y = 0.299R+0.587G+0.114B
+         * and remaps it as new_Y = 1-Y, then adjusts each channel by
+         * the same delta so the chromatic component (R-Y, G-Y, B-Y)
+         * is preserved. Red stays red, just on a dark background;
+         * blue plots stay blue; black text becomes white.
+         *
+         * As a 4×4 affine transform with offset (1,1,1,0):
+         *   R' = R + (1 - 2Y) = 0.402R − 1.174G − 0.228B + 1
+         *   G' = G + (1 - 2Y) = −0.598R − 0.174G − 0.228B + 1
+         *   B' = B + (1 - 2Y) = −0.598R − 1.174G + 0.772B + 1
+         *
+         * graphene_matrix_init_from_float takes column-major order, so
+         * each line below is one input-channel's contribution to all
+         * output channels. GSK clamps out-of-gamut output to [0,1]. */
         graphene_matrix_t color_matrix;
         graphene_matrix_init_from_float (&color_matrix,
           (const float[16]) {
-            -1,  0,  0,  0,
-             0, -1,  0,  0,
-             0,  0, -1,  0,
-             0,  0,  0,  1,
+             0.402f, -0.598f, -0.598f, 0,  /* R input → R',G',B',A' */
+            -1.174f, -0.174f, -1.174f, 0,  /* G input */
+            -0.228f, -0.228f,  0.772f, 0,  /* B input */
+             0,       0,       0,       1, /* A input */
           });
         graphene_vec4_t color_offset;
         graphene_vec4_init (&color_offset, 1.0f, 1.0f, 1.0f, 0.0f);
