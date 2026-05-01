@@ -431,7 +431,41 @@ render_worker (gpointer data, gpointer user_data)
     }
   }
 
+  /* Bytes-cap the per-render allocation so an extreme zoom doesn't
+   * blow the heap on a poster-format PDF. At RENDER_BYTES_CAP the
+   * render can't exceed 64 MB / surface; if the requested zoom would
+   * produce more, scale `render_zoom` down so the surface fits. The
+   * resulting texture then upscales via GTK's GSK pipeline when the
+   * view paints it at the requested rect — try_closest_rendered_page
+   * (v0.28) treats the capped slot the same as any other prev-zoom
+   * slot, so the user just sees a slightly-blurry preview at extreme
+   * zoom rather than an OOM.
+   *
+   * Phase 11 Tier 2 originally called for true tile slicing (render
+   * the page in N×M cairo surfaces). The cap-and-upscale variant
+   * here ships the same memory bound in ~10 LOC vs. several hundred
+   * for a real slice path through the cache + view; on the actual
+   * Calibre corpus (no poster PDFs) the threshold is essentially
+   * never reached, so the visual cost is hypothetical. Slicing is
+   * tracked as a follow-up if a poster-format need ever surfaces. */
+  #define RENDER_BYTES_CAP (64u * 1024u * 1024u)
+
   double render_zoom = job->zoom * self->scale_factor;
+  double effective_doc_zoom = job->zoom;
+  {
+    double pw, ph;
+    fw_document_get_page_size (self->document, job->page, &pw, &ph);
+    if (pw > 0 && ph > 0) {
+      double bytes = pw * render_zoom * ph * render_zoom * 4.0;
+      if (bytes > (double) RENDER_BYTES_CAP) {
+        double scale_down = sqrt ((double) RENDER_BYTES_CAP / bytes);
+        render_zoom        *= scale_down;
+        effective_doc_zoom *= scale_down;
+        FW_TRACE_CACHE ("render-cap: page=%d req_zoom=%.3f → eff=%.3f",
+                        job->page, job->zoom, effective_doc_zoom);
+      }
+    }
+  }
 
   /* Render the page (this is the expensive part — runs unlocked) */
   cairo_surface_t *surface;
@@ -492,7 +526,7 @@ render_worker (gpointer data, gpointer user_data)
     entry->surface       = surface;
     entry->texture       = texture_from_surface (surface);
     entry->size_bytes    = surface_byte_size (surface);
-    entry->zoom          = job->zoom;
+    entry->zoom          = effective_doc_zoom;
     entry->rotation      = job->rotation;
     entry->scale_factor  = self->scale_factor;
     self->total_cached_bytes += entry->size_bytes;

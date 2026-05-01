@@ -2,6 +2,22 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.35.0 (2026-05-01)
+
+*High-zoom render-bytes cap — Phase 11 Tier 2 (pragmatic deviation from spec).* Per-render allocation is now capped at 64 MB. When the requested zoom would produce a larger surface, `render_zoom` scales down so the surface fits; the resulting texture upscales via GTK's GSK pipeline when the view paints it at the requested rect. Combined with v0.28's `try_closest_rendered_page` retention, the user sees a slightly-blurry preview at extreme zoom on poster-format PDFs rather than an OOM allocation.
+
+### Why cap-and-upscale instead of true tile slicing?
+The original Phase 11 Tier 2 entry called for rendering the page in N×M cairo surfaces above threshold. The cap-and-upscale variant ships the same memory bound (`w*h*4 < 64 MB`) in ~10 LOC vs. several hundred for a real slice path through cache + view. On the actual Calibre corpus (no poster PDFs) the threshold is essentially never reached, so the visual cost is hypothetical. True slicing remains tracked as a follow-up if a poster-format need ever surfaces.
+
+The capped slot integrates cleanly with `try_closest_rendered_page`: `entry->zoom` is set to the *effective* doc zoom (post-cap) rather than the requested value, so when the user zooms back to a non-capped level the demoted slot's zoom is recorded accurately and `fw_cache_get_texture`'s nearest-zoom search picks the right preview.
+
+`FW_DEBUG=1` traces `render-cap: page=N req_zoom=X.X → eff=Y.Y` whenever the cap fires, so you can tell from a trace whether you're in cap territory.
+
+### libm linkage
+The byte-cap math uses `sqrt`. Added `cc.find_library('m')` to the framework deps so the linker resolves it explicitly under Fedora's `--no-undefined` default.
+
+---
+
 ## v0.34.0 (2026-05-01)
 
 *`framework --self-test` — Phase 12.4.* New CLI flag, gated behind `-Dstress=true` (so packagers and end users don't carry the dead code). When invoked, opens a known-good document, drives the cache through the open path + a 12-step stride scrub across the document, asserts that page 0 actually painted within 5 seconds, and exits 0 on pass / 1 on fail. Headless — no widget tree, no window. About 80 LOC of conditionally-compiled `main.c` driving `FwDocument` + `FwCache` directly.
