@@ -33,6 +33,15 @@ struct _FwView {
   double       total_height;
   double       max_width;
 
+  /* Pair-partner array, populated by recompute_layout when
+   * facing-pages is on. pair_partner[i] == i means standalone (cover,
+   * spread, or orphaned-by-spread); else pair_partner[i] == j means i
+   * is paired with j. NULL when facing-pages is off. Built from
+   * aspect-ratio-based spread detection so wide centerfold pages
+   * (single landscape image == one logical 2-page spread) stand alone
+   * instead of getting paired with the adjacent portrait page. */
+  int         *pair_partner;
+
   /* GtkScrollable */
   GtkAdjustment *hadjustment;
   GtkAdjustment *vadjustment;
@@ -271,21 +280,40 @@ update_adjustments (FwView *self)
 /* ── Recompute layout ─────────────────────────────────────────────── */
 
 /* Pair-aware layout helpers — kept tight so the rest of the view code
- * doesn't have to reason about facing-pages mode. The convention is
- * "page 0 stands alone; pages 1+2, 3+4, ... pair up", which matches how
- * physical books / comics open (first page is the cover on the right
- * for LTR, on the left for manga). */
+ * doesn't have to reason about facing-pages mode. The base convention
+ * is "page 0 stands alone (cover); pages 1+2, 3+4, ... pair up", but
+ * pages with a landscape-or-square aspect ratio are treated as
+ * pre-rendered spreads and stand alone, with the adjacent page
+ * orphaning to resume the alternation. The actual pairing decisions
+ * are baked into pair_partner[] during recompute_layout. */
+static gboolean
+view_page_is_spread (FwView *self, int i)
+{
+  if (i < 0 || i >= self->page_count
+      || !self->page_widths || !self->page_heights)
+    return FALSE;
+  double w = self->page_widths[i];
+  double h = self->page_heights[i];
+  if (h <= 0)
+    return FALSE;
+  /* Normal manga / comic / textbook pages are portrait (w/h ~ 0.65-0.80).
+   * Centerfold or 2-page-spread images are square or wider. The
+   * threshold of 1.0 cleanly catches landscape spreads while leaving
+   * every reasonable portrait page as pair-eligible. Books that are
+   * landscape end-to-end (artbooks, photo collections) will see every
+   * page standalone — appropriate, since pairing pre-spread pages
+   * would just shrink them in half. */
+  return (w / h) > 1.0;
+}
+
 static gboolean
 view_page_is_paired (FwView *self, int i)
 {
-  if (!self->facing_pages || i <= 0 || i >= self->page_count)
+  if (!self->facing_pages || !self->pair_partner)
     return FALSE;
-  /* Pair (1,2), (3,4), (5,6), ... — odd-numbered i is the first of a
-   * pair when there's a successor; even-numbered i is the second of a
-   * pair when there's a predecessor. */
-  if (i % 2 == 1)
-    return i + 1 < self->page_count;
-  return TRUE;  /* even, i > 0 → second of pair */
+  if (i < 0 || i >= self->page_count)
+    return FALSE;
+  return self->pair_partner[i] != i;
 }
 
 static int
@@ -293,7 +321,8 @@ view_pair_first (FwView *self, int i)
 {
   if (!view_page_is_paired (self, i))
     return i;
-  return (i % 2 == 1) ? i : (i - 1);
+  int j = self->pair_partner[i];
+  return (i < j) ? i : j;
 }
 
 static void
@@ -305,10 +334,12 @@ recompute_layout (FwView *self)
   g_free (self->page_widths);
   g_free (self->page_heights);
   g_free (self->page_y_offsets);
+  g_free (self->pair_partner);
 
   self->page_widths    = g_new (double, self->page_count);
   self->page_heights   = g_new (double, self->page_count);
   self->page_y_offsets = g_new (double, self->page_count);
+  self->pair_partner   = g_new (int, self->page_count);
   self->total_height = 0;
   self->max_width    = 0;
 
@@ -344,6 +375,35 @@ recompute_layout (FwView *self)
     self->page_heights[i] = h * self->zoom * crop_h_factor;
   }
 
+  /* Build pair_partner first (depends only on page sizes, not y), so
+   * the row loop below can consult it. Decisions:
+   *   - facing-pages off → every page standalone.
+   *   - i == 0 → cover, standalone.
+   *   - i is a spread → standalone.
+   *   - i+1 doesn't exist or is a spread → i orphaned, standalone.
+   *   - otherwise → pair (i, i+1), advance by 2.
+   * pair_partner[i] == i is the "standalone" sentinel. */
+  for (int k = 0; k < self->page_count; k++)
+    self->pair_partner[k] = k;
+
+  if (self->facing_pages) {
+    int k = 1;  /* page 0 is always the standalone cover */
+    while (k < self->page_count) {
+      if (view_page_is_spread (self, k)) {
+        k += 1;
+        continue;
+      }
+      if (k + 1 < self->page_count
+          && !view_page_is_spread (self, k + 1)) {
+        self->pair_partner[k]     = k + 1;
+        self->pair_partner[k + 1] = k;
+        k += 2;
+      } else {
+        k += 1;  /* page-before-spread or final orphan */
+      }
+    }
+  }
+
   /* Webtoon mode stitches pages with no inter-page gap; facing-pages
    * keeps the gap between rows (and a fixed gutter between paired
    * pages, drawn in the snapshot path). */
@@ -351,7 +411,7 @@ recompute_layout (FwView *self)
 
   int i = 0;
   while (i < self->page_count) {
-    if (self->facing_pages && i > 0 && i + 1 < self->page_count) {
+    if (self->pair_partner[i] == i + 1) {
       /* Pair (i, i+1) — both share the same y_offset; row height is
        * the taller of the two; pair width includes the gutter so
        * max_width tracks paired layouts correctly. */
@@ -367,6 +427,7 @@ recompute_layout (FwView *self)
 
       i += 2;
     } else {
+      /* Standalone — cover, spread, or orphan-before-spread. */
       self->page_y_offsets[i] = self->total_height;
       self->total_height += self->page_heights[i];
       if (self->page_widths[i] > self->max_width)
@@ -1634,6 +1695,7 @@ fw_view_finalize (GObject *object)
   g_free (self->page_widths);
   g_free (self->page_heights);
   g_free (self->page_y_offsets);
+  g_free (self->pair_partner);
   g_free (self->selected_text);
   if (self->sel_quads)
     g_array_unref (self->sel_quads);

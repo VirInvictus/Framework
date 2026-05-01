@@ -2,6 +2,14 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.27.1 (2026-05-01)
+
+*Spread detection for facing-pages mode.* Some CBZ files store 2-page centerfold spreads as a single landscape image; v0.27.0 was naively pairing those wide pages with the next portrait page, which broke the visual flow (especially obvious in manga reading). Now an aspect-ratio test (`w/h > 1.0` → standalone spread) drives a pre-built `pair_partner[]` array, so spreads stand alone and the page that would have been their natural partner orphans cleanly. After the spread, alternation resumes on whatever page follows.
+
+The pairing decisions are computed once in `recompute_layout` from `page_widths`/`page_heights` (which already account for rotation), so `view_page_is_paired` and `view_pair_first` become O(1) lookups consulted by the snapshot path, click-to-doc mapping, and current-page tracking. Books that are landscape end-to-end (artbooks) will see every page standalone — appropriate, since pairing pre-spread pages would just shrink them in half.
+
+---
+
 ## v0.27.0 (2026-05-01)
 
 *Comic-reader trio + roadmap reorg.* Phase 13's three layout modes — Manga, Webtoon, Facing Pages — land together since they all touch `FwView::recompute_layout` and the snapshot path. Plus the long-stale "Hermitage" rename fixed in roadmap, and the 1.0 release section moved to the end of the document where it actually belongs given how far the 0.x sprint has gone.
