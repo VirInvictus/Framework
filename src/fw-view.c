@@ -92,6 +92,21 @@ struct _FwView {
   double       cursor_y;
   gboolean     cursor_valid;
   gulong       loupe_changed_handler;
+
+  /* Margin crop — when active, the layout shrinks pages to their
+   * inked-content bbox (computed from the current visible page on
+   * activation) and the snapshot positions the full texture so the
+   * content area fills the cropped rect. Fractions are 0..1 of the
+   * full page in document coords; identical fractions are applied
+   * across all pages (assumes uniform margins, which holds for
+   * 99% of technical PDFs). */
+  gboolean     crop_margins;
+  gboolean     crop_fractions_valid;
+  double       crop_l_frac;     /* fraction of width trimmed from left */
+  double       crop_r_frac;     /* fraction of width trimmed from right */
+  double       crop_t_frac;     /* fraction of height trimmed from top */
+  double       crop_b_frac;     /* fraction of height trimmed from bottom */
+  gulong       crop_changed_handler;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
@@ -271,8 +286,23 @@ recompute_layout (FwView *self)
       h = tmp;
     }
 
-    self->page_widths[i]  = w * self->zoom;
-    self->page_heights[i] = h * self->zoom;
+    /* Margin crop applies the same fractional trim to every page —
+     * page_widths / page_heights become the *visible* size. The
+     * snapshot path uses these cropped dimensions for layout, then
+     * positions the full texture so the content area fills them. */
+    double crop_w_factor = 1.0;
+    double crop_h_factor = 1.0;
+    if (self->crop_margins && self->crop_fractions_valid) {
+      crop_w_factor = 1.0 - self->crop_l_frac - self->crop_r_frac;
+      crop_h_factor = 1.0 - self->crop_t_frac - self->crop_b_frac;
+      /* Sanity: never collapse below 10% of original (degenerate
+       * stext bbox shouldn't murder the layout). */
+      if (crop_w_factor < 0.1) crop_w_factor = 1.0;
+      if (crop_h_factor < 0.1) crop_h_factor = 1.0;
+    }
+
+    self->page_widths[i]  = w * self->zoom * crop_w_factor;
+    self->page_heights[i] = h * self->zoom * crop_h_factor;
     self->page_y_offsets[i] = self->total_height;
 
     if (self->page_widths[i] > self->max_width)
@@ -383,6 +413,28 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
     graphene_rect_t rect = GRAPHENE_RECT_INIT ((float) x, (float) y,
                                                 (float) pw, (float) ph);
 
+    /* When margin-cropping is active, the texture (rendered at full
+     * page size) needs to be drawn larger than `rect` and offset so
+     * its content area aligns with `rect`. The full texture rect is
+     * computed from pw/ph divided by the crop factors; the offset is
+     * the margin fraction × full size. A clip rect prevents the
+     * margins from leaking past the cropped page rect. */
+    gboolean cropping = self->crop_margins && self->crop_fractions_valid;
+    graphene_rect_t tex_rect = rect;
+    if (cropping) {
+      double w_factor = 1.0 - self->crop_l_frac - self->crop_r_frac;
+      double h_factor = 1.0 - self->crop_t_frac - self->crop_b_frac;
+      if (w_factor > 0.1 && h_factor > 0.1) {
+        double full_pw = pw / w_factor;
+        double full_ph = ph / h_factor;
+        double off_x   = full_pw * self->crop_l_frac;
+        double off_y   = full_ph * self->crop_t_frac;
+        tex_rect = GRAPHENE_RECT_INIT (
+          (float) (x - off_x), (float) (y - off_y),
+          (float) full_pw,    (float) full_ph);
+      }
+    }
+
     /* Textures are cached in CacheEntry and reused across frames —
      * zero per-frame allocation. fw_cache_get_texture also falls back
      * to the prev-gen texture for zoom transitions. */
@@ -435,7 +487,13 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
         gtk_snapshot_push_color_matrix (snapshot, &color_matrix, &color_offset);
       }
 
-      gtk_snapshot_append_texture (snapshot, texture, &rect);
+      if (cropping)
+        gtk_snapshot_push_clip (snapshot, &rect);
+
+      gtk_snapshot_append_texture (snapshot, texture, &tex_rect);
+
+      if (cropping)
+        gtk_snapshot_pop (snapshot); /* pop clip */
 
       if (self->invert_colors)
         gtk_snapshot_pop (snapshot);
@@ -1420,8 +1478,11 @@ fw_view_dispose (GObject *object)
       g_signal_handler_disconnect (self->settings, self->ruler_changed_handler);
     if (self->loupe_changed_handler)
       g_signal_handler_disconnect (self->settings, self->loupe_changed_handler);
+    if (self->crop_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->crop_changed_handler);
     self->ruler_changed_handler = 0;
     self->loupe_changed_handler = 0;
+    self->crop_changed_handler = 0;
     g_clear_object (&self->settings);
   }
   g_clear_object (&self->document);
@@ -1504,6 +1565,88 @@ on_loupe_setting_changed (GSettings *settings, const char *key, gpointer user_da
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
+static void
+on_crop_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  gboolean enabled = g_settings_get_boolean (settings, "crop-margins");
+  self->crop_margins = enabled;
+
+  /* Capture (page, intra-page-fraction) anchor before the layout
+   * changes — pages get shorter when crop turns on (or longer when it
+   * turns off), and the same scroll_y would otherwise point to a
+   * different page. Same pattern fw_view_set_zoom uses for zoom. */
+  int anchor_page = -1;
+  double anchor_frac_y = 0;
+  if (self->vadjustment && self->page_y_offsets && self->page_count > 0) {
+    double scroll_y = gtk_adjustment_get_value (self->vadjustment);
+    anchor_page = fw_view_get_current_page (self);
+    if (anchor_page >= 0 && anchor_page < self->page_count
+        && self->page_heights[anchor_page] > 0) {
+      anchor_frac_y = (scroll_y - self->page_y_offsets[anchor_page])
+                    / self->page_heights[anchor_page];
+      if (anchor_frac_y < 0) anchor_frac_y = 0;
+      if (anchor_frac_y > 1) anchor_frac_y = 1;
+    }
+  }
+
+  if (enabled && self->document) {
+    /* Snapshot the current visible page's content bbox; convert to
+     * fractional margins relative to the full page size. Applied
+     * uniformly to every page (assumption: most docs have consistent
+     * margins across pages). If the backend doesn't support stext
+     * (DjVu, CBR) or the page has no text, leave fractions invalid
+     * — the snapshot/layout paths fall back to full-page rendering. */
+    int probe_page = self->page_count > 0
+      ? fw_view_get_current_page (self) : -1;
+    if (probe_page < 0 || probe_page >= self->page_count)
+      probe_page = 0;
+
+    double bx0, by0, bx1, by1;
+    if (fw_document_get_content_bbox (self->document, probe_page,
+                                       &bx0, &by0, &bx1, &by1)) {
+      double pw, ph;
+      fw_document_get_page_size (self->document, probe_page, &pw, &ph);
+      if (self->rotation == 90 || self->rotation == 270) {
+        double tmp = pw; pw = ph; ph = tmp;
+      }
+      if (pw > 0 && ph > 0) {
+        self->crop_l_frac = bx0 / pw;
+        self->crop_r_frac = (pw - bx1) / pw;
+        self->crop_t_frac = by0 / ph;
+        self->crop_b_frac = (ph - by1) / ph;
+        if (self->crop_l_frac < 0) self->crop_l_frac = 0;
+        if (self->crop_r_frac < 0) self->crop_r_frac = 0;
+        if (self->crop_t_frac < 0) self->crop_t_frac = 0;
+        if (self->crop_b_frac < 0) self->crop_b_frac = 0;
+        self->crop_fractions_valid = TRUE;
+        FW_TRACE_VIEW ("crop-margins on: l=%.3f r=%.3f t=%.3f b=%.3f",
+                        self->crop_l_frac, self->crop_r_frac,
+                        self->crop_t_frac, self->crop_b_frac);
+      }
+    } else {
+      self->crop_fractions_valid = FALSE;
+      FW_TRACE_VIEW ("crop-margins on: backend has no content bbox");
+    }
+  } else {
+    self->crop_fractions_valid = FALSE;
+    FW_TRACE_VIEW ("crop-margins off");
+  }
+
+  recompute_layout (self);
+
+  /* Restore the (page, frac) anchor after the layout has applied the
+   * new crop fractions. */
+  if (anchor_page >= 0 && self->vadjustment && self->page_y_offsets) {
+    double new_val = self->page_y_offsets[anchor_page]
+                   + anchor_frac_y * self->page_heights[anchor_page];
+    gtk_adjustment_set_value (self->vadjustment, new_val);
+  }
+
+  update_cache_priority (self);
+}
+
 static gboolean
 view_tick_cb (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 {
@@ -1544,18 +1687,22 @@ fw_view_init (FwView *self)
   self->zoom = 1.0;
   self->sel_page = -1;
 
-  /* Settings — reading-ruler and loupe toggle live; kinetic-scrolling
-   * is owned by FwWindow and applied to the parent scrolled window. */
+  /* Settings — reading-ruler, loupe, and crop-margins toggle live;
+   * kinetic-scrolling is owned by FwWindow. */
   self->settings = g_settings_new (APP_ID);
   self->reading_ruler = g_settings_get_boolean (self->settings,
                                                  "reading-ruler");
   self->loupe = g_settings_get_boolean (self->settings, "loupe");
+  self->crop_margins = g_settings_get_boolean (self->settings, "crop-margins");
   self->ruler_changed_handler = g_signal_connect (
     self->settings, "changed::reading-ruler",
     G_CALLBACK (on_ruler_setting_changed), self);
   self->loupe_changed_handler = g_signal_connect (
     self->settings, "changed::loupe",
     G_CALLBACK (on_loupe_setting_changed), self);
+  self->crop_changed_handler = g_signal_connect (
+    self->settings, "changed::crop-margins",
+    G_CALLBACK (on_crop_setting_changed), self);
 
   /* Scroll handling is left to GtkScrolledWindow's native path — that
    * way diagonal trackpad motion (which Wayland delivers as paired

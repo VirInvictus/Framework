@@ -2,6 +2,42 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.25.0 (2026-05-01)
+
+*Margin cropping, multi-doc lifecycle stress test, real leak fix.* The third Phase 14 polish item lands; the new stress-multidoc test promptly catches a real leak in the cache dispose path that the existing stress tests never reached.
+
+---
+
+### Margin Cropping (Phase 14)
+A new `Crop Margins` toggle (`F6`, primary menu, GSettings-backed) auto-crops whitespace margins so dense PDFs use more of the laptop screen. Implementation:
+
+- **Detection**: a new `get_content_bbox(page)` interface method returns the inked-content bounding box in document points. The PDF backend computes it by walking the cached `fz_stext_page` and unioning every char's quad-derived rect — text blocks only, image blocks skipped. Fast (the stext is already cached from v0.18). DjVu and CBR return FALSE; the toggle has no effect on those.
+- **Application**: on toggle activation, the view probes the *current visible page*'s bbox (assuming uniform margins across the doc, which holds for ~99% of technical PDFs) and computes fractional margins. `recompute_layout` shrinks every page's reported width/height by `(1 - margin_fractions)`. The snapshot path draws the full page texture offset+sized so the content area aligns with the cropped page rect, and pushes a clip so margins don't leak past the rect.
+- **Anchor preservation**: like `fw_view_set_zoom`, captures `(page, intra-page-fraction)` before the layout change and restores after — without it, toggling crop would jump to a different page because the same scroll_y maps differently in the smaller layout.
+
+The toggle is wired with the same plumbing as the v0.23 reading ruler and v0.24 loupe: GSettings boolean → `g_settings_create_action` → menu checkmark + F6 accelerator. Both stay in sync; setting persists across sessions.
+
+### `stress-multidoc` (Phase 12.2)
+A new stress test, the fourth in the harness. Sequential phase: open 50 documents in succession across the six-format corpus (PDF, DjVu, EPUB, MOBI, CBZ, CBR), create a cache for each, render the first three pages, dispose. Parallel phase: hold 10 `FwDocument`+`FwCache` instances simultaneously, then dispose all in reverse order.
+
+Asserts no crashes, peak RSS under 2 GB (covers ASan overhead), and cleanly disposes everything. Caught the leak below on first run.
+
+### Bugfix — Pool Dispose Leak in `fw_cache_dispose`
+**Real leak.** The cache called `g_thread_pool_free(pool, immediate=TRUE, wait=TRUE)`, where `immediate=TRUE` discards queued tasks *without invoking their workers*. Since each `RenderJob` is `g_new0`-allocated and free'd inside the worker, every queued-but-not-yet-running job leaked on cache dispose — exactly hits during document open/close churn.
+
+ASan attribution from `stress-multidoc`:
+
+```
+Direct leak of 2832 byte(s) in 59 object(s) allocated from:
+    g_malloc0 → submit_next_jobs → fw_cache_start
+```
+
+Fix: `immediate=FALSE` instead, so queued jobs run through their workers. Workers see `cancel_gen` was bumped during `fw_cache_stop`, take the bail-out path, and `g_free` the job. The `fw_document_cancel_render` call already in `fw_cache_stop` ensures mid-render decodes abort fast (PDF via fz_cookie, DjVu/CBR via cancel_flag), so the drain doesn't block dispose noticeably.
+
+Verified: ASan-clean across the full multi-doc run after the fix. Same code path is exercised by every document close in the GUI — the leak was bleeding small but real allocations on every file switch.
+
+---
+
 ## v0.24.1 (2026-05-01)
 
 *Bugfixes — fit-width, zoom-anchor, sticky-blur, scroll handling.* No new features; sanding down the rough edges that surfaced once the loupe and CBR cache started exercising paths in new combinations.

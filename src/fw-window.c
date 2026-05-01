@@ -877,6 +877,7 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   add_shortcut_row (g_view, "Invert colors",    "<Control>i");
   add_shortcut_row (g_view, "Reading ruler",    "F8");
   add_shortcut_row (g_view, "Magnifying loupe", "F7");
+  add_shortcut_row (g_view, "Crop margins",     "F6");
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_view);
 
   AdwPreferencesGroup *g_sel =
@@ -1203,6 +1204,7 @@ fw_window_constructed (GObject *object)
   g_menu_append (menu, "Kinetic Scrolling", "win.kinetic-scrolling");
   g_menu_append (menu, "Reading Ruler", "win.reading-ruler");
   g_menu_append (menu, "Magnifying Loupe", "win.loupe");
+  g_menu_append (menu, "Crop Margins", "win.crop-margins");
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
   g_menu_append (menu, "Document Properties…", "win.properties");
@@ -1447,6 +1449,10 @@ fw_window_constructed (GObject *object)
     g_autoptr (GAction) loupe_action =
       g_settings_create_action (self->settings, "loupe");
     g_action_map_add_action (G_ACTION_MAP (self), loupe_action);
+
+    g_autoptr (GAction) crop_action =
+      g_settings_create_action (self->settings, "crop-margins");
+    g_action_map_add_action (G_ACTION_MAP (self), crop_action);
 
     /* Apply kinetic-scrolling to the scrolled window now and on every
      * change. The previous hardcoded TRUE is now driven by the user's

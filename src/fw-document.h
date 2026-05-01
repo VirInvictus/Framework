@@ -185,6 +185,19 @@ struct _FwDocumentInterface {
                                             double      y0,
                                             double      x1,
                                             double      y1);
+
+  /* Compute the page's inked-content bounding box in document points —
+   * the union of all glyph rectangles, used by the margin-crop feature
+   * to figure out how much whitespace to trim. Returns TRUE on success
+   * with the bbox in *out_x0..*out_y1; FALSE when the backend doesn't
+   * support stext-based content detection (DjVu, CBR), when the page
+   * has no inked content, or when the cached stext isn't available. */
+  gboolean         (*get_content_bbox)  (FwDocument *self,
+                                          int         page,
+                                          double     *out_x0,
+                                          double     *out_y0,
+                                          double     *out_x1,
+                                          double     *out_y1);
 };
 
 /* Public API — delegates to interface vtable */
@@ -246,6 +259,12 @@ GArray          *fw_document_get_selection_quads (FwDocument *self,
                                                    double      y0,
                                                    double      x1,
                                                    double      y1);
+gboolean         fw_document_get_content_bbox    (FwDocument *self,
+                                                   int         page,
+                                                   double     *out_x0,
+                                                   double     *out_y0,
+                                                   double     *out_x1,
+                                                   double     *out_y1);
 
 /* ── Factory ──────────────────────────────────────────────────────── */
 

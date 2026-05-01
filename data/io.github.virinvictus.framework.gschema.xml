@@ -45,5 +45,20 @@
       </description>
     </key>
 
+    <key name="crop-margins" type="b">
+      <default>false</default>
+      <summary>Auto-crop whitespace margins from PDF pages</summary>
+      <description>
+        When true, scan the current visible page's text via the cached
+        structured-text page, compute the content bounding box, and
+        apply the resulting margin fractions uniformly across the
+        document. Pages render without their whitespace margins so the
+        text occupies more of the screen — useful on small laptop
+        screens with dense technical PDFs. Has no effect on backends
+        that don't support stext-based content detection (DjVu, CBR).
+        Toggleable from the primary menu or via F6; the setting persists.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

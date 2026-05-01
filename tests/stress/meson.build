@@ -21,6 +21,13 @@ stress_search_cache = executable(
   install: false,
 )
 
+stress_multidoc = executable(
+  'stress-multidoc',
+  'stress-multidoc.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
 # Register as a meson test. RSS cap of 800 MB by default; override with
 # FW_STRESS_RSS_CAP_MB. Skipped automatically in CI environments without a
 # corpus path — pass FW_TEST_CORPUS_ROOT or call the binary directly.
@@ -53,6 +60,15 @@ test('stress-search-cache-effective-java',
   env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
         'G_TEST_BUILDDIR=' + meson.project_build_root()],
   timeout: 120,
+  protocol: 'exitcode',
+  is_parallel: false,
+)
+
+test('stress-multidoc',
+  stress_multidoc,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 180,
   protocol: 'exitcode',
   is_parallel: false,
 )

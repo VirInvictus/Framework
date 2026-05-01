@@ -968,13 +968,19 @@ fw_cache_dispose (GObject *object)
 
   fw_cache_stop (self);
 
-  /* Wait for all pool threads to finish */
+  /* Drain pending jobs before freeing the pool (immediate=FALSE) so
+   * each queued RenderJob runs through its worker — which sees
+   * cancel_gen has been bumped, bails out, and g_free's the job.
+   * Using immediate=TRUE here would drop queued jobs without invoking
+   * the worker, leaking every pending RenderJob struct. The
+   * fw_document_cancel_render() call in fw_cache_stop ensures
+   * mid-render decodes bail quickly so this drain doesn't block. */
   if (self->pool) {
-    g_thread_pool_free (self->pool, TRUE, TRUE);
+    g_thread_pool_free (self->pool, FALSE, TRUE);
     self->pool = NULL;
   }
   if (self->thumb_pool) {
-    g_thread_pool_free (self->thumb_pool, TRUE, TRUE);
+    g_thread_pool_free (self->thumb_pool, FALSE, TRUE);
     self->thumb_pool = NULL;
   }
 

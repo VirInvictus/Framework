@@ -285,6 +285,18 @@ fw_document_get_selection_quads (FwDocument *self, int page,
   return NULL;
 }
 
+gboolean
+fw_document_get_content_bbox (FwDocument *self, int page,
+                              double *out_x0, double *out_y0,
+                              double *out_x1, double *out_y1)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), FALSE);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->get_content_bbox)
+    return iface->get_content_bbox (self, page, out_x0, out_y0, out_x1, out_y1);
+  return FALSE;
+}
+
 /* ── Factory — pick backend by file extension ─────────────────────── */
 
 FwDocument *

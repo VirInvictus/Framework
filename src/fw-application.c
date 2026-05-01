@@ -151,6 +151,7 @@ fw_application_startup (GApplication *app)
     { "win.toggle-sidebar",  { "F9", NULL } },
     { "win.reading-ruler",   { "F8", NULL } },
     { "win.loupe",           { "F7", NULL } },
+    { "win.crop-margins",    { "F6", NULL } },
     { "win.fullscreen",      { "F11", NULL } },
     { "win.find",            { "<Control>f", NULL } },
     { "win.find-next",       { "F3", NULL } },

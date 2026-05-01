@@ -733,6 +733,60 @@ pdf_get_selection_quads (FwDocument *doc, int page,
   return out;
 }
 
+/* ── Content bbox (margin-crop support) ──────────────────────────── */
+
+static gboolean
+pdf_get_content_bbox (FwDocument *doc, int page,
+                      double *out_x0, double *out_y0,
+                      double *out_x1, double *out_y1)
+{
+  FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
+  gboolean ok = FALSE;
+
+  g_mutex_lock (&self->lock);
+
+  fz_stext_page *stext = pdf_get_or_extract_stext (self, page);
+  if (!stext) {
+    g_mutex_unlock (&self->lock);
+    return FALSE;
+  }
+
+  /* Walk every char in every line in every text block, unioning its
+   * quad-derived bbox. Image blocks are skipped (margin-crop is for
+   * trimming text-doc whitespace; pages that are pure images would
+   * need a per-pixel detector, out of scope here). */
+  fz_rect bbox = fz_empty_rect;
+  fz_try (self->ctx) {
+    for (fz_stext_block *block = stext->first_block; block; block = block->next) {
+      if (block->type != FZ_STEXT_BLOCK_TEXT) continue;
+      for (fz_stext_line *line = block->u.t.first_line; line; line = line->next) {
+        for (fz_stext_char *ch = line->first_char; ch; ch = ch->next) {
+          fz_rect r = fz_rect_from_quad (ch->quad);
+          bbox = fz_union_rect (bbox, r);
+        }
+      }
+    }
+  }
+  fz_catch (self->ctx) {
+    g_warning ("MuPDF: content bbox walk failed on page %d: %s",
+               page, fz_caught_message (self->ctx));
+    bbox = fz_empty_rect;
+  }
+
+  /* Empty bbox (no text on page, e.g., a chapter divider) → fail.
+   * The view falls back to the full page rect. */
+  if (bbox.x1 > bbox.x0 && bbox.y1 > bbox.y0) {
+    *out_x0 = (double) bbox.x0;
+    *out_y0 = (double) bbox.y0;
+    *out_x1 = (double) bbox.x1;
+    *out_y1 = (double) bbox.y1;
+    ok = TRUE;
+  }
+
+  g_mutex_unlock (&self->lock);
+  return ok;
+}
+
 /* ── Link extraction ──────────────────────────────────────────────── */
 
 static GArray *
@@ -1108,6 +1162,7 @@ fw_document_pdf_iface_init (FwDocumentInterface *iface)
   iface->get_metadata    = pdf_get_metadata;
   iface->select_at       = pdf_select_at;
   iface->get_selection_quads = pdf_get_selection_quads;
+  iface->get_content_bbox    = pdf_get_content_bbox;
   /* Page handle API intentionally NULL — PDF uses independent render instances
    * in pdf_render_page() for true parallel rendering. The cache falls through
    * to fw_document_render_page() which dispatches here. */
