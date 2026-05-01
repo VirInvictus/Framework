@@ -350,12 +350,6 @@ will lift idioms from each.
   (ebook.js), so the implementation patterns don't transfer to
   native GTK. Useful for "what does a finished ebook reader's UX
   look like" but nothing else.
-- **Plato** — `.plato/crates/core/src/document/`. Minimum-viable
-  format-handling code, all routed through MuPDF. Useful as a
-  *negative* reference: we're explicitly leaving MuPDF for these
-  formats, so don't copy Plato's structure for the reflow path —
-  but its PDF/EPUB document module shows the smallest-possible
-  format-dispatch surface area.
 - **`kindle-unpack`** (not vendored — Python upstream) — the de
   facto reference for the PalmDOC LZ77 decompressor and KF7/KF8
   layout. Will need to be re-expressed in C; the algorithm is well

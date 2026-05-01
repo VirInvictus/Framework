@@ -25,16 +25,13 @@ framework-spec.md
 # Claude Code
 claude.run
 
-# Vendored reference repos (see CLAUDE.md "Reference repos" — not part of build)
+# Vendored reference repos for Phase 13.1 Fractal-style reflow rewrite
+# (see CLAUDE.md "Reference repos" and docs/fractal-rewrite.md). The
+# other seven repos (zathura, zathura-mupdf, sumatrapdf, sioyek,
+# plato, yacreader, mcomix) were removed in v0.39.0 after their
+# patterns were extracted — see roadmap.md and patchnotes.md v0.39.0.
 .fractal/
 .komikku/
-.mcomix/
-.plato/
-.sioyek/
-.sumatrapdf/
-.yacreader/
-.zathura/
-.zathura-mupdf/
 
 # OS junk
 .DS_Store

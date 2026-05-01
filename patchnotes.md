@@ -2,6 +2,38 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.39.0 (2026-05-01)
+
+*Reference-repo cleanup audit.* Seven of the nine vendored upstream checkouts have been mined for everything Framework can reasonably borrow; this version removes them from disk and from `.gitignore` after one last audit sweep that surfaced two more borrows worth shipping (v0.37 YACReader filename-spread, v0.38 Zathura landlock).
+
+### Removed (~440 MB freed)
+| Repo | Size | What we got | What's deferred |
+|---|---|---|---|
+| `.zathura/` | 3.4 MB | sort-function priority dispatch (v0.14), hue-preserving recolor (v0.22), landlock LSM hardening (v0.38) | vim-mode girara UI, per-page widget model — explicitly NOT borrowing |
+| `.zathura-mupdf/` | 244 KB | zero-copy MuPDF→cairo (v1.6), cached `fz_stext_page` (v0.18) | nothing — fully mined |
+| `.sumatrapdf/` | 271 MB | engine abstraction, fz_cookie cancellation (v0.17), bytes-aware cache cap (v0.16), smart text selection inspiration (v0.19), auto-reload concept (v0.21) | true tile slicing — Tier 2 follow-up if poster PDFs ever need it |
+| `.sioyek/` | 23 MB | try_closest_rendered_page (v0.28), TTL+LRU eviction (v0.26), reading ruler (v0.23), margin cropping concept (v0.25) | per-thread shared-context model — Tier 3 validated as not currently needed |
+| `.plato/` | 13 MB | per-instance store sizing reference (v0.26) | nothing — AGPL prevents code copy regardless |
+| `.yacreader/` | 104 MB | magnifying loupe (v0.24), aspect-ratio spread detection (v0.27.1), filename-based spread detection (v0.37) | comic-library management — out of scope |
+| `.mcomix/` | 10 MB | manga RTL navigation (v0.27) | smart-grid PgDown algorithm — niche, current behavior fine |
+
+### Kept
+| Repo | Why |
+|---|---|
+| `.fractal/` | Active reference for the Phase 13.1 reflow rewrite (`docs/fractal-rewrite.md`). Specifically `.fractal/src/utils/grouping_list_model/` for the dynamic-height list-model pattern. |
+| `.komikku/` | Same — `komikku/reader/pager/` for reflow / paginated dispatch logic. |
+
+### Cleanup
+- `.gitignore` trimmed to just `.fractal/` and `.komikku/`.
+- `CLAUDE.md` "Reference repos" section retains the `.fractal/`/`.komikku/` table and the License compatibility matrix; the per-repo deep-dive subsections for the seven removed repos are gone (they were a map-of-where-to-look that no longer maps to anything).
+- `roadmap.md` and `docs/fractal-rewrite.md` had `.repo/` path prefixes stripped from references that pointed inside the removed checkouts. Earlier patchnotes still reference them historically — left untouched as record-of-what-was-borrowed-when.
+
+The borrowing trail isn't lost: `README.md`'s "Influences and borrowed techniques" section retains the per-pattern attribution with upstream paths and line numbers, and the patchnote for each ship cites the source pattern. Anyone wanting to verify a borrow can clone the upstream repo at `--depth 1` and grep — same as we did originally.
+
+No code changes; this version is structural / documentation only.
+
+---
+
 ## v0.38.0 (2026-05-01)
 
 *Landlock LSM hardening — borrowed from zathura.* The binary now drops filesystem-execute and create-special-file-type permissions via Linux's [Landlock](https://landlock.io/) LSM at process startup. If a malicious document exploits MuPDF / DjVuLibre / libarchive into RCE, the foothold can no longer escalate by `execve()`'ing a shell or by mknod'ing a backdoor — the kernel rejects the syscall before the libc sees it. Read and `WRITE_FILE` rights stay allowed so state.json persistence, save-attachments, and print spool writes continue to work.
