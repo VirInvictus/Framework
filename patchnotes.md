@@ -2,6 +2,22 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.36.0 (2026-05-01)
+
+*Phase 11 Tier 3 validated — current MuPDF threading model retained.* Both Tier 3 entries (`Reconsider 8× fz_open_document model`, `Per-thread-shared-context hybrid`) were investigation-only items hedging against memory pressure on low-RAM laptops. The pre-1.0 stress harness now provides enough measurement to make a defensible call:
+
+- `stress-multidoc` holds 10 simultaneous `FwDocument` + `FwCache` instances under 2 GB RSS (with ASan).
+- `stress-corpus-soak` walks the full corpus (PDF×2, DjVu, EPUB, MOBI, CBZ, CBR) under 1.5 GB peak RSS.
+- `bench-render` shows a 3× warm/cold speedup on Effective Java — the v0.26-scaled per-instance stores (16/32/64/128 MB) are doing their job at the sizes we picked.
+
+The 8-instance model's worst-case ceiling for a single open doc is ~1.6 GB (8 × 128 MB stores + thumbs + cache cap). On any contemporary 16+ GB laptop the headroom is comfortable. The `fz_clone_context` refactor introduces real threading risk (locks-callback contract, per-thread context lifetime, store-eviction across cloned contexts) and would also forfeit the current "per-instance lock means workers never wait on each other" simplicity — so the change isn't free even if memory-neutral.
+
+Both Tier 3 items are now marked `[~]` (validated, retained) in `roadmap.md`. They stay tracked as fallbacks if a memory-constrained deployment target ever shows up — Plato-style e-reader port, Flatpak sandbox memory limit, embedded distro — but no code change ships in v0.36.
+
+No code changes; this version is documentation only.
+
+---
+
 ## v0.35.0 (2026-05-01)
 
 *High-zoom render-bytes cap — Phase 11 Tier 2 (pragmatic deviation from spec).* Per-render allocation is now capped at 64 MB. When the requested zoom would produce a larger surface, `render_zoom` scales down so the surface fits; the resulting texture upscales via GTK's GSK pipeline when the view paints it at the requested rect. Combined with v0.28's `try_closest_rendered_page` retention, the user sees a slightly-blurry preview at extreme zoom on poster-format PDFs rather than an OOM allocation.
