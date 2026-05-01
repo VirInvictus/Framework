@@ -689,7 +689,7 @@ static void
 djvu_cancel_render (FwDocument *doc)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
-  FW_TRACE_DJVU ("cancel_render");
+  FW_TRACE_DJVU ("cancel_render%s", "");
   g_atomic_int_set (&self->cancel_flag, TRUE);
 }
 

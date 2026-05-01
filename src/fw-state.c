@@ -17,6 +17,23 @@
 #define MAX_ENTRIES  500
 #define MAX_AGE_DAYS 90
 
+typedef struct {
+  const char *key;     /* borrowed — owned by the JsonObject */
+  gint64      ts_us;   /* unix-microseconds; 0 if unparseable */
+} LruEntry;
+
+/* GCompareFunc: ascending by timestamp so oldest entries land at the
+ * front of the array, ready to be evicted. */
+static gint
+lru_entry_compare (gconstpointer a, gconstpointer b)
+{
+  const LruEntry *ea = a;
+  const LruEntry *eb = b;
+  if (ea->ts_us < eb->ts_us) return -1;
+  if (ea->ts_us > eb->ts_us) return  1;
+  return 0;
+}
+
 static char *
 get_state_path (void)
 {
@@ -166,11 +183,46 @@ fw_state_prune (void)
   }
 
   g_list_free (to_remove);
-
-  /* TODO: LRU eviction if count > MAX_ENTRIES */
-  (void) count;
-
   g_list_free (members);
+
+  /* LRU eviction — keep at most MAX_ENTRIES, drop the oldest by
+   * `last_opened` timestamp. The age-based pass above already removed
+   * anything older than 90 days; this catches the "user opens many
+   * documents recently" case where the file would otherwise grow without
+   * bound. Re-fetch members because the removals above invalidated the
+   * earlier list. */
+  if (count > MAX_ENTRIES) {
+    GList *current = json_object_get_members (obj);
+    GArray *entries = g_array_sized_new (FALSE, FALSE, sizeof (LruEntry),
+                                          count);
+
+    for (GList *l = current; l; l = l->next) {
+      const char *key = l->data;
+      JsonObject *e = json_object_get_object_member (obj, key);
+      const char *ts = json_object_get_string_member_with_default (e,
+        "last_opened", NULL);
+      LruEntry slot = { .key = key, .ts_us = 0 };
+      if (ts) {
+        g_autoptr (GDateTime) dt = g_date_time_new_from_iso8601 (ts, NULL);
+        if (dt) slot.ts_us = g_date_time_to_unix_usec (dt);
+      }
+      g_array_append_val (entries, slot);
+    }
+
+    /* Sort ascending by timestamp — oldest first; drop the front
+     * until we're at the cap. */
+    g_array_sort (entries, lru_entry_compare);
+
+    guint to_drop = entries->len - MAX_ENTRIES;
+    for (guint i = 0; i < to_drop; i++) {
+      LruEntry *e = &g_array_index (entries, LruEntry, i);
+      json_object_remove_member (obj, e->key);
+      changed = TRUE;
+    }
+
+    g_array_unref (entries);
+    g_list_free (current);
+  }
 
   if (changed)
     save_root (root);

@@ -2,6 +2,29 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.21.1 (2026-05-01)
+
+*Bugfixes and post-session cleanup.* No new features — just sanding down the rough spots that accumulated across the v0.12 → v0.21 sprint.
+
+---
+
+### LRU Eviction Actually Works (`fw_state_prune`)
+The `fw-state.c` header has claimed since v1.1.0 that state.json is "capped at 500 entries (LRU)". In practice only the age-based prune (entries >90 days) was implemented; the file would grow unbounded for users who open more than 500 documents inside the 90-day window. A `TODO: LRU eviction` comment marked the gap. Now fixed: when post-age count exceeds `MAX_ENTRIES` (500), entries are sorted by `last_opened` timestamp and the oldest are evicted until the count is at the cap. Phase 9's checkbox in the roadmap is now honest.
+
+### Dead `active_jobs` / `max_jobs` Bookkeeping Removed
+The v0.16.0 byte-cap rework dropped the `active_jobs < job_limit` concurrency throttle in favor of letting the GThreadPool's own worker count cap concurrency. The counters were retained "for debug tracing" but never actually traced — they were pure write-only bookkeeping (incremented in submit, decremented in worker, read by nobody). Removed the fields, the increment/decrement sites, and the init lines. Net –7 lines plus a small clarity win.
+
+### Pedantic Warning Cleanups
+Two `FW_TRACE_*("string-only")` call sites triggered ISO C99 variadic-macro warnings at `-Dwarning_level=3` (the macro uses `##__VA_ARGS__`, a GNU extension). The default build at level 2 was clean, but the strict-build was noisy. Fixed both with explicit `"%s", ""` arguments — same trace output, ISO-conformant.
+
+### Verified
+ASan-clean across all three registered stress tests (stress-scrub, stress-zoom-storm, stress-search-cache) with the cleanup applied. No regressions in the cache pipeline.
+
+### Known TODO Carried Forward
+`fw-document-djvu.c:506` — `djvu_get_text` doesn't filter the returned text to the selection rectangle (returns the whole page's text instead). Real bug for DjVu users hitting Ctrl+C on a partial selection. Requires careful coord conversion (DjVu uses pixel coords at file-DPI from bottom-left; Framework uses points at 72 DPI from top-left) and testing against real DjVu samples. Deferred to its own focused commit when DjVu selection becomes a felt pain point.
+
+---
+
 ## v0.21.0 (2026-04-30)
 
 *Phase 14 — auto-reload via `GFileMonitor`.* Recompile your LaTeX or Typst document and Framework refreshes automatically, restoring exact scroll position and zoom. The same pattern that made SumatraPDF a fixture in technical workflows for years.

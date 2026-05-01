@@ -82,8 +82,6 @@ struct _FwCache {
   /* Velocity and queuing */
   double         velocity;
   FwRenderState  render_state;
-  int            active_jobs;
-  int            max_jobs;
 
   /* Priority state */
   int           *priority_order;  /* page indices in render priority order */
@@ -332,7 +330,6 @@ render_worker (gpointer data, gpointer user_data)
                     cancelled, wrong_params, scrubbing, job->page);
     CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (job->page));
     if (entry) entry->rendering = FALSE;
-    self->active_jobs--;
     submit_next_jobs (self);
     g_mutex_unlock (&self->lock);
     g_free (job);
@@ -437,8 +434,7 @@ render_worker (gpointer data, gpointer user_data)
                                               GINT_TO_POINTER (job->page));
     if (entry) entry->rendering = FALSE;
   }
-  
-  self->active_jobs--;
+
   submit_next_jobs (self);
   g_mutex_unlock (&self->lock);
 
@@ -466,7 +462,6 @@ submit_next_jobs (FwCache *self)
       continue;
 
     entry->rendering = TRUE;
-    self->active_jobs++;
 
     RenderJob *job = g_new0 (RenderJob, 1);
     job->cache          = self;
@@ -919,7 +914,7 @@ fw_cache_stop (FwCache *self)
 {
   g_return_if_fail (FW_IS_CACHE (self));
 
-  FW_TRACE_CACHE ("stop");
+  FW_TRACE_CACHE ("stop%s", "");
   g_mutex_lock (&self->lock);
   self->stopping = TRUE;
   self->cancel_gen++;  /* invalidate all pending jobs */
@@ -1031,8 +1026,6 @@ fw_cache_init (FwCache *self)
   /* Single dedicated thread for thumbnails — background priority, never
    * competes with the main render pool. */
   self->thumb_pool = g_thread_pool_new (thumb_worker, NULL, 1, FALSE, NULL);
-  self->max_jobs = n_threads;
-  self->active_jobs = 0;
   self->render_state = FW_RENDER_STATE_STATIC;
   self->scale_factor = 1;
   self->total_cached_bytes = 0;
