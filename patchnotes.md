@@ -2,6 +2,55 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.24.0 (2026-05-01)
+
+*Magnifying loupe, CBR bytes cache, and a runaway-render bugfix.* Three things shipped together: the third Phase 14 polish item (loupe), a long-pending CBR backend optimization (per-page bytes cache), and a freshly-discovered cache infinite-loop bug uncovered by the loupe's per-frame redraws.
+
+---
+
+### Magnifying Loupe (Phase 14)
+A circular zoom-in viewport that follows the cursor — useful for dense comic panels, small chart axis labels, and footnote text on scanned documents. Implemented as a snapshot-time GSK transform: rounded clip at the cursor + zoom-around-cursor matrix + re-append the page texture inside the clip + thin border. Pure GPU work, no re-rendering required (the texture is already in cache). Magnification is fixed at 2.5×; loupe radius is 80 px.
+
+Wired through:
+- New `loupe` GSettings boolean (default off, persists).
+- **F7** keyboard shortcut.
+- "Magnifying Loupe" entry in the primary menu.
+- New row in the in-app Keyboard Shortcuts dialog (View group).
+- New row in README.md's Keyboard Shortcuts → View table.
+
+### CBR Per-Page Bytes Cache
+RAR has no central directory: seeking to entry N requires sequentially decompressing entries 1..N-1. Every render of every page previously paid that full walk cost from scratch — the documented "streaming-RAR cost" called out in `fw-document-cbr.c`'s threading comment. Now there's a per-page bytes cache on `FwDocumentCbr`: first render of a page does the full walk and stores the extracted entry as a `GBytes`; subsequent renders hit the cache and skip straight to MuPDF decode + raster.
+
+Cache details:
+- Keyed by page index, stored as `GBytes *` (refcounted) in a `GHashTable`.
+- FIFO eviction via a parallel `GQueue` of page indices when total cached bytes exceeds the cap. Comics are read mostly linearly so age-based eviction works fine.
+- Default cap is 256 MB, sized for typical graphic novels.
+- Serialized via the existing `archive_lock` mutex — same lock as the archive walk this cache exists to short-circuit, so no new lock-ordering concerns.
+- The `cbr_extract_entry` function signature changed from `(page, *out_size) → guint8*` to `(page) → GBytes*`. Updated both callers (the page-0 dimension probe in `cbr_open` and the main render path).
+
+ASan + UBSan clean across the full stress run.
+
+### Bugfix — Sticky-Fail Render Skip in `fw_cache.submit_next_jobs`
+The loupe's per-frame redraws surfaced a long-latent infinite-render-loop in the cache pipeline. When a render job returned `NULL` (e.g., the CBR backend's "zero-size render" failure on certain thumbnail-tier renders), the worker stored `surface = NULL` and set `entry->render_gen = job->render_gen`. Then `submit_next_jobs`'s skip condition `entry->surface && entry->render_gen == self->render_gen` evaluated FALSE because surface was NULL — re-pushing the same failed job. Each retry produced another NULL, which re-pushed again, ad infinitum.
+
+Discovered by tracing: with FW_DEBUG=1 + loupe enabled on a 583-page CBR, `output.log` collected **3.38 million `[cache] worker start` lines in 30 seconds** (~110 k/sec). All on the same handful of pages whose renders happened to fail.
+
+Fix: change the skip condition to compare `render_gen` alone:
+
+```c
+if (entry->render_gen == self->render_gen)
+  continue;
+```
+
+A render attempt at the current generation — success *or* failure — sticks until the next generation bump (zoom or rotation change). After the fix, the same scenario produces **209 cache traces** for the full run instead of 3.38 million. CPU stays quiet, fans stay still.
+
+The "zero-size render" warnings on a few specific CBR pages are a separate (cosmetic) symptom worth investigating — likely sub-pixel rounding when zoom × original page width drops below 0.5 — but it no longer cascades into a thermal incident.
+
+### Diagnostic Trace Plumbing
+While diagnosing the loop, a per-second snapshot timing summary was added (`view: snap stats: N frames/s avg=Xms loupe-paints=K …`) plus per-call CBR cache hit/miss traces. Zero overhead when `FW_DEBUG=0`; instantly tells you whether a perf issue is a frame storm, expensive frames, or render churn when enabled.
+
+---
+
 ## v0.23.0 (2026-05-01)
 
 *Reading ruler (Phase 14).* Toggleable mode that dims everything except a horizontal band tracking the cursor — keeps the eye on the active line in dense technical reading. Pattern conceptually borrowed from Sioyek's "visual mark"; reduced to a couple of `GskColorNode`s above and below a clear band.

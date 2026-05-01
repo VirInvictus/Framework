@@ -862,10 +862,11 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   AdwPreferencesGroup *g_view =
     ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
   adw_preferences_group_set_title (g_view, "View");
-  add_shortcut_row (g_view, "Toggle sidebar", "F9");
-  add_shortcut_row (g_view, "Fullscreen",     "F11");
-  add_shortcut_row (g_view, "Invert colors",  "<Control>i");
-  add_shortcut_row (g_view, "Reading ruler",  "F8");
+  add_shortcut_row (g_view, "Toggle sidebar",   "F9");
+  add_shortcut_row (g_view, "Fullscreen",       "F11");
+  add_shortcut_row (g_view, "Invert colors",    "<Control>i");
+  add_shortcut_row (g_view, "Reading ruler",    "F8");
+  add_shortcut_row (g_view, "Magnifying loupe", "F7");
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_view);
 
   AdwPreferencesGroup *g_sel =
@@ -1191,6 +1192,7 @@ fw_window_constructed (GObject *object)
   g_menu_append (menu, "Invert Colors", "win.invert-colors");
   g_menu_append (menu, "Kinetic Scrolling", "win.kinetic-scrolling");
   g_menu_append (menu, "Reading Ruler", "win.reading-ruler");
+  g_menu_append (menu, "Magnifying Loupe", "win.loupe");
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
   g_menu_append (menu, "Document Properties…", "win.properties");
@@ -1425,6 +1427,10 @@ fw_window_constructed (GObject *object)
     g_autoptr (GAction) ruler_action =
       g_settings_create_action (settings, "reading-ruler");
     g_action_map_add_action (G_ACTION_MAP (self), ruler_action);
+
+    g_autoptr (GAction) loupe_action =
+      g_settings_create_action (settings, "loupe");
+    g_action_map_add_action (G_ACTION_MAP (self), loupe_action);
   }
 
   /* ── Arrow key scrolling & Ctrl+Scroll zoom ── */

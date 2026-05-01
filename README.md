@@ -92,6 +92,7 @@ Framework is strictly a **viewer**. It is not an editor (no annotations), not a 
 | Fullscreen | F11 |
 | Invert colors | Ctrl+I |
 | Reading ruler | F8 |
+| Magnifying loupe | F7 |
 
 ### Search
 

@@ -93,9 +93,22 @@ struct _FwView {
   gboolean     reading_ruler;
   double       ruler_y;          /* widget-coordinate Y of the cursor */
   gboolean     ruler_y_valid;    /* FALSE before first motion event */
+
+  /* Magnifying loupe — circular zoomed view at the cursor. Tracks both
+   * X and Y. Same source-of-truth flag as the ruler (mouse position) but
+   * the loupe needs both axes whereas the ruler only uses Y. */
+  gboolean     loupe;
+  double       cursor_x;
+  double       cursor_y;
+  gboolean     cursor_valid;
+  gulong       loupe_changed_handler;
 };
 
 static void fw_view_scrollable_init (GtkScrollableInterface *iface);
+static gboolean fw_view_widget_to_doc (FwView *self,
+                                       double widget_x, double widget_y,
+                                       int *out_page,
+                                       double *out_doc_x, double *out_doc_y);
 
 G_DEFINE_FINAL_TYPE_WITH_CODE (FwView, fw_view, GTK_TYPE_WIDGET,
   G_IMPLEMENT_INTERFACE (GTK_TYPE_SCROLLABLE, fw_view_scrollable_init))
@@ -322,6 +335,14 @@ fw_view_size_allocate (GtkWidget *widget, int width, int height, int baseline)
   update_adjustments (self);
 }
 
+/* Per-second snapshot stats. Only used when FW_DEBUG=1 — zero-overhead
+ * when disabled. Counts are local to this translation unit; they sum
+ * frame work for the active FwView only. */
+static gint64 g_snap_window_start_us = 0;
+static int    g_snap_count           = 0;
+static gint64 g_snap_total_us        = 0;
+static int    g_snap_loupe_count     = 0;
+
 static void
 fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
@@ -330,6 +351,8 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
   if (!self->document || !self->cache || !self->page_y_offsets)
     return;
+
+  gint64 frame_start = g_get_monotonic_time ();
 
   int widget_width  = gtk_widget_get_width (widget);
   int widget_height = gtk_widget_get_height (widget);
@@ -491,6 +514,75 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
     }
   }
 
+  /* Magnifying loupe: a circular zoomed view at the cursor. Re-paints
+   * the page texture under the cursor inside a rounded clip, with a
+   * scale-around-cursor transform so what's at widget (cursor_x,
+   * cursor_y) before scaling stays at the same widget point after.
+   * Painted before the reading ruler so the ruler can dim the loupe
+   * area too if both are active (intentional — the loupe stays bright
+   * inside its clip; the ruler only dims around it). */
+  if (self->loupe && self->cursor_valid) {
+    int page_under_cursor;
+    double doc_x, doc_y;
+    if (fw_view_widget_to_doc (self, self->cursor_x, self->cursor_y,
+                                &page_under_cursor, &doc_x, &doc_y)) {
+      GdkTexture *tex = fw_cache_get_texture (self->cache, page_under_cursor);
+      if (tex) {
+        g_snap_loupe_count++;
+        const float radius = 80.0f;
+        const float zoom_factor = 2.5f;
+
+        /* Recompute the widget-coords rect for this page (mirrors the
+         * snapshot loop math). */
+        double pw = self->page_widths[page_under_cursor];
+        double ph = self->page_heights[page_under_cursor];
+        double py = self->page_y_offsets[page_under_cursor];
+        double page_widget_x;
+        if (self->max_width <= widget_width)
+          page_widget_x = (widget_width - pw) / 2.0;
+        else
+          page_widget_x = (self->max_width - pw) / 2.0 - scroll_x;
+        double page_widget_y = py - scroll_y;
+
+        graphene_rect_t loupe_rect = GRAPHENE_RECT_INIT (
+          (float) self->cursor_x - radius,
+          (float) self->cursor_y - radius,
+          radius * 2, radius * 2);
+
+        /* Rounded clip — corner radius == half the side gives a circle. */
+        GskRoundedRect rounded;
+        gsk_rounded_rect_init_from_rect (&rounded, &loupe_rect, radius);
+        gtk_snapshot_push_rounded_clip (snapshot, &rounded);
+
+        /* Zoom-around-cursor: T(c) ∘ S ∘ T(-c). GSK transforms compose
+         * outside-in: the last push is applied first to drawn content. */
+        gtk_snapshot_save (snapshot);
+        graphene_point_t c = { (float) self->cursor_x, (float) self->cursor_y };
+        graphene_point_t neg_c = { -(float) self->cursor_x, -(float) self->cursor_y };
+        gtk_snapshot_translate (snapshot, &c);
+        gtk_snapshot_scale (snapshot, zoom_factor, zoom_factor);
+        gtk_snapshot_translate (snapshot, &neg_c);
+
+        graphene_rect_t page_rect = GRAPHENE_RECT_INIT (
+          (float) page_widget_x, (float) page_widget_y,
+          (float) pw, (float) ph);
+        gtk_snapshot_append_texture (snapshot, tex, &page_rect);
+
+        gtk_snapshot_restore (snapshot);
+        gtk_snapshot_pop (snapshot); /* pop rounded clip */
+
+        /* Thin border so the loupe is visible against the page. */
+        GskRoundedRect outline = rounded;
+        const GdkRGBA border_color = { 0.0f, 0.0f, 0.0f, 0.6f };
+        const GdkRGBA border_colors[4] = { border_color, border_color,
+                                            border_color, border_color };
+        const float border_widths[4] = { 2.0f, 2.0f, 2.0f, 2.0f };
+        gtk_snapshot_append_border (snapshot, &outline,
+                                     border_widths, border_colors);
+      }
+    }
+  }
+
   /* Reading-ruler overlay: dim everything except a horizontal band that
    * tracks the cursor. Painted last so it sits above pages, selection,
    * and search highlights. The clear band is opt-out by simply not
@@ -516,6 +608,29 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
           0, bottom, (float) widget_w, (float) widget_h - bottom);
         gtk_snapshot_append_color (snapshot, &dim, &r_bot);
       }
+    }
+  }
+
+  /* Per-frame timing — accumulated and reported once per second when
+   * FW_DEBUG=1. Lets us see whether the loupe is producing a frame
+   * storm (high snap count) or expensive frames (high avg duration). */
+  if (G_UNLIKELY (fw_debug_enabled ())) {
+    gint64 frame_end = g_get_monotonic_time ();
+    g_snap_count++;
+    g_snap_total_us += (frame_end - frame_start);
+    if (g_snap_window_start_us == 0) g_snap_window_start_us = frame_end;
+    if (frame_end - g_snap_window_start_us >= 1000000) {
+      double avg_ms = g_snap_count > 0
+        ? (double) g_snap_total_us / 1000.0 / g_snap_count
+        : 0.0;
+      FW_TRACE_VIEW ("snap stats: %d frames/s avg=%.2fms loupe-paints=%d "
+                     "ruler=%d loupe=%d",
+                     g_snap_count, avg_ms, g_snap_loupe_count,
+                     self->reading_ruler, self->loupe);
+      g_snap_window_start_us = frame_end;
+      g_snap_count = 0;
+      g_snap_total_us = 0;
+      g_snap_loupe_count = 0;
     }
   }
 }
@@ -814,11 +929,18 @@ on_motion (GtkEventControllerMotion *controller, double x, double y,
     gtk_widget_set_cursor (GTK_WIDGET (self), NULL);
   }
 
-  /* Reading-ruler: re-paint to follow the cursor. The ruler is widget-
-   * relative (not page-relative) so we track the full widget Y. */
+  /* Track cursor for ruler and loupe — both are widget-coordinate
+   * overlays painted in the snapshot path. */
+  self->cursor_x = x;
+  self->cursor_y = y;
+  self->cursor_valid = TRUE;
+
   if (self->reading_ruler) {
     self->ruler_y = y;
     self->ruler_y_valid = TRUE;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
+  if (self->loupe) {
     gtk_widget_queue_draw (GTK_WIDGET (self));
   }
 }
@@ -1240,8 +1362,11 @@ fw_view_dispose (GObject *object)
       g_signal_handler_disconnect (self->settings, self->settings_changed_handler);
     if (self->ruler_changed_handler)
       g_signal_handler_disconnect (self->settings, self->ruler_changed_handler);
+    if (self->loupe_changed_handler)
+      g_signal_handler_disconnect (self->settings, self->loupe_changed_handler);
     self->settings_changed_handler = 0;
     self->ruler_changed_handler = 0;
+    self->loupe_changed_handler = 0;
     g_clear_object (&self->settings);
   }
   g_clear_object (&self->document);
@@ -1320,6 +1445,16 @@ on_ruler_setting_changed (GSettings *settings, const char *key, gpointer user_da
   FwView *self = user_data;
   self->reading_ruler = g_settings_get_boolean (settings, "reading-ruler");
   FW_TRACE_VIEW ("reading-ruler=%d", self->reading_ruler);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+static void
+on_loupe_setting_changed (GSettings *settings, const char *key, gpointer user_data)
+{
+  (void) key;
+  FwView *self = user_data;
+  self->loupe = g_settings_get_boolean (settings, "loupe");
+  FW_TRACE_VIEW ("loupe=%d", self->loupe);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -1404,12 +1539,16 @@ fw_view_init (FwView *self)
                                                      "kinetic-scrolling");
   self->reading_ruler = g_settings_get_boolean (self->settings,
                                                  "reading-ruler");
+  self->loupe = g_settings_get_boolean (self->settings, "loupe");
   self->settings_changed_handler = g_signal_connect (
     self->settings, "changed::kinetic-scrolling",
     G_CALLBACK (on_kinetic_setting_changed), self);
   self->ruler_changed_handler = g_signal_connect (
     self->settings, "changed::reading-ruler",
     G_CALLBACK (on_ruler_setting_changed), self);
+  self->loupe_changed_handler = g_signal_connect (
+    self->settings, "changed::loupe",
+    G_CALLBACK (on_loupe_setting_changed), self);
 
   /* Scroll controller — capture-phase so we see wheel/trackpad events
    * before the parent GtkScrolledWindow's bubble-phase handler. The

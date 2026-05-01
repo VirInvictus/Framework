@@ -218,9 +218,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
   - **Study:** sioyek `.sioyek/scripts/dual_panelify.py` (crop algorithms).
   - *GTK Implementation:* Add a "Crop Margins" toggle. When active, scan the first few pages using MuPDF to calculate a unified content bounding box. Apply a translation matrix during the `fw_view_snapshot` phase to hide the whitespace margins globally.
 - [x] **Visual Ruler / Reading Mark (from Sioyek)** — Two semi-transparent black `gtk_snapshot_append_color` rects above and below a ~56-px clear band tracking mouse Y, gated by a `reading-ruler` GSettings boolean (default off). Toggleable via the **Reading Ruler** primary-menu entry or the **F8** keyboard shortcut. The shortcut is documented in the in-app Keyboard Shortcuts dialog and in `README.md`. Setting persists; menu checkmark and F8 stay in sync via `g_settings_create_action`. (v0.23)
-- [ ] **Interactive Loupe / Magnifying Glass (from YACReader)** — Useful for dense comic panels or small text where global zoom is too disruptive.
-  - **Study:** yacreader `.yacreader/YACReader/magnifying_glass.cpp` and `magnifying_glass.h`.
-  - *GTK Implementation:* Render a secondary `GtkSnapshot` clipped to a circular mask centered on the cursor, scaling the underlying Cairo surface texture by a user-defined multiplier (e.g., 2.5x).
+- [x] **Interactive Loupe / Magnifying Glass (from YACReader)** — `gtk_snapshot_push_rounded_clip` (corner radius == half side = circle) + scale-around-cursor transform + re-append the cached page texture inside the clip + thin border. Toggleable via primary-menu "Magnifying Loupe" or **F7** shortcut, gated by the `loupe` GSettings boolean. 80 px radius, 2.5× zoom — both hardcoded for simplicity. Documented in README and the in-app Keyboard Shortcuts dialog. (v0.24)
 
 ### Explicitly NOT borrowing
 

@@ -458,7 +458,13 @@ submit_next_jobs (FwCache *self)
     CacheEntry *entry = get_or_create_entry (self, pg);
     if (entry->rendering)
       continue;
-    if (entry->surface && entry->render_gen == self->render_gen)
+    /* Skip if this entry has already been rendered at the current
+     * generation — even if the render returned NULL. The previous
+     * `entry->surface && ...` check meant a failing render
+     * (e.g., the CBR backend's "zero-size render" for thumbnail-tier
+     * pages) would re-queue forever, since each retry produced another
+     * NULL and another retry. Sticky-fail until the next gen bump. */
+    if (entry->render_gen == self->render_gen)
       continue;
 
     entry->rendering = TRUE;

@@ -53,6 +53,20 @@ struct _FwDocumentCbr {
   GMutex        archive_lock;     /* serializes libarchive reads of self->path */
 
   volatile int  cancel_flag;      /* set during scrubbing aborts */
+
+  /* Per-page bytes cache (Phase 14 follow-up). RAR has no central
+   * directory, so seeking to entry N requires sequentially decompressing
+   * entries 1..N-1 — every page render previously did this from scratch.
+   * The cache stores already-extracted entry bytes keyed by page index,
+   * so subsequent renders of the same page skip straight to MuPDF
+   * decode. Bounded by `cache_byte_cap` (default 256 MB) with FIFO
+   * eviction — comics are read mostly linearly, so age-based works
+   * fine. Access serialized via `archive_lock` (same lock as the
+   * archive walk it short-circuits). */
+  GHashTable   *entry_cache;      /* int (page) → GBytes * (owned by table) */
+  GQueue       *cache_order;      /* GINT_TO_POINTER (page) FIFO, head = oldest */
+  gsize         cached_bytes;
+  gsize         cache_byte_cap;
 };
 
 static void fw_document_cbr_iface_init (FwDocumentInterface *iface);
@@ -119,15 +133,37 @@ cbr_open_reader (FwDocumentCbr *self)
   return a;
 }
 
-/* Extract the entry whose name matches self->entries[page].name into a
- * freshly malloced buffer. Caller frees with g_free. Returns NULL on
- * error or cancellation. */
-static guint8 *
-cbr_extract_entry (FwDocumentCbr *self, int page, size_t *out_size)
+/* Evict oldest cached entries (FIFO) until total cached bytes are at or
+ * under cap. Caller must hold self->archive_lock. */
+static void
+cbr_cache_evict_to_cap (FwDocumentCbr *self)
+{
+  while (self->cached_bytes > self->cache_byte_cap &&
+         !g_queue_is_empty (self->cache_order)) {
+    gpointer head = g_queue_pop_head (self->cache_order);
+    int pg = GPOINTER_TO_INT (head);
+    GBytes *evicted = g_hash_table_lookup (self->entry_cache,
+                                            GINT_TO_POINTER (pg));
+    if (evicted) {
+      self->cached_bytes -= g_bytes_get_size (evicted);
+      g_hash_table_remove (self->entry_cache, GINT_TO_POINTER (pg));
+    }
+  }
+}
+
+/* Return the raw bytes of the archive entry for `page` as a refcounted
+ * GBytes. Hit the per-page cache when possible; otherwise walk the
+ * archive (the slow path that this cache exists to avoid). The returned
+ * pointer is owned by the caller and must be unreffed with
+ * g_bytes_unref. Returns NULL on error or cancellation.
+ *
+ * The cache is serialized via archive_lock (same lock as the archive
+ * walk) so the slow-path walk and cache mutation never overlap. */
+static GBytes *
+cbr_extract_entry (FwDocumentCbr *self, int page)
 {
   if (page < 0 || page >= self->page_count)
     return NULL;
-  *out_size = 0;
 
   g_mutex_lock (&self->archive_lock);
 
@@ -136,6 +172,22 @@ cbr_extract_entry (FwDocumentCbr *self, int page, size_t *out_size)
     return NULL;
   }
 
+  /* Cache hit — bump the refcount and return immediately. The slow
+   * libarchive walk is the entire reason this cache exists; a hit here
+   * is the difference between a fan-spinning page flip and a quiet one. */
+  GBytes *cached = g_hash_table_lookup (self->entry_cache,
+                                         GINT_TO_POINTER (page));
+  if (cached) {
+    g_bytes_ref (cached);
+    FW_TRACE_DOC ("cbr cache hit: page=%d bytes=%zu",
+                  page, g_bytes_get_size (cached));
+    g_mutex_unlock (&self->archive_lock);
+    return cached;
+  }
+  FW_TRACE_DOC ("cbr cache miss: page=%d (walking archive)", page);
+
+  /* Cache miss — walk the archive (RAR has no central directory, so this
+   * decompresses every entry from 0..page sequentially) and extract. */
   struct archive *a = cbr_open_reader (self);
   if (!a) {
     g_mutex_unlock (&self->archive_lock);
@@ -144,6 +196,7 @@ cbr_extract_entry (FwDocumentCbr *self, int page, size_t *out_size)
 
   const char *target = self->entries[page].name;
   guint8 *bytes = NULL;
+  size_t  bytes_size = 0;
   struct archive_entry *entry;
 
   while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
@@ -175,13 +228,27 @@ cbr_extract_entry (FwDocumentCbr *self, int page, size_t *out_size)
       total += (size_t) got;
     }
     if (bytes)
-      *out_size = (size_t) sz;
+      bytes_size = (size_t) sz;
     break;
   }
 
   archive_read_free (a);
+
+  GBytes *out = NULL;
+  if (bytes) {
+    /* g_bytes_new_take adopts the buffer; no extra copy. */
+    out = g_bytes_new_take (bytes, bytes_size);
+    /* Insert into cache: hash table holds one ref, caller's return holds
+     * another. Push to FIFO order; evict oldest if over cap. */
+    g_bytes_ref (out);
+    g_hash_table_insert (self->entry_cache, GINT_TO_POINTER (page), out);
+    g_queue_push_tail (self->cache_order, GINT_TO_POINTER (page));
+    self->cached_bytes += bytes_size;
+    cbr_cache_evict_to_cap (self);
+  }
+
   g_mutex_unlock (&self->archive_lock);
-  return bytes;
+  return out;
 }
 
 /* Render one image entry into a freshly allocated cairo ARGB32 surface,
@@ -190,13 +257,12 @@ cbr_extract_entry (FwDocumentCbr *self, int page, size_t *out_size)
 static cairo_surface_t *
 cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 {
-  size_t sz = 0;
-  guint8 *bytes = cbr_extract_entry (self, page, &sz);
-  if (!bytes)
+  GBytes *gbytes = cbr_extract_entry (self, page);
+  if (!gbytes)
     return NULL;
 
   if (g_atomic_int_get (&self->cancel_flag)) {
-    g_free (bytes);
+    g_bytes_unref (gbytes);
     return NULL;
   }
 
@@ -208,6 +274,9 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
   fz_image   *img       = NULL;
   fz_pixmap  *cairo_pix = NULL;
   fz_device  *draw_dev  = NULL;
+
+  size_t       sz    = 0;
+  const guint8 *bytes = g_bytes_get_data (gbytes, &sz);
 
   fz_try (self->ctx) {
     buf = fz_new_buffer_from_copied_data (self->ctx, bytes, sz);
@@ -290,7 +359,7 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 
   g_mutex_unlock (&self->ctx_lock);
 
-  g_free (bytes);
+  g_bytes_unref (gbytes);
   return surface;
 }
 
@@ -360,11 +429,13 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
   /* Phase 2: peek at page 0 for representative dimensions; use as the
    * default for every page. Each page's actual dims override this when
    * it first renders. For 99% of comics every page is the same size, so
-   * the default is correct from the start. */
+   * the default is correct from the start. The bytes-cache populated
+   * here means the first real render of page 0 is also instant. */
   double default_w = 1280, default_h = 1920;
-  size_t first_sz = 0;
-  guint8 *first_bytes = cbr_extract_entry (self, 0, &first_sz);
-  if (first_bytes) {
+  GBytes *first_gbytes = cbr_extract_entry (self, 0);
+  if (first_gbytes) {
+    size_t first_sz = 0;
+    const guint8 *first_bytes = g_bytes_get_data (first_gbytes, &first_sz);
     g_mutex_lock (&self->ctx_lock);
     fz_buffer *buf = NULL;
     fz_image  *img = NULL;
@@ -383,7 +454,7 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
                  fz_caught_message (self->ctx));
     }
     g_mutex_unlock (&self->ctx_lock);
-    g_free (first_bytes);
+    g_bytes_unref (first_gbytes);
   }
 
   for (int i = 0; i < self->page_count; i++) {
@@ -400,6 +471,16 @@ static void
 cbr_close (FwDocument *doc)
 {
   FwDocumentCbr *self = FW_DOCUMENT_CBR (doc);
+
+  /* Drop the per-page bytes cache before any of the surrounding state.
+   * GBytes destroy via the hash's GDestroyNotify. */
+  if (self->entry_cache) {
+    g_hash_table_remove_all (self->entry_cache);
+  }
+  if (self->cache_order) {
+    g_queue_clear (self->cache_order);
+  }
+  self->cached_bytes = 0;
 
   if (self->entries) {
     for (int i = 0; i < self->page_count; i++)
@@ -552,6 +633,11 @@ fw_document_cbr_finalize (GObject *object)
   FwDocumentCbr *self = FW_DOCUMENT_CBR (object);
   g_mutex_clear (&self->ctx_lock);
   g_mutex_clear (&self->archive_lock);
+  g_clear_pointer (&self->entry_cache, g_hash_table_unref);
+  if (self->cache_order) {
+    g_queue_free (self->cache_order);
+    self->cache_order = NULL;
+  }
   G_OBJECT_CLASS (fw_document_cbr_parent_class)->finalize (object);
 }
 
@@ -568,6 +654,12 @@ fw_document_cbr_init (FwDocumentCbr *self)
 {
   g_mutex_init (&self->ctx_lock);
   g_mutex_init (&self->archive_lock);
+  /* GBytes destroy handled by GHashTable via g_bytes_unref. */
+  self->entry_cache = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                              NULL, (GDestroyNotify) g_bytes_unref);
+  self->cache_order = g_queue_new ();
+  self->cached_bytes = 0;
+  self->cache_byte_cap = 256u * 1024u * 1024u;  /* 256 MB */
 }
 
 FwDocumentCbr *

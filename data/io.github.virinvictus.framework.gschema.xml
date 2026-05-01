@@ -29,5 +29,17 @@
       </description>
     </key>
 
+    <key name="loupe" type="b">
+      <default>false</default>
+      <summary>Show a magnifying loupe at the cursor</summary>
+      <description>
+        When true, render a circular zoomed view of the underlying page
+        content centered on the mouse cursor. Useful for dense comic
+        panels, small chart axis labels, and footnote text on scanned
+        documents. The magnification factor is fixed at 2.5×. Toggleable
+        from the primary menu or via F7; the setting persists.
+      </description>
+    </key>
+
   </schema>
 </schemalist>
