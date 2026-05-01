@@ -13,6 +13,15 @@ The `FwView` + MuPDF + `FwCache` pipeline is not touched. Reflow runs
 in parallel as `FwReflowView` + `FwReflowDocument` + native GTK
 widgets, dispatched at file-open time.
 
+> **Where to read along.** Fractal's source is checked out in this
+> repo at `.fractal/` (gitignored, shallow clone — see `CLAUDE.md`
+> "Reference repos"). The list-model pattern this rewrite is named
+> after lives at `.fractal/src/utils/grouping_list_model/` and the
+> per-row widget factories at `.fractal/src/components/rows/`. Read
+> those alongside this doc — the architecture in section 2 is
+> directly informed by both. Komikku's reflow code at
+> `.komikku/komikku/reader/pager/` is the secondary reference.
+
 ---
 
 ## 1. Format scope
@@ -320,14 +329,34 @@ gives users an out for any document the new path mangles.
 
 ## 7. References
 
-- Komikku — `.komikku/` reference (Python/GTK4) for the GtkListView
-  reflow pattern. Source of the architecture sketch in section 2.
-- Foliate — feature reference but not architecture (their stack is
-  WebKitGTK + JavaScript ebook.js; we're going native GTK).
-- `.fractal/src/utils/grouping_list_model/` — shapes the dynamic-
-  height list-model pattern (Fractal is a chat app but the list
-  arch is exactly what reflowed paragraphs want).
-- Plato — `.plato/crates/core/src/document/` — the minimum-viable
-  format-handling code. Useful negative reference: Plato uses MuPDF
-  for everything and we're explicitly leaving MuPDF for these
-  formats.
+All reference repos are checked out shallowly under the Framework
+repo root, gitignored. See `CLAUDE.md` "Reference repos" for the
+per-repo file map. **Read these alongside this doc** — the
+architecture is directly informed by them, and the implementation
+will lift idioms from each.
+
+- **Fractal** — `.fractal/src/utils/grouping_list_model/` —
+  Rust/GTK4. The dynamic-height list-model pattern this rewrite is
+  named after. Fractal is a chat app, but the same architecture (a
+  `GListModel` of structurally-typed items, each rendered by a
+  factory into a native widget that wraps text natively) is exactly
+  what reflowed paragraphs want. Also `.fractal/src/components/rows/`
+  for the per-row widget factory idioms.
+- **Komikku** — `.komikku/komikku/reader/pager/` — Python/GTK4. Top-
+  tier native GNOME manga reader; secondary reference for the
+  reflow / paginated dispatch logic and chapter handling.
+- **Foliate** — *not in `.fractal/` checkouts.* Feature reference
+  only, not architecture: their stack is WebKitGTK + JavaScript
+  (ebook.js), so the implementation patterns don't transfer to
+  native GTK. Useful for "what does a finished ebook reader's UX
+  look like" but nothing else.
+- **Plato** — `.plato/crates/core/src/document/`. Minimum-viable
+  format-handling code, all routed through MuPDF. Useful as a
+  *negative* reference: we're explicitly leaving MuPDF for these
+  formats, so don't copy Plato's structure for the reflow path —
+  but its PDF/EPUB document module shows the smallest-possible
+  format-dispatch surface area.
+- **`kindle-unpack`** (not vendored — Python upstream) — the de
+  facto reference for the PalmDOC LZ77 decompressor and KF7/KF8
+  layout. Will need to be re-expressed in C; the algorithm is well
+  documented and small (~100 LOC).
