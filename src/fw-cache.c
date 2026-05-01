@@ -12,15 +12,44 @@
 
 #include <stdlib.h>
 
+/* A previous-zoom snapshot retained as a sharper-than-thumbnail
+ * placeholder during continuous Ctrl+scroll zoom. Each slot carries
+ * the (zoom, rotation, scale_factor) it was rendered at so
+ * `fw_cache_get_texture` can pick the closest match to the current
+ * zoom — Sioyek's `try_closest_rendered_page` pattern. */
 typedef struct {
-  cairo_surface_t *surface;        /* NULL if not yet rendered */
-  cairo_surface_t *prev_surface;   /* previous-gen surface for zoom placeholder */
+  cairo_surface_t *surface;
+  GdkTexture      *texture;
+  double           zoom;
+  int              rotation;
+  int              scale_factor;
+  gsize            size_bytes;
+} ZoomSlot;
+
+/* Bound on retained previous-zoom snapshots per page. 3 slots cover
+ * the typical "zoom in across 3-4 levels and back" workflow without
+ * pinning surfaces indefinitely. Each slot's bytes count toward
+ * total_cached_bytes so the cap still bounds RAM. */
+#define MAX_PREV_ZOOM_SLOTS 3
+
+typedef struct {
+  cairo_surface_t *surface;        /* current-gen surface, NULL if not rendered */
   GdkTexture      *texture;        /* cached GPU texture wrapping surface */
-  GdkTexture      *prev_texture;   /* cached texture for prev_surface */
+  double           zoom;            /* zoom at which `surface` was rendered */
+  int              rotation;        /* rotation at render time */
+  int              scale_factor;    /* device scale factor at render time */
+  gsize            size_bytes;     /* stride*height of `surface`, 0 if NULL */
+
+  /* Multi-zoom retention: most recent demoted slot at index 0. Older
+   * zooms slide right; oldest at MAX-1 evicts. fw_cache_get_texture
+   * picks the closest by zoom (matching rotation+scale) when the
+   * current-gen surface isn't ready. */
+  ZoomSlot         prev_slots[MAX_PREV_ZOOM_SLOTS];
+  int              prev_slot_count;
+  gsize            prev_slots_bytes; /* sum of prev_slots[*].size_bytes */
+
   gboolean         rendering;      /* TRUE if a job is in the pool for this page */
   guint            render_gen;     /* render params generation when this surface was created */
-  gsize            size_bytes;     /* stride*height of `surface`, 0 if NULL */
-  gsize            prev_size_bytes;/* stride*height of `prev_surface`, 0 if NULL */
   gint64           last_access_us; /* monotonic µs of last fw_cache_get_*: drives LRU eviction */
 } CacheEntry;
 
@@ -126,6 +155,22 @@ surface_byte_size (cairo_surface_t *s)
   return (gsize) stride * (gsize) height;
 }
 
+/* Free one ZoomSlot in place — texture before surface, same lifecycle
+ * rule as the entry path. Caller is responsible for byte accounting. */
+static void
+zoom_slot_clear (ZoomSlot *slot)
+{
+  if (slot->texture) {
+    g_object_unref (slot->texture);
+    slot->texture = NULL;
+  }
+  if (slot->surface) {
+    cairo_surface_destroy (slot->surface);
+    slot->surface = NULL;
+  }
+  slot->size_bytes = 0;
+}
+
 static void
 cache_entry_free (CacheEntry *entry)
 {
@@ -135,16 +180,14 @@ cache_entry_free (CacheEntry *entry)
    *
    * NOTE: this function does NOT update FwCache->total_cached_bytes —
    * it has no access to self. Callers that explicitly remove entries
-   * from self->pages must subtract entry->size_bytes + entry->prev_size_bytes
+   * from self->pages must subtract entry->size_bytes + entry->prev_slots_bytes
    * BEFORE the remove. The dispose path resets total_cached_bytes to 0. */
   if (entry->texture)
     g_object_unref (entry->texture);
-  if (entry->prev_texture)
-    g_object_unref (entry->prev_texture);
   if (entry->surface)
     cairo_surface_destroy (entry->surface);
-  if (entry->prev_surface)
-    cairo_surface_destroy (entry->prev_surface);
+  for (int i = 0; i < entry->prev_slot_count; i++)
+    zoom_slot_clear (&entry->prev_slots[i]);
   g_free (entry);
 }
 
@@ -430,20 +473,14 @@ render_worker (gpointer data, gpointer user_data)
   if (job->render_gen == self->render_gen) {
     /* Surface was rendered with correct zoom/rotation — keep it.
      * Even if cancel_gen changed (user scrolled), the surface is still valid
-     * for display since the render parameters haven't changed. */
+     * for display since the render parameters haven't changed.
+     *
+     * Multi-zoom retention: prev_slots are intentionally NOT cleared
+     * here — they were demoted at fw_cache_start time and serve as
+     * "closer than thumbnail" placeholders until evicted by zoom-cap
+     * shifting or by the bytes-cap LRU pass. */
     FW_TRACE_CACHE ("worker done: page=%d surface=%p", job->page, (void *) surface);
     CacheEntry *entry = get_or_create_entry (self, job->page);
-    /* Fresh surface at current generation — drop any stale placeholder */
-    if (entry->prev_texture) {
-      g_object_unref (entry->prev_texture);
-      entry->prev_texture = NULL;
-    }
-    if (entry->prev_surface) {
-      cairo_surface_destroy (entry->prev_surface);
-      entry->prev_surface = NULL;
-    }
-    self->total_cached_bytes -= entry->prev_size_bytes;
-    entry->prev_size_bytes = 0;
     /* Replace current surface and its cached texture */
     if (entry->texture) {
       g_object_unref (entry->texture);
@@ -452,9 +489,12 @@ render_worker (gpointer data, gpointer user_data)
     if (entry->surface)
       cairo_surface_destroy (entry->surface);
     self->total_cached_bytes -= entry->size_bytes;
-    entry->surface    = surface;
-    entry->texture    = texture_from_surface (surface);
-    entry->size_bytes = surface_byte_size (surface);
+    entry->surface       = surface;
+    entry->texture       = texture_from_surface (surface);
+    entry->size_bytes    = surface_byte_size (surface);
+    entry->zoom          = job->zoom;
+    entry->rotation      = job->rotation;
+    entry->scale_factor  = self->scale_factor;
     self->total_cached_bytes += entry->size_bytes;
     entry->rendering  = FALSE;
     entry->render_gen = job->render_gen;
@@ -554,31 +594,51 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
   self->cancel_gen++;
 
   /* Do NOT clear existing cache — keep old surfaces visible while new
-   * ones render. Move current surfaces to prev_surface so they serve as
-   * scaled placeholders during the re-render transition. */
+   * ones render. Demote current surface to prev_slots[0] (shifting
+   * older slots right; oldest evicts at MAX_PREV_ZOOM_SLOTS) so a
+   * scaled placeholder is available during the re-render transition.
+   * With multi-slot retention, fw_cache_get_texture later picks the
+   * slot whose zoom is closest to the new self->zoom — Sumatra/Sioyek
+   * try_closest_rendered_page pattern. */
   GHashTableIter iter;
   gpointer key, value;
   g_hash_table_iter_init (&iter, self->pages);
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     CacheEntry *entry = value;
     entry->rendering = FALSE;  /* allow re-submission */
-    /* Preserve the old surface and texture as a zoom transition placeholder */
-    if (entry->surface && entry->render_gen != self->render_gen) {
-      if (entry->prev_texture) {
-        g_object_unref (entry->prev_texture);
-        entry->prev_texture = NULL;
-      }
-      if (entry->prev_surface)
-        cairo_surface_destroy (entry->prev_surface);
-      self->total_cached_bytes -= entry->prev_size_bytes;
-      entry->prev_surface     = entry->surface;
-      entry->prev_texture     = entry->texture;
-      entry->prev_size_bytes  = entry->size_bytes;
-      entry->surface     = NULL;
-      entry->texture     = NULL;
-      entry->size_bytes  = 0;
-      FW_TRACE_MEM ("prev_surface stash: page=%d", GPOINTER_TO_INT (key));
+    if (!entry->surface || entry->render_gen == self->render_gen)
+      continue;
+
+    /* Evict the oldest slot if we're at cap. */
+    if (entry->prev_slot_count == MAX_PREV_ZOOM_SLOTS) {
+      ZoomSlot *oldest = &entry->prev_slots[MAX_PREV_ZOOM_SLOTS - 1];
+      self->total_cached_bytes -= oldest->size_bytes;
+      entry->prev_slots_bytes  -= oldest->size_bytes;
+      zoom_slot_clear (oldest);
+      entry->prev_slot_count = MAX_PREV_ZOOM_SLOTS - 1;
     }
+    /* Shift slots right to make room at index 0. */
+    for (int i = entry->prev_slot_count; i > 0; i--)
+      entry->prev_slots[i] = entry->prev_slots[i - 1];
+    /* Demote the current surface into the freed slot 0. Bytes stay
+     * counted in total_cached_bytes — they just move from
+     * size_bytes to prev_slots_bytes. */
+    entry->prev_slots[0] = (ZoomSlot){
+      .surface      = entry->surface,
+      .texture      = entry->texture,
+      .zoom         = entry->zoom,
+      .rotation     = entry->rotation,
+      .scale_factor = entry->scale_factor,
+      .size_bytes   = entry->size_bytes,
+    };
+    entry->prev_slot_count++;
+    entry->prev_slots_bytes += entry->size_bytes;
+    entry->surface    = NULL;
+    entry->texture    = NULL;
+    entry->size_bytes = 0;
+    FW_TRACE_MEM ("zoom_slot demote: page=%d zoom=%.2f slot_count=%d",
+                  GPOINTER_TO_INT (key), entry->prev_slots[0].zoom,
+                  entry->prev_slot_count);
   }
 
   /* Submit only pages in the priority window.  If no priority has been
@@ -637,7 +697,7 @@ fw_cache_invalidate_page (FwCache *self, int page)
   g_mutex_lock (&self->lock);
   CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (page));
   if (entry)
-    self->total_cached_bytes -= entry->size_bytes + entry->prev_size_bytes;
+    self->total_cached_bytes -= entry->size_bytes + entry->prev_slots_bytes;
   g_hash_table_remove (self->pages, GINT_TO_POINTER (page));
   g_mutex_unlock (&self->lock);
 }
@@ -765,7 +825,7 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
       int pg = g_array_index (victims, LruVictim, i).page;
       CacheEntry *e = g_hash_table_lookup (self->pages, GINT_TO_POINTER (pg));
       if (!e) continue;
-      gsize entry_bytes = e->size_bytes + e->prev_size_bytes;
+      gsize entry_bytes = e->size_bytes + e->prev_slots_bytes;
       self->total_cached_bytes -= entry_bytes;
       freed += entry_bytes;
       dropped++;
@@ -863,22 +923,6 @@ fw_cache_page_ready (FwCache *self, int page)
   return ready;
 }
 
-cairo_surface_t *
-fw_cache_get_prev_page (FwCache *self, int page)
-{
-  g_return_val_if_fail (FW_IS_CACHE (self), NULL);
-
-  g_mutex_lock (&self->lock);
-  CacheEntry *entry = g_hash_table_lookup (self->pages,
-                                            GINT_TO_POINTER (page));
-  cairo_surface_t *surface = NULL;
-  if (entry && entry->prev_surface)
-    surface = cairo_surface_reference (entry->prev_surface);
-  g_mutex_unlock (&self->lock);
-
-  return surface;
-}
-
 GdkTexture *
 fw_cache_get_texture (FwCache *self, int page)
 {
@@ -887,14 +931,35 @@ fw_cache_get_texture (FwCache *self, int page)
   g_mutex_lock (&self->lock);
   CacheEntry *entry = g_hash_table_lookup (self->pages,
                                             GINT_TO_POINTER (page));
-  /* Prefer current-gen texture, fall back to prev-gen texture for zoom
-   * placeholder. Returns a borrowed reference — caller must not unref. */
+  /* Prefer current-gen texture. When unavailable, return the
+   * previous-zoom slot whose zoom is closest to the current cache
+   * zoom (matching rotation+scale_factor) — Sioyek's
+   * try_closest_rendered_page idiom. GTK auto-scales the texture into
+   * whatever rect the view paints into, so a slot rendered at 2.4×
+   * shown at 2.5× is much sharper than one rendered at 1.0×. Returns
+   * a borrowed reference — caller must not unref. */
   GdkTexture *tex = NULL;
   if (entry) {
-    if (entry->texture && entry->render_gen == self->render_gen)
+    if (entry->texture && entry->render_gen == self->render_gen) {
       tex = entry->texture;
-    else if (entry->prev_texture)
-      tex = entry->prev_texture;
+    } else if (entry->prev_slot_count > 0) {
+      double target = self->zoom;
+      double best_diff = -1;
+      const ZoomSlot *best = NULL;
+      for (int i = 0; i < entry->prev_slot_count; i++) {
+        const ZoomSlot *s = &entry->prev_slots[i];
+        if (!s->texture) continue;
+        if (s->rotation != self->rotation) continue;
+        if (s->scale_factor != self->scale_factor) continue;
+        double diff = fabs (s->zoom - target);
+        if (best_diff < 0 || diff < best_diff) {
+          best_diff = diff;
+          best = s;
+        }
+      }
+      if (best)
+        tex = best->texture;
+    }
     if (tex)
       entry->last_access_us = g_get_monotonic_time ();
   }

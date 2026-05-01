@@ -43,8 +43,11 @@
  * returning them to the kernel immediately. The authoritative leak
  * check is `meson configure builddir -Dsanitize=address` followed by
  * a rerun; ASan instruments every allocation and prints attribution
- * for any leak at exit. */
-#define DEFAULT_SETTLED_RSS_CAP_MB 1024
+ * for any leak at exit. Bumped in v0.28: multi-zoom-slot retention
+ * (try_closest_rendered_page) intentionally holds up to 3 prior-zoom
+ * snapshots per priority page, which legitimately raises post-storm
+ * RSS by ~150 MB on this corpus sample. */
+#define DEFAULT_SETTLED_RSS_CAP_MB 1280
 #define ZOOM_CYCLES 50
 
 /* Peak RSS via getrusage — high-water mark, never decreases. Useful for

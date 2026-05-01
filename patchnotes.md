@@ -2,6 +2,23 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.28.0 (2026-05-01)
+
+*`try_closest_rendered_page` zoom transition — Phase 11 Tier 2.* Continuous Ctrl+scroll zoom no longer falls back to a single-zoom prev_texture (which got progressively blurrier as the user crossed many zoom levels). Each `CacheEntry` now retains up to 3 prior-zoom snapshots; `fw_cache_get_texture` picks the slot whose zoom is closest to the current target (matching rotation + scale_factor) and returns it for GTK to auto-scale into the current rect. A user zoom-storming across 5 levels now sees their just-rendered 2.4× snapshot scaled 1.04× to fill a 2.5× rect — sharp — instead of the original 1.0× snapshot scaled 2.5× — blurry.
+
+### Implementation
+- New `ZoomSlot` struct: `(surface, texture, zoom, rotation, scale_factor, size_bytes)`. `MAX_PREV_ZOOM_SLOTS = 3` per page; oldest evicts on overflow.
+- `CacheEntry` fields collapsed: dropped `prev_surface`/`prev_texture`/`prev_size_bytes`; added `prev_slots[3]` + `prev_slot_count` + `prev_slots_bytes`. Current-surface params (`zoom`, `rotation`, `scale_factor`) tracked at the entry level so demotion can capture them.
+- `fw_cache_start` (zoom/rotation change): demotes the existing current surface into `prev_slots[0]`, shifting older slots right; oldest at index 2 frees on overflow. Bytes transfer from `size_bytes` → `prev_slots_bytes` without touching `total_cached_bytes` (no double-count).
+- Worker store path simplified: stale-discard logic unchanged; the "drop stale prev" block is gone since prev_slots are intentionally retained until explicit eviction.
+- `fw_cache_get_texture` walks `prev_slots[]` and returns the slot with minimal `|zoom − target|` (when current isn't ready). GTK's `gtk_snapshot_append_texture` already auto-scales — the view doesn't need a transform change.
+- `fw_cache_get_prev_page` was an unused public API leftover; dropped from the header.
+
+### Stress test cap bump
+`stress-zoom-storm`'s settled-RSS cap raised from 1024 → 1280 MB. Multi-slot retention legitimately holds ~150 MB more cache memory after a 50-cycle zoom storm on the Effective Java sample — the bytes are still bounded by `byte_cap` (default 512 MB cache surfaces); the RSS rise is mostly glibc retention from the higher allocation churn. ASan-clean across all 5 stress tests.
+
+---
+
 ## v0.27.2 (2026-05-01)
 
 *Auto-resize the window for spreads, restore on the next page.* When a wide spread becomes the active row (centerfold in a CBZ, or a paired pair wider than the viewport in facing-pages mode), the window grows horizontally so the spread fits without a horizontal scrollbar. When the user scrolls/pages past the spread back to a normal row, the window restores the width it had before we grew. The interaction tracks a single baseline width so we never shrink past the user's manual sizing — only restore the size we captured before our own grow.

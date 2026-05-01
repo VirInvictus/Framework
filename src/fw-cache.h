@@ -38,12 +38,11 @@ cairo_surface_t *fw_cache_get_page      (FwCache         *self,
 gboolean         fw_cache_page_ready    (FwCache         *self,
                                          int              page);
 
-cairo_surface_t *fw_cache_get_prev_page (FwCache         *self,
-                                         int              page);
-
 /* Get cached GdkTexture for a page — reused across frames so we don't
  * allocate a new texture wrapper every snapshot(). Returns a borrowed
- * reference (do not unref). Returns NULL if surface isn't rendered. */
+ * reference (do not unref). Falls back to the closest-zoom previous
+ * snapshot when the current-gen texture isn't ready (try_closest
+ * pattern from Sumatra/Sioyek). Returns NULL when nothing is cached. */
 GdkTexture      *fw_cache_get_texture    (FwCache         *self,
                                           int              page);
 
