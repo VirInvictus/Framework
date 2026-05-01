@@ -6,6 +6,7 @@
 #include "fw-config.h"
 #include "fw-application.h"
 #include "fw-debug.h"
+#include "fw-sandbox.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -126,6 +127,15 @@ main (int argc, char *argv[])
   }
 
   fw_debug_init ();
+
+  /* Apply Landlock LSM hardening before launching the app loop.
+   * Drops EXECUTE + MAKE_* filesystem rights so a malicious document
+   * exploiting a backend (MuPDF, DjVuLibre, libarchive) can't
+   * escalate to spawning a shell or planting a backdoor file.
+   * Read/write_file stay allowed so state.json, save-attachments,
+   * and print spool writes continue to work. No-op on non-Linux
+   * and on kernels without Landlock support. */
+  fw_sandbox_drop_execute ();
 
   g_autoptr (FwApplication) app = fw_application_new ();
   return g_application_run (G_APPLICATION (app), argc, argv);

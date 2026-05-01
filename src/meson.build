@@ -35,6 +35,7 @@ framework_lib_sources = files(
   'fw-search.c',
   'fw-state.c',
   'fw-debug.c',
+  'fw-sandbox.c',
 )
 
 framework_main_sources = files('main.c')

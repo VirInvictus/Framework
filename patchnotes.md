@@ -2,6 +2,26 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.38.0 (2026-05-01)
+
+*Landlock LSM hardening — borrowed from zathura.* The binary now drops filesystem-execute and create-special-file-type permissions via Linux's [Landlock](https://landlock.io/) LSM at process startup. If a malicious document exploits MuPDF / DjVuLibre / libarchive into RCE, the foothold can no longer escalate by `execve()`'ing a shell or by mknod'ing a backdoor — the kernel rejects the syscall before the libc sees it. Read and `WRITE_FILE` rights stay allowed so state.json persistence, save-attachments, and print spool writes continue to work.
+
+`FW_TRACE_WINDOW` logs whether the sandbox applied:
+
+```
+[86485.3739] [window] landlock applied: dropped EXECUTE + MAKE_* (abi=7)
+```
+
+### Implementation
+New `src/fw-sandbox.{c,h}` ports `.zathura/zathura/landlock.c`'s pattern (Zlib license, compatible) into a single `fw_sandbox_drop_execute()` call invoked from `main.c` after `fw_debug_init()` and before `g_application_run()`. Header presence is auto-detected via `__has_include(<linux/landlock.h>)`; non-Linux builds and pre-Landlock kernels gracefully fall through to a logged no-op.
+
+The Framework variant intentionally stops short of zathura's full `landlock_restrict_write` (which limits writes to `XDG_DATA` only). That stronger lockdown would break save-attachments and print spool, both of which write to user-picked paths outside `XDG_DATA`. If the threat model justifies losing those features, the path-beneath restriction can land in Phase 15 alongside the Flatpak permissions audit.
+
+### Why this complements Flatpak
+Flatpak's portal locks the *filesystem* via xdg-desktop-portal — the user picks a file, the portal hands the app a single fd. Landlock locks the *process* via the kernel — even if Flatpak isn't in use (DNF install, `meson install`), the lockdown applies. Belt and suspenders.
+
+---
+
 ## v0.37.0 (2026-05-01)
 
 *Filename-based double-spread detection — borrowed from YACReader.* Aspect-ratio detection (v0.27.1) catches centerfolds whose image is genuinely wider than tall, but it misses scanlation rips where the spread image has the same dimensions as a single page and the spread-ness is encoded in the *filename* — `chapter01_034035.jpg` etc. New CBR-backend `is_spread_filename` interface method ports YACReader's `common/comic.cpp:925-1028` algorithm:
