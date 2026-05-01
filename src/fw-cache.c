@@ -387,6 +387,32 @@ render_worker (gpointer data, gpointer user_data)
 
   /* Store result */
   g_mutex_lock (&self->lock);
+
+  /* If the render returned NULL because cancel_gen was bumped during
+   * the render (PDF fz_cookie abort, CBR cancel_flag flip), treat it
+   * as a transient cancellation — clear `rendering` but DON'T mark
+   * `render_gen=current`. Otherwise the v0.24.0 sticky-fail check in
+   * `submit_next_jobs` would skip this page until the next zoom or
+   * rotation change, leaving it stuck on the thumbnail tier (the
+   * "page stays blurred until I zoom" symptom).
+   *
+   * Distinguishing "cancellation NULL" from "deterministic-failure
+   * NULL" (e.g. CBR's zero-size render): we look at whether the
+   * cancel generation was bumped during the render. Bumped → cancel,
+   * retry on next priority push. Unbumped → real failure, sticky. */
+  if (surface == NULL && job->cancel_gen != self->cancel_gen
+      && job->render_gen == self->render_gen) {
+    FW_TRACE_CACHE ("worker cancelled mid-render: page=%d (no sticky fail)",
+                    job->page);
+    CacheEntry *entry = g_hash_table_lookup (self->pages,
+                                              GINT_TO_POINTER (job->page));
+    if (entry) entry->rendering = FALSE;
+    submit_next_jobs (self);
+    g_mutex_unlock (&self->lock);
+    g_free (job);
+    return;
+  }
+
   if (job->render_gen == self->render_gen) {
     /* Surface was rendered with correct zoom/rotation — keep it.
      * Even if cancel_gen changed (user scrolled), the surface is still valid

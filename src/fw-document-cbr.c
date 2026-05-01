@@ -267,6 +267,10 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
   }
 
   cairo_surface_t *surface = NULL;
+  /* Set when the zero-size sub-pixel case fires below — benign
+   * (zoom × image dims rounds to <1 px) so the catch handler
+   * suppresses the warning. Genuine MuPDF errors still warn. */
+  volatile gboolean silent_zero_size = FALSE;
 
   g_mutex_lock (&self->ctx_lock);
 
@@ -304,8 +308,10 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 
     int w = pixel_rect.x1 - pixel_rect.x0;
     int h = pixel_rect.y1 - pixel_rect.y0;
-    if (w < 1 || h < 1)
+    if (w < 1 || h < 1) {
+      silent_zero_size = TRUE;
       fz_throw (self->ctx, FZ_ERROR_GENERIC, "zero-size render");
+    }
 
     /* Allocate the destination cairo surface and clear it to white so
      * any narrower image doesn't leak garbage in the margins. */
@@ -349,8 +355,9 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
     if (buf)       fz_drop_buffer  (self->ctx, buf);
   }
   fz_catch (self->ctx) {
-    g_warning ("CBR: render failed page %d: %s",
-               page, fz_caught_message (self->ctx));
+    if (!silent_zero_size)
+      g_warning ("CBR: render failed page %d: %s",
+                 page, fz_caught_message (self->ctx));
     if (surface) {
       cairo_surface_destroy (surface);
       surface = NULL;

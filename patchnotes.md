@@ -2,6 +2,38 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.24.1 (2026-05-01)
+
+*Bugfixes — fit-width, zoom-anchor, sticky-blur, scroll handling.* No new features; sanding down the rough edges that surfaced once the loupe and CBR cache started exercising paths in new combinations.
+
+---
+
+### Per-Page Fit-Width
+`fw_view_fit_width_zoom` previously found the *widest page across the entire document* and computed `viewport_w / max_page_w`. For a comic CBZ with a single centerfold spread, that made every normal page render at ~35% — empty viewport on either side and the user had to manually zoom in. Now it uses the *current visible page's width*, so normal pages fill the viewport. Scrolling onto a wider spread page makes that page wider than the viewport and adds horizontal scroll until the user hits Ctrl+1 again on it.
+
+For uniform-width docs (PDF textbooks, DjVu, EPUB), behavior is unchanged: every page is the same width so per-page and document-wide are equivalent.
+
+### Per-Page Horizontal Centering in Snapshot
+Companion to the fit-width fix. The snapshot's centering math was `if (max_width <= widget_width) center-in-viewport, else position-in-canvas`. With per-page fit-width on Berserk, normal pages were narrow, max_width was the spread page's width, and the else branch positioned normal pages offset within the wider canvas. Changed the condition to `pw <= widget_width` — each page centers in the viewport when *it* fits, regardless of document-wide max. Mirrored in `fw_view_widget_to_doc` so click coordinates still map correctly.
+
+### Page-Fraction Horizontal Anchor in `fw_view_set_zoom`
+The earlier "fraction of canvas" horizontal anchor for zoom-preserving-focus broke on mixed-width docs because it anchored to the canvas (max_width) rather than the page the user was looking at. Replaced with a page-fraction anchor: capture the fraction of the current page's width that's at the viewport's horizontal center before zoom, derive the scroll_x that puts the same page-fraction at viewport center after zoom. Zooming in past fit-width now keeps the focal point centered instead of jumping to the page's left edge.
+
+### Sticky-Blur Bugfix in Worker Store Path
+The v0.24.0 sticky-fail change (skip re-rendering entries with `render_gen == self->render_gen`) was correct for deterministic failures (CBR's "zero-size render") but wrong for *transient* failures — specifically, fz_cookie cancellations that fire mid-render. When a worker's render is aborted by `cookie->abort = 1` from the SCRUBBING transition, the render returns NULL, the worker reaches the success branch with `render_gen` matching, stores `surface=NULL` and `render_gen=current`. The page then stayed stuck at thumbnail resolution until the next render_gen bump (zoom or rotation).
+
+Fix: in the worker store path, distinguish "cancelled mid-render" from "actually failed" by checking whether `cancel_gen` was bumped during the render. Bumped + NULL surface → transient cancellation, clear `rendering` but don't sticky-fail. Unbumped + NULL → real failure, stays sticky as designed in v0.24.0.
+
+### Scroll Handling Returned to Native GTK
+Removed the per-event scroll cap that the v0.14 work introduced. With the v0.14 GThreadPool sort-function priority dispatch and v0.17 fz_cookie mid-render abort already in place, the cache responds to scroll velocity natively without needing an input-side cap. The `kinetic-scrolling` GSettings boolean now drives `gtk_scrolled_window_set_kinetic_scrolling()` on the document scrolled window — the standard knob — instead of the custom cap-vs-momentum toggle. Default flipped from false to true.
+
+The view's own `GSettings` handle stays for `reading-ruler` and `loupe`; the kinetic-scrolling-related fields/handlers are gone. The window owns the kinetic setting now.
+
+### Zero-Size Render Warning Suppressed
+The CBR backend's "zero-size render" condition (zoom × image dimensions rounds below 1 px) is benign — the cache already handles NULL surfaces gracefully via the thumbnail fallback. The `g_warning` was log noise. Now suppressed via a `volatile gboolean silent_zero_size` flag set before fz_throw and checked in fz_catch; genuine MuPDF errors still warn.
+
+---
+
 ## v0.24.0 (2026-05-01)
 
 *Magnifying loupe, CBR bytes cache, and a runaway-render bugfix.* Three things shipped together: the third Phase 14 polish item (loupe), a long-pending CBR backend optimization (per-page bytes cache), and a freshly-discovered cache infinite-loop bug uncovered by the loupe's per-frame redraws.

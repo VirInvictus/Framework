@@ -80,12 +80,22 @@ struct _FwWindow {
   GFileMonitor         *file_monitor;
   guint                 reload_debounce_id;  /* g_timeout source for debouncing
                                               * rapid CHANGED events during a write */
+
+  /* Settings — kinetic-scrolling drives gtk_scrolled_window_set_kinetic_scrolling
+   * on self->scroll. The view's scroll-related setting fields are gone now
+   * that we don't intercept scroll events; this is the single point of
+   * truth for the kinetic toggle. */
+  GSettings            *settings;
+  gulong                settings_kinetic_handler;
 };
 
 G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
 
-static void fw_window_save_state (FwWindow *self);
-static void nav_push_current     (FwWindow *self);
+static void fw_window_save_state           (FwWindow *self);
+static void nav_push_current               (FwWindow *self);
+static void on_kinetic_setting_changed     (GSettings *settings,
+                                            const char *key,
+                                            gpointer user_data);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -1249,7 +1259,8 @@ fw_window_constructed (GObject *object)
   gtk_scrolled_window_set_policy (self->scroll,
                                    GTK_POLICY_AUTOMATIC,
                                    GTK_POLICY_AUTOMATIC);
-  gtk_scrolled_window_set_kinetic_scrolling (self->scroll, TRUE);
+  /* kinetic-scrolling reflected from GSettings further below
+   * (after self->settings is allocated). */
 
   /* Track current page as user scrolls */
   GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
@@ -1419,18 +1430,33 @@ fw_window_constructed (GObject *object)
    * to the GSettings key — the menu checkmark stays in sync, and
    * activating the action flips the setting (which fw-view listens to). */
   {
-    g_autoptr (GSettings) settings = g_settings_new (APP_ID);
+    /* Long-lived settings handle on the window — used both for the
+     * stateful actions wired into the menu *and* for the
+     * kinetic-scrolling change signal that drives the scrolled
+     * window. */
+    self->settings = g_settings_new (APP_ID);
+
     g_autoptr (GAction) kinetic_action =
-      g_settings_create_action (settings, "kinetic-scrolling");
+      g_settings_create_action (self->settings, "kinetic-scrolling");
     g_action_map_add_action (G_ACTION_MAP (self), kinetic_action);
 
     g_autoptr (GAction) ruler_action =
-      g_settings_create_action (settings, "reading-ruler");
+      g_settings_create_action (self->settings, "reading-ruler");
     g_action_map_add_action (G_ACTION_MAP (self), ruler_action);
 
     g_autoptr (GAction) loupe_action =
-      g_settings_create_action (settings, "loupe");
+      g_settings_create_action (self->settings, "loupe");
     g_action_map_add_action (G_ACTION_MAP (self), loupe_action);
+
+    /* Apply kinetic-scrolling to the scrolled window now and on every
+     * change. The previous hardcoded TRUE is now driven by the user's
+     * setting. */
+    gtk_scrolled_window_set_kinetic_scrolling (
+      self->scroll,
+      g_settings_get_boolean (self->settings, "kinetic-scrolling"));
+    self->settings_kinetic_handler = g_signal_connect (
+      self->settings, "changed::kinetic-scrolling",
+      G_CALLBACK (on_kinetic_setting_changed), self);
   }
 
   /* ── Arrow key scrolling & Ctrl+Scroll zoom ── */
@@ -1519,6 +1545,21 @@ restore_state_tick (GtkWidget *widget, GdkFrameClock *clock,
   update_page_entry (self);
   self->_restore_pending = FALSE;
   return G_SOURCE_REMOVE;
+}
+
+/* ── Settings change handlers ────────────────────────────────────── */
+
+static void
+on_kinetic_setting_changed (GSettings *settings, const char *key,
+                            gpointer user_data)
+{
+  (void) key;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->scroll)
+    return;
+  gboolean kinetic = g_settings_get_boolean (settings, "kinetic-scrolling");
+  gtk_scrolled_window_set_kinetic_scrolling (self->scroll, kinetic);
+  FW_TRACE_WINDOW ("kinetic-scrolling=%d", kinetic);
 }
 
 /* ── Auto-reload via GFileMonitor ────────────────────────────────── */
@@ -1767,6 +1808,13 @@ fw_window_dispose (GObject *object)
 
   fw_window_save_state (self);
   fw_window_stop_monitor (self);
+
+  if (self->settings) {
+    if (self->settings_kinetic_handler)
+      g_signal_handler_disconnect (self->settings, self->settings_kinetic_handler);
+    self->settings_kinetic_handler = 0;
+    g_clear_object (&self->settings);
+  }
 
   /* Disconnect view from document/cache FIRST — the view holds refs to both,
    * and GTK widget teardown order is unpredictable. Without this, the cache

@@ -15,13 +15,6 @@
 
 #define PAGE_GAP 8
 
-/* Per-event scroll cap when kinetic scrolling is OFF (default).
- * Bounds how far a single wheel tick or trackpad event can move the
- * viewport, so the cache is never asked to render faster than it can
- * keep up. Wheel ticks are converted from unit-scale to pixels via
- * SCROLL_WHEEL_STEP first, then clamped to MAX_SCROLL_PER_EVENT. */
-#define SCROLL_WHEEL_STEP    60.0
-#define MAX_SCROLL_PER_EVENT 90.0
 
 struct _FwView {
   GtkWidget    parent_instance;
@@ -78,14 +71,11 @@ struct _FwView {
   gulong       search_hits_handler;
   gulong       search_current_handler;
 
-  /* Settings — `kinetic-scrolling` gates whether wheel/trackpad events
-   * apply their full delta (true) or are capped per-event (false, default).
-   * The cached `kinetic_scrolling` flag is updated live via the "changed"
-   * signal so the toggle takes effect without restart. */
+  /* Settings drive the reading-ruler and loupe live-toggles.
+   * Kinetic-scrolling is handled by FwWindow on the parent scrolled
+   * window — view doesn't need to know about it. */
   GSettings   *settings;
-  gulong       settings_changed_handler;
   gulong       ruler_changed_handler;
-  gboolean     kinetic_scrolling;
 
   /* Reading ruler — when active, paint a dark dimming overlay over the
    * whole widget with a clear horizontal band tracking the mouse Y.
@@ -377,10 +367,14 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
     if (py > vis_bottom)
       break;
 
-    /* Position relative to viewport — center if narrower than viewport,
-     * otherwise offset by horizontal scroll */
+    /* Position the page horizontally. Per-page sizing rather than
+     * document-wide so a comic with one wide centerfold doesn't push
+     * every normal page off-center. If THIS page fits in the viewport,
+     * center it there; if it's wider than the viewport, fall back to
+     * canvas-relative positioning (centered in `max_width`) so the
+     * horizontal scrollbar still spans the doc's widest content. */
     double x;
-    if (self->max_width <= widget_width)
+    if (pw <= widget_width)
       x = (widget_width - pw) / 2.0;
     else
       x = (self->max_width - pw) / 2.0 - scroll_x;
@@ -538,7 +532,7 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
         double ph = self->page_heights[page_under_cursor];
         double py = self->page_y_offsets[page_under_cursor];
         double page_widget_x;
-        if (self->max_width <= widget_width)
+        if (pw <= widget_width)
           page_widget_x = (widget_width - pw) / 2.0;
         else
           page_widget_x = (self->max_width - pw) / 2.0 - scroll_x;
@@ -724,7 +718,7 @@ fw_view_widget_to_doc (FwView *self, double widget_x, double widget_y,
 
     /* Compute page X position (mirrors snapshot centering logic) */
     double page_x;
-    if (self->max_width <= widget_width)
+    if (pw <= widget_width)
       page_x = (widget_width - pw) / 2.0;
     else
       page_x = (self->max_width - pw) / 2.0 - scroll_x;
@@ -1063,32 +1057,84 @@ fw_view_set_zoom (FwView *self, double zoom)
   g_return_if_fail (FW_IS_VIEW (self));
   FW_TRACE_VIEW ("set_zoom: %.2f → %.2f", self->zoom, zoom);
 
-  /* Preserve scroll position across zoom changes */
+  /* Preserve scroll position across zoom changes on both axes.
+   *
+   * Vertical anchor: page index + intra-page fraction. Same as before.
+   *
+   * Horizontal anchor: fraction within the *current page* of where
+   * the viewport's horizontal center sits. Anchoring to the page (not
+   * the canvas) is what makes zoom-in feel natural on mixed-width
+   * docs — at fit-width on a comic with a wider centerfold, the
+   * normal page fills the viewport and the canvas is wider than the
+   * page; "fraction of canvas" would put the viewport-center anchor
+   * at 33% (because canvas extends past the page) whereas
+   * "fraction of current page" correctly identifies the user as
+   * looking at the page's center (50%). After zoom, the same
+   * page-fraction should still be at viewport center. */
   int anchor_page = -1;
-  double anchor_frac = 0;
+  double anchor_frac_y = 0;
+  double anchor_frac_x = 0.5;
+  gboolean have_x_anchor = FALSE;
+  int widget_w = gtk_widget_get_width (GTK_WIDGET (self));
 
   if (self->vadjustment && self->page_y_offsets && self->page_count > 0) {
     double scroll_y = gtk_adjustment_get_value (self->vadjustment);
     anchor_page = fw_view_get_current_page (self);
     if (anchor_page >= 0 && anchor_page < self->page_count &&
         self->page_heights[anchor_page] > 0) {
-      anchor_frac = (scroll_y - self->page_y_offsets[anchor_page])
-                  / self->page_heights[anchor_page];
-      if (anchor_frac < 0) anchor_frac = 0;
-      if (anchor_frac > 1) anchor_frac = 1;
+      anchor_frac_y = (scroll_y - self->page_y_offsets[anchor_page])
+                    / self->page_heights[anchor_page];
+      if (anchor_frac_y < 0) anchor_frac_y = 0;
+      if (anchor_frac_y > 1) anchor_frac_y = 1;
     }
+  }
+  if (anchor_page >= 0 && self->hadjustment && widget_w > 0
+      && self->page_widths[anchor_page] > 0) {
+    /* Compute the page's pre-zoom widget X position via the same math
+     * the snapshot loop uses, then derive the page-fraction at
+     * viewport center. */
+    double scroll_x_old = gtk_adjustment_get_value (self->hadjustment);
+    double pw_old = self->page_widths[anchor_page];
+    double page_x_widget;
+    if (pw_old <= widget_w)
+      page_x_widget = (widget_w - pw_old) / 2.0;
+    else
+      page_x_widget = (self->max_width - pw_old) / 2.0 - scroll_x_old;
+    anchor_frac_x = ((double) widget_w / 2.0 - page_x_widget) / pw_old;
+    if (anchor_frac_x < 0) anchor_frac_x = 0;
+    if (anchor_frac_x > 1) anchor_frac_x = 1;
+    have_x_anchor = TRUE;
   }
 
   self->zoom = zoom;
   recompute_layout (self);
 
-  /* Restore: jump to the same page + fraction in the new layout */
   if (anchor_page >= 0 && self->vadjustment && self->page_y_offsets) {
     double new_val = self->page_y_offsets[anchor_page]
-                   + anchor_frac * self->page_heights[anchor_page];
-    FW_TRACE_VIEW ("scroll restore: page=%d frac=%.3f val=%.1f",
-                    anchor_page, anchor_frac, new_val);
+                   + anchor_frac_y * self->page_heights[anchor_page];
+    FW_TRACE_VIEW ("scroll restore: page=%d frac_y=%.3f frac_x=%.3f",
+                    anchor_page, anchor_frac_y, anchor_frac_x);
     gtk_adjustment_set_value (self->vadjustment, new_val);
+  }
+  if (have_x_anchor && self->hadjustment && anchor_page >= 0) {
+    /* Find the scroll_x that makes the same page-fraction land at
+     * viewport center after the new layout. Inverts the snapshot
+     * centering math. */
+    double pw_new = self->page_widths[anchor_page];
+    double upper = gtk_adjustment_get_upper (self->hadjustment);
+    double size  = gtk_adjustment_get_page_size (self->hadjustment);
+    if (pw_new <= widget_w) {
+      /* Page now fits in viewport — center; horizontal scroll is
+       * irrelevant (range is zero). */
+      gtk_adjustment_set_value (self->hadjustment, 0);
+    } else {
+      double desired_page_x =
+        (double) widget_w / 2.0 - anchor_frac_x * pw_new;
+      double new_x = (self->max_width - pw_new) / 2.0 - desired_page_x;
+      if (new_x > upper - size) new_x = upper - size;
+      if (new_x < 0) new_x = 0;
+      gtk_adjustment_set_value (self->hadjustment, new_x);
+    }
   }
 }
 
@@ -1103,21 +1149,33 @@ fw_view_fit_width_zoom (FwView *self, int viewport_w)
   if (viewport_w <= 0)
     viewport_w = 900;
 
-  /* Find the widest page (in points, accounting for rotation) */
-  double max_page_w = 0;
-  for (int i = 0; i < self->page_count; i++) {
-    double w, h;
-    fw_document_get_page_size (self->document, i, &w, &h);
-    if (self->rotation == 90 || self->rotation == 270) {
-      double tmp = w; w = h; h = tmp;
-    }
-    if (w > max_page_w) max_page_w = w;
+  /* Fit the *current* visible page rather than the widest page in the
+   * document. Picking the widest works fine for technical PDFs where
+   * every page is the same size, but on a comic CBZ with even one
+   * centerfold spread (~2x normal width) it makes every normal page
+   * render at ~35% — there's empty viewport on either side and the
+   * user has to manually zoom in. With current-page sizing, normal
+   * pages fill the viewport; landing on a wider page is then
+   * horizontally scrollable until the user hits Ctrl+1 again.
+   *
+   * page_y_offsets is built by recompute_layout; if it's not ready
+   * yet (initial open before allocation), fall back to page 0. */
+  int page = 0;
+  if (self->page_y_offsets && self->vadjustment) {
+    int current = fw_view_get_current_page (self);
+    if (current >= 0 && current < self->page_count)
+      page = current;
   }
 
-  if (max_page_w <= 0)
+  double w, h;
+  fw_document_get_page_size (self->document, page, &w, &h);
+  if (self->rotation == 90 || self->rotation == 270) {
+    double tmp = w; w = h; h = tmp;
+  }
+  if (w <= 0)
     return 1.0;
 
-  return (double) viewport_w / max_page_w;
+  return (double) viewport_w / w;
 }
 
 double
@@ -1358,13 +1416,10 @@ fw_view_dispose (GObject *object)
   g_clear_object (&self->search);
 
   if (self->settings) {
-    if (self->settings_changed_handler)
-      g_signal_handler_disconnect (self->settings, self->settings_changed_handler);
     if (self->ruler_changed_handler)
       g_signal_handler_disconnect (self->settings, self->ruler_changed_handler);
     if (self->loupe_changed_handler)
       g_signal_handler_disconnect (self->settings, self->loupe_changed_handler);
-    self->settings_changed_handler = 0;
     self->ruler_changed_handler = 0;
     self->loupe_changed_handler = 0;
     g_clear_object (&self->settings);
@@ -1430,15 +1485,6 @@ fw_view_class_init (FwViewClass *klass)
 }
 
 static void
-on_kinetic_setting_changed (GSettings *settings, const char *key, gpointer user_data)
-{
-  (void) key;
-  FwView *self = user_data;
-  self->kinetic_scrolling = g_settings_get_boolean (settings, "kinetic-scrolling");
-  FW_TRACE_VIEW ("kinetic-scrolling=%d", self->kinetic_scrolling);
-}
-
-static void
 on_ruler_setting_changed (GSettings *settings, const char *key, gpointer user_data)
 {
   (void) key;
@@ -1456,40 +1502,6 @@ on_loupe_setting_changed (GSettings *settings, const char *key, gpointer user_da
   self->loupe = g_settings_get_boolean (settings, "loupe");
   FW_TRACE_VIEW ("loupe=%d", self->loupe);
   gtk_widget_queue_draw (GTK_WIDGET (self));
-}
-
-static gboolean
-on_scroll_event (GtkEventControllerScroll *ctrl, double dx, double dy,
-                 gpointer user_data)
-{
-  (void) dx;
-  FwView *self = user_data;
-
-  /* Kinetic mode: don't intercept — let GtkScrolledWindow apply the full
-   * delta with momentum scrolling (the GTK default behavior). */
-  if (self->kinetic_scrolling || !self->vadjustment)
-    return FALSE;
-
-  /* Cache-friendly mode: apply a per-event capped delta directly to the
-   * vadjustment and consume the event so the scrolled window doesn't
-   * also process it. Wheel events arrive in unit-scale (≈1 per click);
-   * trackpad smooth-scroll arrives in pixel-scale already. */
-  GdkEvent *evt = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (ctrl));
-  GdkScrollUnit unit = evt ? gdk_scroll_event_get_unit (evt)
-                           : GDK_SCROLL_UNIT_SURFACE;
-
-  double pixels = (unit == GDK_SCROLL_UNIT_WHEEL) ? dy * SCROLL_WHEEL_STEP : dy;
-  if (pixels >  MAX_SCROLL_PER_EVENT) pixels =  MAX_SCROLL_PER_EVENT;
-  if (pixels < -MAX_SCROLL_PER_EVENT) pixels = -MAX_SCROLL_PER_EVENT;
-
-  double upper = gtk_adjustment_get_upper (self->vadjustment);
-  double size  = gtk_adjustment_get_page_size (self->vadjustment);
-  double v     = gtk_adjustment_get_value (self->vadjustment) + pixels;
-  if (v > upper - size) v = upper - size;
-  if (v < 0) v = 0;
-  gtk_adjustment_set_value (self->vadjustment, v);
-
-  return TRUE;
 }
 
 static gboolean
@@ -1532,17 +1544,12 @@ fw_view_init (FwView *self)
   self->zoom = 1.0;
   self->sel_page = -1;
 
-  /* Settings — bind kinetic-scrolling and reading-ruler live so menu
-   * toggles take effect without restarting the app. */
+  /* Settings — reading-ruler and loupe toggle live; kinetic-scrolling
+   * is owned by FwWindow and applied to the parent scrolled window. */
   self->settings = g_settings_new (APP_ID);
-  self->kinetic_scrolling = g_settings_get_boolean (self->settings,
-                                                     "kinetic-scrolling");
   self->reading_ruler = g_settings_get_boolean (self->settings,
                                                  "reading-ruler");
   self->loupe = g_settings_get_boolean (self->settings, "loupe");
-  self->settings_changed_handler = g_signal_connect (
-    self->settings, "changed::kinetic-scrolling",
-    G_CALLBACK (on_kinetic_setting_changed), self);
   self->ruler_changed_handler = g_signal_connect (
     self->settings, "changed::reading-ruler",
     G_CALLBACK (on_ruler_setting_changed), self);
@@ -1550,15 +1557,17 @@ fw_view_init (FwView *self)
     self->settings, "changed::loupe",
     G_CALLBACK (on_loupe_setting_changed), self);
 
-  /* Scroll controller — capture-phase so we see wheel/trackpad events
-   * before the parent GtkScrolledWindow's bubble-phase handler. The
-   * handler decides whether to consume (cap-per-event mode) or
-   * fall through (kinetic mode). */
-  GtkEventController *scroll =
-    gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
-  gtk_event_controller_set_propagation_phase (scroll, GTK_PHASE_CAPTURE);
-  g_signal_connect (scroll, "scroll", G_CALLBACK (on_scroll_event), self);
-  gtk_widget_add_controller (GTK_WIDGET (self), scroll);
+  /* Scroll handling is left to GtkScrolledWindow's native path — that
+   * way diagonal trackpad motion (which Wayland delivers as paired
+   * dx/dy events) is handled the same way every other GTK app handles
+   * it. The kinetic-scrolling setting flows from the window into
+   * gtk_scrolled_window_set_kinetic_scrolling() at the parent.
+   *
+   * The earlier per-event cap (intended to throttle wheel flicks so
+   * the render cache could keep up) is obsolete: the v0.14 GThreadPool
+   * sort-function priority dispatch and v0.17 fz_cookie mid-render
+   * abort already guarantee the cache responds to scroll velocity
+   * without a hard input-side cap. */
 
   gtk_widget_add_tick_callback (GTK_WIDGET (self), view_tick_cb, self, NULL);
 

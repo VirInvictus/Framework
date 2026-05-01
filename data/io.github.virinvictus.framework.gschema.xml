@@ -4,17 +4,21 @@
   <schema id="io.github.virinvictus.framework" path="/io/github/virinvictus/framework/">
 
     <key name="kinetic-scrolling" type="b">
-      <default>false</default>
+      <default>true</default>
       <summary>Enable kinetic momentum scrolling</summary>
       <description>
-        When false (default), per-event scroll deltas are capped so the
-        render cache always keeps up with the user's scroll velocity. The
-        user never sees thumbnail placeholders during normal reading scroll;
-        thumbnails are reserved for explicit jumps (TOC click, page-entry
-        edit, search-hit reveal). When true, scroll events apply their full
-        delta with kinetic momentum (a trackpad flick coasts past pages),
-        matching the GTK default. Fast scrolling in this mode will paint
-        thumbnails until the cache catches up.
+        Controls gtk_scrolled_window_set_kinetic_scrolling on the
+        document scrolled window. When true (default), trackpad flicks
+        coast and diagonal trackpad gestures pan in both axes
+        simultaneously — the standard GTK behavior. When false, scroll
+        events apply only the user-induced delta with no momentum, and
+        diagonal motion is delivered to GTK as paired axis events.
+
+        The earlier default-false rationale (cap input to keep the
+        render cache from outrunning) is obsolete since v0.14
+        introduced GThreadPool sort-function priority dispatch and
+        v0.17 added fz_cookie mid-render abort: the cache responds to
+        scroll velocity without needing an input-side cap.
       </description>
     </key>
 
