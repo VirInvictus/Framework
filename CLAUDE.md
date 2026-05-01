@@ -38,7 +38,7 @@ GSETTINGS_SCHEMA_DIR=builddir/data \
 # revert: meson configure builddir -Dsanitize=
 ```
 
-The src layer is now a `framework-core` static library plus a thin `framework` executable. Tests link against `framework_lib_dep` to reach internal symbols. `meson test -C builddir` runs registered targets; `stress-scrub` is registered with a 60 s timeout against the Effective Java sample.
+The src layer is now a `framework-core` static library plus a thin `framework` executable. Tests link against `framework_lib_dep` to reach internal symbols. `meson test -C builddir` runs registered targets — the suite is `stress-scrub`, `stress-zoom-storm`, `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak` (60–300 s timeouts; default corpus = `/home/bdkl/docs/Calibre Library/`). `bench-render` is built but not registered (latency benchmark, not pass/fail) — invoke directly with `--pages` / `--stride` / `--zoom`.
 
 ## Runtime debug tracing
 

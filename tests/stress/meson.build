@@ -28,6 +28,20 @@ stress_multidoc = executable(
   install: false,
 )
 
+stress_corpus_soak = executable(
+  'stress-corpus-soak',
+  'stress-corpus-soak.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
+bench_render = executable(
+  'bench-render',
+  'bench-render.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
 # Register as a meson test. RSS cap of 800 MB by default; override with
 # FW_STRESS_RSS_CAP_MB. Skipped automatically in CI environments without a
 # corpus path — pass FW_TEST_CORPUS_ROOT or call the binary directly.
@@ -69,6 +83,18 @@ test('stress-multidoc',
   env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
         'G_TEST_BUILDDIR=' + meson.project_build_root()],
   timeout: 180,
+  protocol: 'exitcode',
+  is_parallel: false,
+)
+
+# Soak walks the full corpus by stride=5; capped at 200 pages per doc
+# so the run completes in well under the timeout. Bump FW_SOAK_MAX_PAGES
+# to 0 for an unbounded soak (manual invocation only).
+test('stress-corpus-soak',
+  stress_corpus_soak,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 300,
   protocol: 'exitcode',
   is_parallel: false,
 )

@@ -13,6 +13,7 @@
 #include "fw-debug.h"
 
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h>
 #include <stdint.h>
@@ -200,6 +201,29 @@ pdf_error_handler (void *user, const char *message)
   g_warning ("MuPDF: %s", message);
 }
 
+/* Pick a MuPDF store size from the document's file size. The store
+ * caches decoded fonts and images within MuPDF; bigger means more cache
+ * hits during render at the cost of resident memory.
+ *
+ * Previously hardcoded to 64 MB × (1 main + 8 render instances) = 576 MB
+ * worst case for stores alone, regardless of document size. A 200-page
+ * novel EPUB doesn't need that much; a 50 MB scanned textbook benefits
+ * from more. This function reads the file size once at open time and
+ * picks a scaled value applied to every context. */
+static size_t
+pdf_pick_store_size (const char *path)
+{
+  GStatBuf st;
+  if (!path || g_stat (path, &st) != 0)
+    return 32u << 20;  /* 32 MB conservative fallback */
+
+  gint64 sz = (gint64) st.st_size;
+  if (sz < (gint64) (5  << 20)) return 16u << 20;   /* small EPUB/MOBI */
+  if (sz < (gint64) (20 << 20)) return 32u << 20;   /* most novels, technical PDFs under ~500 pages */
+  if (sz < (gint64) (100 << 20)) return 64u << 20;  /* typical large textbook */
+  return 128u << 20;                                /* big scanned book / huge XPS */
+}
+
 /* ── Interface implementation ─────────────────────────────────────── */
 
 static gboolean
@@ -207,7 +231,10 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
 {
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
 
-  fz_context *ctx = fz_new_context (NULL, NULL, 64 << 20);
+  size_t store_size = pdf_pick_store_size (path);
+  FW_TRACE_PDF ("store size: %zu MB for '%s'", store_size >> 20, path);
+
+  fz_context *ctx = fz_new_context (NULL, NULL, store_size);
   if (!ctx) {
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Failed to create MuPDF context");
@@ -263,7 +290,7 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
   self->next_render = 0;
 
   for (int i = 0; i < self->n_render; i++) {
-    self->render[i].ctx = fz_new_context (NULL, NULL, 64 << 20);
+    self->render[i].ctx = fz_new_context (NULL, NULL, store_size);
     if (self->render[i].ctx) {
       fz_set_warning_callback (self->render[i].ctx, pdf_warn_handler, NULL);
       fz_set_error_callback (self->render[i].ctx, pdf_error_handler, NULL);

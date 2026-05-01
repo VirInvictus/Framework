@@ -21,6 +21,7 @@ typedef struct {
   guint            render_gen;     /* render params generation when this surface was created */
   gsize            size_bytes;     /* stride*height of `surface`, 0 if NULL */
   gsize            prev_size_bytes;/* stride*height of `prev_surface`, 0 if NULL */
+  gint64           last_access_us; /* monotonic µs of last fw_cache_get_*: drives LRU eviction */
 } CacheEntry;
 
 /* Persistent low-resolution preview. Rendered once at open time (or first
@@ -255,6 +256,19 @@ render_job_compare (gconstpointer a, gconstpointer b, gpointer user_data)
   return 0;
 }
 
+/* LRU eviction comparator — oldest access first so g_array_sort puts
+ * the next-to-evict candidate at index 0. */
+typedef struct { int page; gint64 access_us; } LruVictim;
+static gint
+lru_victim_compare (gconstpointer a, gconstpointer b)
+{
+  const LruVictim *va = a;
+  const LruVictim *vb = b;
+  if (va->access_us < vb->access_us) return -1;
+  if (va->access_us > vb->access_us) return  1;
+  return 0;
+}
+
 /* ── Thumbnail worker ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -444,6 +458,7 @@ render_worker (gpointer data, gpointer user_data)
     self->total_cached_bytes += entry->size_bytes;
     entry->rendering  = FALSE;
     entry->render_gen = job->render_gen;
+    entry->last_access_us = g_get_monotonic_time ();
 
     /* Schedule a redraw on the main thread so the new surface appears.
      * We ref the widget so it stays alive until the idle fires — the
@@ -723,23 +738,31 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
    * skipped: the worker's `entry` lookup at the store site would race
    * with eviction otherwise. */
   if (self->total_cached_bytes > self->byte_cap) {
+    /* TTL+LRU hybrid: sort outside-priority candidates by oldest
+     * `last_access_us` and evict from the front. The previous
+     * iteration-order eviction was effectively arbitrary; LRU
+     * preserves the most recently scrolled-back-to pages, which is
+     * what the user expects when they reverse direction. */
+    GArray *victims = g_array_new (FALSE, FALSE, sizeof (LruVictim));
+
     GHashTableIter iter;
     gpointer key, value;
-    GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
     g_hash_table_iter_init (&iter, self->pages);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
       if (g_hash_table_contains (keep_set, key)) continue;
       CacheEntry *entry = value;
       if (entry->rendering) continue;
-      int pg = GPOINTER_TO_INT (key);
-      g_array_append_val (to_remove, pg);
+      LruVictim v = { .page = GPOINTER_TO_INT (key),
+                      .access_us = entry->last_access_us };
+      g_array_append_val (victims, v);
     }
-    /* Remove victims one at a time, stopping when we drop under cap. */
+    g_array_sort (victims, lru_victim_compare);
+
     gsize freed = 0;
     guint dropped = 0;
-    for (guint i = 0; i < to_remove->len; i++) {
+    for (guint i = 0; i < victims->len; i++) {
       if (self->total_cached_bytes <= self->byte_cap) break;
-      int pg = g_array_index (to_remove, int, i);
+      int pg = g_array_index (victims, LruVictim, i).page;
       CacheEntry *e = g_hash_table_lookup (self->pages, GINT_TO_POINTER (pg));
       if (!e) continue;
       gsize entry_bytes = e->size_bytes + e->prev_size_bytes;
@@ -748,7 +771,7 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
       dropped++;
       g_hash_table_remove (self->pages, GINT_TO_POINTER (pg));
     }
-    g_array_unref (to_remove);
+    g_array_unref (victims);
     FW_TRACE_MEM ("byte-cap evict: dropped=%u freed=%zu remaining=%zu cap=%zu",
                   dropped, freed, self->total_cached_bytes, self->byte_cap);
   }
@@ -817,8 +840,10 @@ fw_cache_get_page (FwCache *self, int page)
   CacheEntry *entry = g_hash_table_lookup (self->pages,
                                             GINT_TO_POINTER (page));
   cairo_surface_t *surface = NULL;
-  if (entry && entry->surface)
+  if (entry && entry->surface) {
     surface = cairo_surface_reference (entry->surface);
+    entry->last_access_us = g_get_monotonic_time ();
+  }
   g_mutex_unlock (&self->lock);
 
   return surface;
@@ -870,6 +895,8 @@ fw_cache_get_texture (FwCache *self, int page)
       tex = entry->texture;
     else if (entry->prev_texture)
       tex = entry->prev_texture;
+    if (tex)
+      entry->last_access_us = g_get_monotonic_time ();
   }
   g_mutex_unlock (&self->lock);
   return tex;

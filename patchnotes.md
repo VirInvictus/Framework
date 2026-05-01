@@ -2,6 +2,29 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.26.0 (2026-05-01)
+
+*Cache and bench batch — Phase 11 Tiers 2 and 3, plus Phase 12.2 and 12.3 fill out the test harness.* Four roadmap items shipped together: per-instance MuPDF store size scaling, TTL+LRU hybrid cache eviction, a new render-latency benchmark, and a full-corpus soak test.
+
+---
+
+### Per-Instance MuPDF Store Size Scaling (Phase 11 Tier 3)
+Both `fz_new_context` call sites in the PDF backend (the main context plus the eight per-instance render contexts) now size the MuPDF store to file size: 16 MB under 5 MB, 32 MB under 20 MB, 64 MB under 100 MB, 128 MB above. Previous fixed 32 MB allocation was wasteful on novels (5 MB EPUBs got the same store as 200 MB textbooks) and tight on heavy textbooks (font/JPEG2000 churn). With eight per-instance contexts, the upper bound scales to 1 GB total store on heavy documents — comfortable on this 30 GB box; revisit only if a memory-constrained reference (`.plato/`) becomes an actual target.
+
+### TTL+LRU Hybrid Cache Eviction (Phase 11 Tier 2)
+The bytes-aware eviction loop from v0.16 picked victims in iteration order — effectively arbitrary. Now each cache entry tracks `last_access_us`, bumped on every `fw_cache_get_page` / `fw_cache_get_texture` hit and on worker-store success; outside-priority candidates are sorted oldest-first before eviction. Pages the user just scrolled back to survive when the cap fires; pages they haven't touched in seconds go first. No new public API, no behavior change when under the cap; only the eviction policy improved.
+
+### `bench-render` (Phase 12.3)
+New benchmark that times direct `fw_document_render_page` calls across an evenly-spaced span of pages, in two passes — cold (fresh handle, populates the per-instance store) and warm (re-render same pages, hits the store). Reports n / mean / p50 / p95 / p99 / max in milliseconds, plus total elapsed. The cache layer is intentionally bypassed: this answers "how fast does the backend render?" not "how well does the cache hide latency?" Quick check on Effective Java's 901-page corpus sample showed cold p50 ~9 ms, warm p50 ~3 ms — about a 3× store-hit speedup, validating the v0.26 scaling.
+
+### `stress-corpus-soak` (Phase 12.2)
+Full-corpus soak — opens each of the seven canonical samples (PDF×2, DjVu, EPUB, MOBI, CBZ, CBR), walks every fifth page through the cache up to 200 pages per document, and tears down. Catches regressions on backends none of the narrower stress tests exercise (e.g. CBR's libarchive path, MOBI's reflowable layout). Runs in ~36 s; registered with `meson test` so the suite now has five entries. Confirmed clean under ASan+UBSan; peak RSS lands around 1.5 GB on the comics-heavy run, default cap raised to 1.8 GB.
+
+### Test Harness
+Five `meson test` targets total: stress-scrub, stress-zoom-storm, stress-search-cache, stress-multidoc, stress-corpus-soak. bench-render is built but not registered as a test (latency benchmark, not a pass/fail check) — invoke directly.
+
+---
+
 ## v0.25.0 (2026-05-01)
 
 *Margin cropping, multi-doc lifecycle stress test, real leak fix.* The third Phase 14 polish item lands; the new stress-multidoc test promptly catches a real leak in the cache dispose path that the existing stress tests never reached.
