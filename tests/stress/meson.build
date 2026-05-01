@@ -49,6 +49,13 @@ bench_startup = executable(
   install: false,
 )
 
+bench_cache_hit_rate = executable(
+  'bench-cache-hit-rate',
+  'bench-cache-hit-rate.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
 # Register as a meson test. RSS cap of 800 MB by default; override with
 # FW_STRESS_RSS_CAP_MB. Skipped automatically in CI environments without a
 # corpus path — pass FW_TEST_CORPUS_ROOT or call the binary directly.

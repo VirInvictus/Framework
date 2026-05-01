@@ -2,6 +2,20 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.30.0 (2026-05-01)
+
+*`bench-cache-hit-rate` — Phase 12.3.* Drives the cache through three synthetic scroll patterns and reports the hit ratio at each render-state band:
+
+- **STATIC** — velocity 0, walk page-by-page with 120 ms dwell. Cache fills the priority window ahead of each query.
+- **CRUISING** — velocity 0.8, walk every 3 pages with 40 ms dwell.
+- **SCRUBBING** — velocity 5.0, jump every 50 pages with 5 ms dwell. Most queries miss; the cache aborts mid-render via `fz_cookie`.
+
+Hit/miss is measured by calling `fw_cache_get_texture(current_page)` after each step — exactly what the view sees on every paint. Synthetic patterns instead of recorded trace files: keeps the bench self-contained (no per-platform recorder, no trace-file schema) and reproducible across runs.
+
+First baseline on Effective Java's 901 pages — STATIC 100%, CRUISING 100%, SCRUBBING 24%. SCRUBBING's low hit rate is by design: that's what the `fz_cookie` mid-render abort and SCRUBBING-state job suppression are *for*. Useful in this form for tuning the bytes-aware cache cap or the priority window without manual A/B testing.
+
+---
+
 ## v0.29.0 (2026-05-01)
 
 *`bench-startup` — Phase 12.3.* New benchmark that times each corpus sample's open-to-first-paint flow:

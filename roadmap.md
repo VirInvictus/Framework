@@ -174,7 +174,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 ### 12.3 Benchmarks (the "is it still fast" set)
 
 - [x] **`bench-render`** — Cold + warm pass over an evenly-spaced span of pages on a single document (default 50, override `--pages` / `--stride` / `--zoom`). Reports n / mean / p50 / p95 / p99 / max in milliseconds plus total elapsed. The cache is intentionally bypassed — measures backend speed, not cache effectiveness. Built but not registered as a meson test (latency benchmark, not pass/fail). The JSON-output + commit-keyed regression-diff layer is deferred; manual runs are sufficient until we have a CI gate to feed the diffs into. (v0.26)
-- [ ] **`bench-cache-hit-rate`** — drives the cache through a recorded scroll trace and reports hit/miss ratio per state (STATIC/CRUISING/SCRUBBING). Trace files live in `tests/traces/*.scroll` (binary, replayable). Useful for tuning the bytes-aware cache cap (Phase 11 Tier 1) without manual A/B testing.
+- [x] **`bench-cache-hit-rate`** — Drives the cache through three synthetic scroll patterns (STATIC walk, CRUISING walk, SCRUBBING jumps) and reports hit ratio per pattern. Recorded trace files were dropped in favor of inline patterns — no recorder infrastructure, fully reproducible. Built but not registered with `meson test`. (v0.30)
 - [x] **`bench-startup`** — Times each corpus sample's `fw_document_new_for_path` (open_ms) and the wait until `fw_cache_get_texture(0)` first returns non-NULL (first_paint_ms). Reports per-file timings as a table; built but not registered with `meson test`. Default corpus = the seven canonical samples; pass paths as argv to override. (v0.29)
 
 ### 12.4 Debugging setup
