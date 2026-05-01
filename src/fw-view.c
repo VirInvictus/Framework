@@ -292,6 +292,18 @@ view_page_is_spread (FwView *self, int i)
   if (i < 0 || i >= self->page_count
       || !self->page_widths || !self->page_heights)
     return FALSE;
+
+  /* Filename signal first (CBR backend, v0.37) — catches scanlation
+   * rips where the spread image has the same dimensions as a single
+   * page (so aspect ratio is portrait, ~0.7) but the filename
+   * concatenates two consecutive page numbers like
+   * `chapter01_034035.jpg`. Backends without per-page filenames
+   * (PDF/DjVu/MuPDF-routed CBZ) return FALSE from this query and
+   * we fall through to the aspect-ratio heuristic. */
+  if (self->document
+      && fw_document_is_spread_filename (self->document, i))
+    return TRUE;
+
   double w = self->page_widths[i];
   double h = self->page_heights[i];
   if (h <= 0)

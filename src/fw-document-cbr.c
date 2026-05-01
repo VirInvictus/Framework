@@ -67,9 +67,21 @@ struct _FwDocumentCbr {
   GQueue       *cache_order;      /* GINT_TO_POINTER (page) FIFO, head = oldest */
   gsize         cached_bytes;
   gsize         cache_byte_cap;
+
+  /* Filename-based double-spread detection (v0.37, ported from
+   * YACReader's `is_double_page` in `common/comic.cpp:925`). At open
+   * time we walk the entry list, find the most common filename prefix
+   * across basenames (path-stripped), and use it as the anchor for
+   * detecting `<prefix><digits>.<ext>` spreads where the digit run
+   * splits evenly into two consecutive page numbers (e.g.
+   * `chapter01_034035.jpg`). `common_prefix == NULL` means we
+   * couldn't agree on a prefix and the filename signal is disabled. */
+  char         *common_prefix;
+  int           max_spread_digits;
 };
 
 static void fw_document_cbr_iface_init (FwDocumentInterface *iface);
+static char *cbr_compute_common_prefix (CbrEntry *entries, int page_count);
 
 G_DEFINE_FINAL_TYPE_WITH_CODE (FwDocumentCbr, fw_document_cbr, G_TYPE_OBJECT,
   G_IMPLEMENT_INTERFACE (FW_TYPE_DOCUMENT, fw_document_cbr_iface_init))
@@ -430,6 +442,21 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
   g_array_sort (entries, entry_compare);
   self->entries = (CbrEntry *) g_array_free (entries, FALSE);
 
+  /* Compute the filename-prefix anchor for double-spread detection.
+   * Cheap (O(page_count) + a small hash), runs once at open. NULL
+   * result means we couldn't agree on a prefix and the filename
+   * signal will be inert — aspect-ratio detection still applies. */
+  self->common_prefix = cbr_compute_common_prefix (self->entries,
+                                                    self->page_count);
+  /* YACReader's heuristic for max digit-run length: 2× the number of
+   * digits in the page count. e.g. 100 pages → 6 digits ("034035"). */
+  self->max_spread_digits = 0;
+  {
+    int n = self->page_count;
+    while (n > 0) { self->max_spread_digits++; n /= 10; }
+    self->max_spread_digits *= 2;
+  }
+
   self->page_widths  = g_new (double, self->page_count);
   self->page_heights = g_new (double, self->page_count);
 
@@ -498,6 +525,7 @@ cbr_close (FwDocument *doc)
   g_clear_pointer (&self->page_widths,  g_free);
   g_clear_pointer (&self->page_heights, g_free);
   g_clear_pointer (&self->path,         g_free);
+  g_clear_pointer (&self->common_prefix, g_free);
   if (self->ctx) {
     fz_drop_context (self->ctx);
     self->ctx = NULL;
@@ -548,6 +576,150 @@ cbr_search (FwDocument *doc, const char *text, int page)
    * without spurious empty hits. */
   (void) doc; (void) text; (void) page;
   return g_array_new (FALSE, FALSE, sizeof (FwSearchHit));
+}
+
+/* ── Filename-based double-spread detection (Phase 13 follow-up) ──
+ *
+ * Direct port of YACReader's algorithm in `common/comic.cpp:925-1028`.
+ * Algorithm: walk the (sorted) entry list, find the most common
+ * prefix among adjacent basenames. If frequency ≥ 60% of pages and
+ * the prefix isn't all-digits, it's the anchor. A page is a spread
+ * when its name minus prefix yields an even-length all-digit run
+ * whose two halves parse as consecutive page numbers (right-left=1).
+ *
+ * Complementary to the v0.27.1 aspect-ratio test — catches
+ * scanlation rips where the spread image is the same dimensions as
+ * a single page (so the aspect ratio looks normal) but the filename
+ * encodes both numbers like `chapter01_034035.jpg`. */
+
+static const char *
+cbr_basename (const char *path)
+{
+  const char *slash = strrchr (path, '/');
+  return slash ? slash + 1 : path;
+}
+
+static char *
+cbr_compute_common_prefix (CbrEntry *entries, int page_count)
+{
+  if (page_count < 2)
+    return NULL;
+
+  /* Frequency table keyed by the candidate prefix string. As we walk
+   * the (sorted) basenames pairwise, we shrink current_len whenever
+   * an adjacent pair diverges sooner; we record a run whenever the
+   * prefix changes. The final winner is the prefix with highest
+   * frequency, provided it's neither all-digits nor too rare. */
+  GHashTable *frequency =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+  const char *prev = cbr_basename (entries[0].name);
+  int current_len = (int) strlen (prev);
+  int current_count = 1;
+
+  for (int i = 1; i < page_count; i++) {
+    const char *cur = cbr_basename (entries[i].name);
+    int pos = 0;
+    while (cur[pos] && prev[pos] && cur[pos] == prev[pos])
+      pos++;
+
+    if (pos < current_len && pos > 0) {
+      char *key = g_strndup (prev, current_len);
+      gpointer existing = g_hash_table_lookup (frequency, key);
+      g_hash_table_replace (frequency, key,
+        GUINT_TO_POINTER (GPOINTER_TO_UINT (existing) + (guint) current_count));
+      current_len = pos;
+      current_count++;
+    } else if (pos == 0) {
+      char *key = g_strndup (prev, current_len);
+      gpointer existing = g_hash_table_lookup (frequency, key);
+      g_hash_table_replace (frequency, key,
+        GUINT_TO_POINTER (GPOINTER_TO_UINT (existing) + (guint) current_count));
+      current_len = (int) strlen (cur);
+      current_count = 1;
+    } else {
+      current_count++;
+    }
+    prev = cur;
+  }
+
+  /* Final run. */
+  {
+    char *key = g_strndup (prev, current_len);
+    gpointer existing = g_hash_table_lookup (frequency, key);
+    g_hash_table_replace (frequency, key,
+      GUINT_TO_POINTER (GPOINTER_TO_UINT (existing) + (guint) current_count));
+  }
+
+  guint max_freq = 0;
+  const char *winner = NULL;
+  GHashTableIter it;
+  gpointer k, v;
+  g_hash_table_iter_init (&it, frequency);
+  while (g_hash_table_iter_next (&it, &k, &v)) {
+    if (GPOINTER_TO_UINT (v) > max_freq) {
+      max_freq = GPOINTER_TO_UINT (v);
+      winner = (const char *) k;
+    }
+  }
+
+  char *result = NULL;
+  if (winner && max_freq >= (guint) (page_count * 0.6)) {
+    /* Reject all-digit prefixes — those are usually the page-number
+     * field itself, not a structural prefix. */
+    gboolean all_digits = TRUE;
+    for (const char *p = winner; *p; p++) {
+      if (!g_ascii_isdigit (*p)) { all_digits = FALSE; break; }
+    }
+    if (!all_digits)
+      result = g_strdup (winner);
+  }
+
+  g_hash_table_destroy (frequency);
+  return result;
+}
+
+static gboolean
+cbr_filename_is_spread (const char *page_name,
+                        const char *common_prefix,
+                        int max_digits)
+{
+  if (!common_prefix || !page_name)
+    return FALSE;
+
+  const char *base = cbr_basename (page_name);
+  size_t plen = strlen (common_prefix);
+  if (strncmp (base, common_prefix, plen) != 0)
+    return FALSE;
+
+  const char *digits = base + plen;
+  int n = 0;
+  while (digits[n] && g_ascii_isdigit (digits[n]) && n < 16)
+    n++;
+
+  if (n < 4 || n > max_digits || (n % 2) != 0)
+    return FALSE;
+
+  /* Split in half, parse as ints, require right - left == 1. */
+  char left[9], right[9];
+  int half = n / 2;
+  if (half >= (int) sizeof (left)) return FALSE;
+  memcpy (left,  digits,        half); left[half]  = '\0';
+  memcpy (right, digits + half, half); right[half] = '\0';
+  int li = atoi (left);
+  int ri = atoi (right);
+  return li > 0 && ri > 0 && (ri - li) == 1;
+}
+
+static gboolean
+cbr_is_spread_filename (FwDocument *doc, int page)
+{
+  FwDocumentCbr *self = FW_DOCUMENT_CBR (doc);
+  if (page < 0 || page >= self->page_count)
+    return FALSE;
+  return cbr_filename_is_spread (self->entries[page].name,
+                                  self->common_prefix,
+                                  self->max_spread_digits);
 }
 
 static char *
@@ -622,6 +794,7 @@ fw_document_cbr_iface_init (FwDocumentInterface *iface)
   iface->close_page              = cbr_close_page;
   iface->render_page_from_handle = cbr_render_page_from_handle;
   iface->cancel_render           = cbr_cancel_render;
+  iface->is_spread_filename      = cbr_is_spread_filename;
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */

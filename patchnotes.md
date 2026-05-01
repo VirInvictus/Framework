@@ -2,6 +2,21 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.37.0 (2026-05-01)
+
+*Filename-based double-spread detection — borrowed from YACReader.* Aspect-ratio detection (v0.27.1) catches centerfolds whose image is genuinely wider than tall, but it misses scanlation rips where the spread image has the same dimensions as a single page and the spread-ness is encoded in the *filename* — `chapter01_034035.jpg` etc. New CBR-backend `is_spread_filename` interface method ports YACReader's `common/comic.cpp:925-1028` algorithm:
+
+1. At open time, walk the (sorted) entry list and find the most common filename prefix among basenames. Reject if it occupies < 60% of pages or if it's all-digits.
+2. Per page, strip the prefix, take the leading digit run, and check that it's even-length, splits in half into two ints, and `right − left == 1`.
+
+`view_page_is_spread` consults `fw_document_is_spread_filename` first, falling back to the existing aspect-ratio check. Backends without per-page filenames (PDF, DjVu, MuPDF-routed CBZ via `fz_open_document`) leave the vtable slot NULL and behave exactly as before — only CBR (libarchive-direct) gets the new signal.
+
+Combined effect: a manga rip with portrait-aspect spread images now displays each spread on its own row in facing-pages mode (rather than being naively paired with the next page), provided the filenames follow the convention. Aspect-ratio-only spreads continue to work unchanged.
+
+License: GPL-3 (compatible). The algorithm is ported, not copied verbatim — original Qt/QString idioms are re-expressed in C / GLib.
+
+---
+
 ## v0.36.0 (2026-05-01)
 
 *Phase 11 Tier 3 validated — current MuPDF threading model retained.* Both Tier 3 entries (`Reconsider 8× fz_open_document model`, `Per-thread-shared-context hybrid`) were investigation-only items hedging against memory pressure on low-RAM laptops. The pre-1.0 stress harness now provides enough measurement to make a defensible call:

@@ -297,6 +297,16 @@ fw_document_get_content_bbox (FwDocument *self, int page,
   return FALSE;
 }
 
+gboolean
+fw_document_is_spread_filename (FwDocument *self, int page)
+{
+  g_return_val_if_fail (FW_IS_DOCUMENT (self), FALSE);
+  FwDocumentInterface *iface = FW_DOCUMENT_GET_IFACE (self);
+  if (iface->is_spread_filename)
+    return iface->is_spread_filename (self, page);
+  return FALSE;
+}
+
 /* ── Factory — pick backend by file extension ─────────────────────── */
 
 FwDocument *

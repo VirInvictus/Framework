@@ -198,6 +198,19 @@ struct _FwDocumentInterface {
                                           double     *out_y0,
                                           double     *out_x1,
                                           double     *out_y1);
+
+  /* Filename-based double-spread detection (Phase 13 follow-up,
+   * borrowed from YACReader's `is_double_page` in
+   * `common/comic.cpp`). Returns TRUE when the page's filename in
+   * its archive — e.g. `chapter01_034035.jpg` — encodes two
+   * consecutive page numbers concatenated, which is a common
+   * scanlation convention for centerfold spreads. Complements
+   * aspect-ratio detection, which misses spreads that happen to
+   * have w/h ≈ 1.0. Optional vtable slot — backends without
+   * archive filenames (PDF, DjVu, MuPDF-routed CBZ via fz_open)
+   * leave this NULL. */
+  gboolean         (*is_spread_filename) (FwDocument *self,
+                                           int         page);
 };
 
 /* Public API — delegates to interface vtable */
@@ -265,6 +278,8 @@ gboolean         fw_document_get_content_bbox    (FwDocument *self,
                                                    double     *out_y0,
                                                    double     *out_x1,
                                                    double     *out_y1);
+gboolean         fw_document_is_spread_filename  (FwDocument *self,
+                                                   int         page);
 
 /* ── Factory ──────────────────────────────────────────────────────── */
 
