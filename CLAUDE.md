@@ -105,12 +105,11 @@ Single-document-per-window design. `g_application_open` spawns one `FwWindow` pe
 
 Framework is strictly a viewer (spec §13). Don't add: annotations, export/save-as, recent-files UI, tabs, additional formats beyond PDF/DjVu, vim bindings, modal interfaces. Phase status in `roadmap.md` is the source of truth for what's landed vs. deferred — check it before assuming a feature is missing on purpose.
 
-## Reference repos (`.fractal/`, `.komikku/`)
+## Reference repos (`.foliate/`, `.foliate-js/`, `.komikku/`)
 
-Two vendored upstream sources kept locally for the active Phase 13.1
-Fractal-style reflow rewrite (see `docs/fractal-rewrite.md`). Both
-are gitignored, not part of the build, must never be modified —
-read-only canon.
+Three vendored upstream sources kept locally for the active Phase 13.1
+reflow rewrite (see `docs/foliate-rewrite.md`). All are gitignored,
+not part of the build, must never be modified — read-only canon.
 
 The other seven reference repos that historically lived here
 (zathura, zathura-mupdf, sumatrapdf, sioyek, plato, yacreader,
@@ -119,13 +118,21 @@ into Framework — see `roadmap.md` and the v0.39.0 patchnote for the
 complete list of borrows. The "Influences and borrowed techniques"
 section in `README.md` retains the per-pattern attribution.
 
-Both retained repos are cloned shallow (`--depth 1`); refresh with
-`git -C <dir> pull --depth 1`.
+All three retained repos are cloned shallow (`--depth 1`); refresh
+with `git -C <dir> pull --depth 1`.
 
 | Repo | Stack | Why it's here |
 |---|---|---|
-| `.fractal/` | Rust / GTK4 | Reference for native GTK list architectures and dynamic sizing, particularly for reflowing structured content (like EPUB chapters) into native widgets rather than rendering them as static pixels. (See `.fractal/src/utils/grouping_list_model/` and `.fractal/src/components/rows/`) |
+| `.foliate/` | JavaScript / GJS | Native GNOME ebook reader. Reference for the overall reader UX, pagination cadence, font preferences and reading-position model. |
+| `.foliate-js/` | JavaScript (browser) | Foliate's parser library. **The canonical implementation reference for EPUB / MOBI / AZW3 / FB2 / PDB-based formats.** Specifically `.foliate-js/mobi.js` for the PalmDB / PalmDOC / KF7 / KF8 chain, `.foliate-js/epub.js` for OPF + spine + NCX walking, `.foliate-js/fb2.js` for the FictionBook XML walker, `.foliate-js/paginator.js` for pagination math. MIT-licensed (compatible with our GPL-3-or-later). |
 | `.komikku/` | Python / GTK4 | Top-tier native GNOME manga/webtoon reader. Reference for the reader pager logic and chapter handling. (See `.komikku/komikku/reader/pager/`) |
+
+The Phase 13.1 architectural pattern (GListModel of structurally-typed
+blocks → GtkSignalListItemFactory → native widget per row) is named
+"Fractal-style" in earlier patchnotes (v0.40.0 onward) — that was a
+slip; the actual reference Brandon meant was **Foliate** all along.
+Patchnotes are historical record and stay as-is; new docs use
+"Foliate-style".
 
 ### License compatibility matrix
 
@@ -137,7 +144,8 @@ Framework is **GPL-3.0-or-later**. All borrowed-code attributions go in `README.
 | zathura-pdf-mupdf | Zlib | yes | Same. |
 | SumatraPDF | GPL-3.0 (source headers say `License: GPLv3`; readme's "(A)GPLv3" wording reflects that the *binary* link with AGPL'd MuPDF is effectively AGPL — the source itself is GPL-3) | yes | Combined work distributable under GPL-3 (the common denominator with GPL-3-or-later). |
 | Sioyek | GPL-3.0 | yes | Same as Sumatra. |
-| Fractal | GPL-3.0 | yes | Same as Sumatra. |
+| Foliate | GPL-3.0+ | yes | Compatible. |
+| foliate-js | MIT | yes | MIT is GPL-compatible; attribution preserved per OFL/MIT conventions. |
 | Komikku | GPL-3.0-or-later | yes | Fully compatible with Framework's license. |
 | MComix | GPL-2.0+ | yes | Compatible; combined work distributed as GPL-3.0-or-later. |
 | YACReader | GPL-3.0 | yes | Same as Sumatra. |

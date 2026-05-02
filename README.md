@@ -21,7 +21,7 @@ A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. 
 
 Linux document viewers often fall into two categories: feature-heavy clients (like Okular) that bring extensive dependencies to GNOME, or minimal MuPDF wrappers that lack a functional UI. Framework fills the gap by providing a native, high-performance GNOME solution that prioritizes rendering speed and kinetic scrolling without the bloat of an editor.
 
-I'm not pretending I came up with the architecture. Framework is a deliberate synthesis: the cache + threading idioms of **SumatraPDF**, the zero-copy MuPDF→cairo pipeline and `GThreadPool` priority dispatch from **zathura-pdf-mupdf** / **zathura**, the magnifying loupe and double-spread detection from **YACReader**, and (when it lands) the native-GTK reflow architecture from **Fractal**, all glued into a minimalist libadwaita UI for GNOME. Patterns are also borrowed from Sioyek, Plato, MComix, and Komikku where they had something specific to teach. Per-pattern attribution lives in the [Influences](#influences-and-borrowed-techniques) section below — every borrow is named with its upstream file:line and the Framework version it shipped in.
+I'm not pretending I came up with the architecture. Framework is a deliberate synthesis: the cache + threading idioms of **SumatraPDF**, the zero-copy MuPDF→cairo pipeline and `GThreadPool` priority dispatch from **zathura-pdf-mupdf** / **zathura**, the magnifying loupe and double-spread detection from **YACReader**, and the native-GTK reflow architecture from **Foliate** (and its parser library **foliate-js**), all glued into a minimalist libadwaita UI for GNOME. Patterns are also borrowed from Sioyek, Plato, MComix, and Komikku where they had something specific to teach. Per-pattern attribution lives in the [Influences](#influences-and-borrowed-techniques) section below — every borrow is named with its upstream file:line and the Framework version it shipped in.
 
 ## Features
 
@@ -199,7 +199,7 @@ One document per window. Multiple files open multiple windows.
 
 Framework is a study in standing on shoulders. Every concrete pattern below names the upstream project, the file:line we studied, the Framework version it shipped in, and the source file where the borrow lives — full chain of attribution so anyone can audit the lineage. Per-technique attribution lives here; per-source-file SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
-The four projects in the opening "what this is" line — **SumatraPDF**, **zathura-pdf-mupdf** / **Zathura**, **YACReader**, and **Fractal** — are the explicit foundations: I picked the parts I liked most and glued them into one viewer. **Sioyek**, **Plato**, **MComix**, **Komikku**, and **Foliate** contributed targeted patterns or design references on top of that.
+The four projects in the opening "what this is" line — **SumatraPDF**, **zathura-pdf-mupdf** / **Zathura**, **YACReader**, and **Foliate** (with its parser library **foliate-js**) — are the explicit foundations: I picked the parts I liked most and glued them into one viewer. **Sioyek**, **Plato**, **MComix**, and **Komikku** contributed targeted patterns or design references on top of that.
 
 ### [SumatraPDF](https://www.sumatrapdfreader.org/) &mdash; *spiritual foundation, cache & threading*
 Copyright © 2006–2024 the SumatraPDF project authors. Licensed [GPL-3.0](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/COPYING) (compatible).
@@ -233,13 +233,17 @@ YACReader is the comic reader I keep going back to on Linux; its loupe and doubl
 - **Aspect-ratio double-spread detection** (v0.27.1; `src/fw-view.c::view_page_is_spread`) &mdash; pages with `w/h > 1.0` are treated as pre-rendered spreads and stand alone in facing-pages mode, with the page that would have been their natural partner orphaning so alternation resumes after.
 - **Filename-based double-spread detection** (v0.37; `src/fw-document-cbr.c::cbr_is_spread_filename`) &mdash; complements the aspect-ratio test by catching scanlation rips where the spread image has portrait dimensions but the filename concatenates two consecutive page numbers (`chapter01_034035.jpg`). Direct port of YACReader's algorithm at `common/comic.cpp:925-1028`.
 
-### [Fractal](https://gitlab.gnome.org/World/fractal) &mdash; *native GTK reflow architecture (Phase 13.1)*
-Copyright © 2017–2024 Fractal contributors. Licensed [GPL-3.0](https://gitlab.gnome.org/World/fractal/-/blob/main/LICENSE) (compatible).
+### [Foliate](https://johnfactotum.github.io/foliate/) and [foliate-js](https://github.com/johnfactotum/foliate-js) &mdash; *reflow architecture and format-parsing canon (Phase 13.1)*
+Copyright © John Factotum. Foliate licensed [GPL-3.0-or-later](https://github.com/johnfactotum/foliate/blob/master/LICENSE) (compatible). foliate-js licensed [MIT](https://github.com/johnfactotum/foliate-js/blob/main/LICENSE) (compatible).
 
-Fractal is a Matrix chat client — totally unrelated domain — but its `GListModel` + `GtkSignalListItemFactory` + per-row widget pattern is exactly what reflowed EPUB / MOBI / AZW3 / FB2 / TXT chapters want. The Phase 13.1 rewrite (`docs/fractal-rewrite.md`) is named for it.
+Foliate is the serious GNOME ebook reader; foliate-js is its parser library. The Phase 13.1 reflow rewrite is built on Foliate's architecture and ports format parsers from foliate-js into C. (Earlier patchnotes from v0.40.0 onward call this work "Fractal-style" — that was a slip; the actual reference Brandon meant was always Foliate. The architectural pattern is correct; the name was wrong.)
 
-- **Dynamic-height list-model pattern** (planned, Phase 13.1) &mdash; structurally-typed items (paragraph, heading, image, blockquote, list, code) rendered into native widgets that wrap text natively, instead of pre-rendered to pixmaps. Pattern from `.fractal/src/utils/grouping_list_model/`.
-- **Per-row widget factory idioms** (planned, Phase 13.1) &mdash; map block type → widget choice (`GtkLabel` for text, `GtkPicture` for images, etc.) via `GtkSignalListItemFactory`. Pattern from `.fractal/src/components/rows/`.
+- **`GListModel`-of-blocks + `GtkSignalListItemFactory` + per-row widget pattern** (v0.40.0+; `src/fw-reflow-view.c`) &mdash; structurally-typed items (paragraph, heading, image, blockquote, list, code) rendered into native widgets that wrap text natively, instead of pre-rendered to pixmaps. Pattern equivalent to Foliate's reader.js row-rendering chain.
+- **MOBI / KF7 / KF8 / AZW3 parser** (planned, Phase 13.1 Phase 4–5) &mdash; PalmDB envelope walk, PalmDOC LZ77 decompressor, EXTH metadata extraction, KF7 HTML stream / KF8 part-table dispatch. C port of `.foliate-js/mobi.js`.
+- **EPUB OPF spine walker** (v0.42.0; `src/fw-reflow-document-epub.c`) &mdash; container.xml → OPF → manifest + spine + metadata; per-chapter XHTML through GMarkupParser. C port of `.foliate-js/epub.js`'s structural walk.
+- **FB2 walker** (v0.41.0; `src/fw-reflow-document-fb2.c`) &mdash; FictionBook XML through GMarkupParser; section nesting + inline styles + `<binary>` base64 → GdkTexture. C port of `.foliate-js/fb2.js`.
+- **Pagination math** (v0.48.0; `src/fw-reflow-view.c::recompute_pagination`) &mdash; viewport-driven block-level pagination. Block-only granularity for now; line-level Pango-split is a follow-up. Pattern conceptually from `.foliate-js/paginator.js`.
+- **Reading-position persistence** (v0.50.0; `src/fw-state.c`) &mdash; first-block index of active page survives across sessions. Pattern from Foliate's reader.js.
 
 ### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions, async search, threading hybrid*
 Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE) (compatible).
@@ -270,12 +274,7 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 
 - **Webtoon mode (zero-gap continuous strip)** (v0.27; `src/fw-view.c::recompute_layout`) &mdash; F5 toggle drops `PAGE_GAP` to zero so vertically-laid-out long-strip comics stitch into a seamless single canvas. Conceptual pattern from Komikku's reader pager.
 - **Facing pages with cover-standalone** (v0.27; `src/fw-view.c::view_page_is_paired`) &mdash; F10 toggle pairs pages 1+2, 3+4, etc., with page 0 as the standalone cover. Mirrors how a physical book opens.
-- **Phase 13.1 reader-pager pattern reference** (planned) &mdash; secondary reference for the Fractal-style EPUB reflow rewrite, alongside Fractal itself. See `.komikku/komikku/reader/pager/`.
-
-### [Foliate](https://johnfactotum.github.io/foliate/) &mdash; *feature-complete ebook UX (no code borrows)*
-Copyright © John Factotum. Licensed [GPL-3.0-or-later](https://github.com/johnfactotum/foliate/blob/master/LICENSE) (compatible, but unused).
-
-Foliate is the serious GNOME ebook reader — annotation, sync, DRM-aware conversion, full publisher CSS. Their stack is WebKitGTK + JavaScript (ebook.js), so the implementation patterns don't transfer to native GTK and **no code is borrowed**. Mentioned here because Foliate is the explicit "we are not trying to replace this" reference in `docs/fractal-rewrite.md`: Framework's reflow mode is "open this EPUB cleanly without launching another app," not "be the best ebook reader on Linux."
+- **Phase 13.1 reader-pager pattern reference** (planned) &mdash; secondary reference for the Foliate-style EPUB reflow rewrite, alongside foliate-js itself. See `.komikku/komikku/reader/pager/`.
 
 ### Rendering engines (system libraries, no source vendored)
 
@@ -306,7 +305,7 @@ Framework's source code is licensed under the [GNU General Public License, versi
 
 Because Framework links against [MuPDF](https://mupdf.com/) (AGPL-3.0), the **shipping binary** is effectively AGPL-3.0 &mdash; redistributors must make corresponding source available. Framework's *source* remains GPL-3-or-later: when distributing source, recipients may choose any GPL version 3 or later.
 
-When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Fractal, Komikku) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator). Zlib techniques (Zathura, zathura-pdf-mupdf) and GPL-2-or-later techniques (MComix) are also cleanly compatible. Plato (AGPL-3.0) is technique-reference only — no code is copied. The original authors are credited in the [Influences](#influences-and-borrowed-techniques) section above and our SPDX headers stay `GPL-3.0-or-later` regardless of source.
+When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Foliate, Komikku) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator). Zlib techniques (Zathura, zathura-pdf-mupdf), MIT techniques (foliate-js), and GPL-2-or-later techniques (MComix) are also cleanly compatible. Plato (AGPL-3.0) is technique-reference only — no code is copied. The original authors are credited in the [Influences](#influences-and-borrowed-techniques) section above and our SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
 ## Support
 

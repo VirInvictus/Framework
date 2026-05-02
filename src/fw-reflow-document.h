@@ -2,7 +2,7 @@
  *
  * Parallel to FwDocument but for formats that flow as a sequence of
  * structurally-typed blocks rather than fixed-layout pages. See
- * docs/fractal-rewrite.md.
+ * docs/foliate-rewrite.md.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

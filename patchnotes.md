@@ -2,6 +2,41 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.51.0 (2026-05-02)
+
+*Reference-repo swap: `.fractal/` → `.foliate/` + `.foliate-js/`. Naming correction throughout.*
+
+This is structural / documentation only. Brandon's been calling the Phase 13.1 architecture "Fractal-style" since v0.40.0, but the actual reference he meant all along was **Foliate** (the GNOME ebook reader) and its parser library **foliate-js**. Fractal is a Matrix chat client — the wrong app entirely. The architectural pattern (`GListModel` of structurally-typed blocks → factory → native widget per row) is correct; the name was wrong.
+
+### What changed
+
+- **`.fractal/` deleted** from disk and removed from `.gitignore`. The Fractal source was a chat-app reference that contributed nothing to format parsing.
+- **`.foliate/` cloned** (the GTK app, GJS, GPL-3-or-later) — reference for paginated UX, font preferences, reading-position model.
+- **`.foliate-js/` cloned** (the parser library, MIT) — **canonical implementation reference for every reflow format Framework targets**:
+  - `mobi.js` — PalmDB envelope, PalmDOC LZ77, KF7/KF8 unpacking, EXTH metadata.
+  - `epub.js` — OPF spine walk, NCX/nav TOC, manifest-driven asset resolution.
+  - `fb2.js` — FictionBook XML walker, inline-style mapping, base64 binary extraction.
+  - `paginator.js` — pagination math.
+  - `text-walker.js` — search across blocks.
+- **`docs/fractal-rewrite.md` renamed → `docs/foliate-rewrite.md`** via `git mv` (history preserved).
+- **CLAUDE.md "Reference repos" section** rewritten to reference `.foliate/` + `.foliate-js/` + `.komikku/`. License compatibility matrix updated (Foliate GPL-3+, foliate-js MIT — both compatible).
+- **README.md "Influences and borrowed techniques"** — the Fractal subsection is gone, replaced by a Foliate / foliate-js subsection that calls out the per-format borrowing chain (mobi.js → MOBI backend, epub.js → EPUB backend, fb2.js → FB2 backend, paginator.js → pagination math, etc.). The orphan "Foliate (no code borrows)" subsection at the bottom is removed since we now borrow heavily.
+- **roadmap.md** — the Phase 13.1 line renamed "Fractal-Style" → "Foliate-Style" with a parenthetical explaining the slip.
+- **`src/fw-reflow-document.h` doc-comment** updated to point at `docs/foliate-rewrite.md`.
+
+### What stays
+
+- **Patchnotes from v0.40.0 onward** still call this work "Fractal-style" — they're historical record and aren't rewritten.
+- **The architecture itself** — `FwReflowDocument` interface, `GListModel<FwBlock>` block model, factory-driven `GtkListView`, slice-based pagination — all correct. Foliate's reader.js uses the equivalent JavaScript shape; the C side is an honest port.
+
+### Why this matters going forward
+
+Phase 13.1 Phase 4 (MOBI) and Phase 5 (AZW3) have a real implementation reference now. The hand-rolled MOBI parser attempted in this session was getting wrong results on real Calibre-generated `.mobi` files — KF7's trailing-data byte-counting is more nuanced than naive readings of the kindle-unpack source suggest. The next slice rewrites the MOBI backend against `.foliate-js/mobi.js` line-by-line, with the tolerance properties Foliate's JavaScript runtime provides naturally (`undefined`-coercion on bad LZ77 back-refs, `subarray(0, -length)` clamping to empty rather than throwing) translated into matching C semantics so real-world malformed MOBIs degrade gracefully instead of failing the whole open.
+
+No code changes; structural / docs only.
+
+---
+
 ## v0.50.0 (2026-05-02)
 
 *Reading-position persistence for reflow documents — close an EPUB and reopen it tomorrow, you land on the same content you were reading.* The fixed-layout pipeline already had this via `fw-state.c`'s per-doc `state.json`; this slice extends the same mechanism to reflow.

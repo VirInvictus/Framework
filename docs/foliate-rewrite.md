@@ -1,26 +1,43 @@
-# Fractal-Style Reflow Rewrite — Design Note
+# Foliate-Style Reflow Rewrite — Design Note
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-This document scopes the EPUB/MOBI/AZW3/FB2/TXT reflow rewrite tracked
-as **Phase 13.1 — Fractal-Style EPUB Reflow** in `roadmap.md`. The
-rewrite is the largest single architectural change planned for
-Framework post-1.0, so this note exists to lock down the scope, the
-boundary against the existing fixed-layout pipeline, and the
-implementation order *before* a single line of code lands.
+This document scopes the EPUB / MOBI / AZW3 / FB2 / TXT reflow
+rewrite tracked as **Phase 13.1 — Foliate-Style Reflow** in
+`roadmap.md`. The rewrite is the largest single architectural change
+planned for Framework post-1.0, so this note exists to lock down the
+scope, the boundary against the existing fixed-layout pipeline, and
+the implementation order *before* a single line of code lands.
 
 The `FwView` + MuPDF + `FwCache` pipeline is not touched. Reflow runs
 in parallel as `FwReflowView` + `FwReflowDocument` + native GTK
 widgets, dispatched at file-open time.
 
-> **Where to read along.** Fractal's source is checked out in this
-> repo at `.fractal/` (gitignored, shallow clone — see `CLAUDE.md`
-> "Reference repos"). The list-model pattern this rewrite is named
-> after lives at `.fractal/src/utils/grouping_list_model/` and the
-> per-row widget factories at `.fractal/src/components/rows/`. Read
-> those alongside this doc — the architecture in section 2 is
-> directly informed by both. Komikku's reflow code at
-> `.komikku/komikku/reader/pager/` is the secondary reference.
+> **Where to read along.** Foliate's source is checked out in this
+> repo at `.foliate/` (GJS GTK4 app) and `.foliate-js/` (the parser
+> library, MIT-licensed) — both gitignored, shallow clones. The
+> canonical format-parsing references for this rewrite live in
+> `.foliate-js/`:
+> * `.foliate-js/mobi.js` — PalmDB envelope, PalmDOC LZ77,
+>   KF7/KF8 / MOBI / AZW3 unpacking
+> * `.foliate-js/epub.js` — OPF spine walk, NCX/nav TOC,
+>   manifest-driven asset resolution
+> * `.foliate-js/fb2.js` — FictionBook XML walker, inline-style
+>   mapping, base64 binary extraction
+> * `.foliate-js/paginator.js` — pagination math
+> * `.foliate-js/text-walker.js` — search across blocks
+>
+> Komikku's reader-pager code at `.komikku/komikku/reader/pager/`
+> is the secondary reference for paginated UX cadence (manga + comic
+> formats already informed v0.27).
+>
+> **Historical note.** Patchnotes from v0.40.0 onward refer to this
+> work as "Fractal-style" — that's a slip; the actual reference
+> Brandon meant was always Foliate. Patchnotes are kept as-is as
+> historical record; new docs say "Foliate-style". The
+> `FwReflowDocument` + `GListModel`-of-blocks + factory architecture
+> remains correct — Foliate's reader.js uses the equivalent
+> JavaScript shape.
 
 ---
 
@@ -335,22 +352,28 @@ per-repo file map. **Read these alongside this doc** — the
 architecture is directly informed by them, and the implementation
 will lift idioms from each.
 
-- **Fractal** — `.fractal/src/utils/grouping_list_model/` —
-  Rust/GTK4. The dynamic-height list-model pattern this rewrite is
-  named after. Fractal is a chat app, but the same architecture (a
-  `GListModel` of structurally-typed items, each rendered by a
-  factory into a native widget that wraps text natively) is exactly
-  what reflowed paragraphs want. Also `.fractal/src/components/rows/`
-  for the per-row widget factory idioms.
-- **Komikku** — `.komikku/komikku/reader/pager/` — Python/GTK4. Top-
-  tier native GNOME manga reader; secondary reference for the
+- **Foliate** — `.foliate/`, GJS / GTK4. Native GNOME ebook reader;
+  the reference UX for paginated reading, font preferences,
+  reading-position persistence. Read `.foliate/src/reader.js` and
+  `.foliate/src/paginator.js` for the per-row idioms equivalent to
+  our `GListModel` + factory pattern.
+- **foliate-js** — `.foliate-js/`, MIT-licensed JavaScript. The
+  canonical implementation reference for every reflow format
+  Framework targets:
+  - `.foliate-js/mobi.js` — PalmDB envelope, PalmDOC LZ77 decoder,
+    KF7 / KF8 / MOBI / AZW3 unpacking, EXTH metadata.
+  - `.foliate-js/epub.js` — OPF spine walk, NCX / nav-doc TOC,
+    manifest-driven asset resolution.
+  - `.foliate-js/fb2.js` — FictionBook XML walker.
+  - `.foliate-js/paginator.js` — pagination math (column-based;
+    Framework's adaptation lives in `FwReflowView`'s block-level
+    pagination).
+  - `.foliate-js/text-walker.js` — search across blocks.
+- **Komikku** — `.komikku/komikku/reader/pager/`, Python / GTK4.
+  Top-tier native GNOME manga reader; secondary reference for the
   reflow / paginated dispatch logic and chapter handling.
-- **Foliate** — *not in `.fractal/` checkouts.* Feature reference
-  only, not architecture: their stack is WebKitGTK + JavaScript
-  (ebook.js), so the implementation patterns don't transfer to
-  native GTK. Useful for "what does a finished ebook reader's UX
-  look like" but nothing else.
-- **`kindle-unpack`** (not vendored — Python upstream) — the de
-  facto reference for the PalmDOC LZ77 decompressor and KF7/KF8
-  layout. Will need to be re-expressed in C; the algorithm is well
-  documented and small (~100 LOC).
+- **`kindle-unpack`** and **calibre's `mobiunpack`** (not vendored —
+  Python upstream). Secondary references for the PalmDOC LZ77
+  decompressor and KF7/KF8 layout — useful when foliate-js is
+  ambiguous on edge cases (real-world MOBIs sometimes have malformed
+  trailing-data byte counts that need defensive parsing).
