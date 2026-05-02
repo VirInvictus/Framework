@@ -152,26 +152,15 @@ strip_trailing_entries (const guchar *rec, gsize len,
 /* ── EXTH metadata — port of getEXTH ──────────────────────────
  *
  * Foliate's EXTH_RECORD_TYPE table maps codes to (name, type, isArray).
- * We extract just the strings we need: title (503), creator (100),
- * publisher (101), language (524). Everything else is ignored for
- * now. */
-typedef struct {
-  guint32  code;
-  const char *key;
-} ExthMap;
-
-static const ExthMap EXTH_MAP[] = {
-  { 100, "author" },     /* creator */
-  { 101, "publisher" },
-  { 503, "title" },
-  { 524, "language" },
-  { 0,   NULL },
-};
+ * We extract title (503), creator (100), publisher (101), language
+ * (524), cover_offset (201, uint), thumbnail_offset (202, uint).
+ * Everything else is ignored. */
 
 static void
 walk_exth (const guchar *exth, gsize exth_len,
            char **out_title, char **out_author,
-           char **out_publisher, char **out_language)
+           char **out_publisher, char **out_language,
+           guint32 *out_cover_offset)
 {
   if (exth_len < 12) return;
   if (memcmp (exth, "EXTH", 4) != 0) return;
@@ -184,23 +173,45 @@ walk_exth (const guchar *exth, gsize exth_len,
     if (len < 8 || off + len > exth_len) break;
     gsize payload = len - 8;
 
+    /* String fields: first-write-wins (some EXTHs declare the same
+     * code multiple times). */
     char **slot = NULL;
-    for (const ExthMap *m = EXTH_MAP; m->key; m++) {
-      if (m->code == code) {
-        if      (g_str_equal (m->key, "author"))    slot = out_author;
-        else if (g_str_equal (m->key, "publisher")) slot = out_publisher;
-        else if (g_str_equal (m->key, "title"))     slot = out_title;
-        else if (g_str_equal (m->key, "language"))  slot = out_language;
-        break;
-      }
-    }
-    /* First-write-wins — multiple EXTH records with the same code
-     * are common (e.g. multiple authors); we keep the first. */
+    if      (code == 100) slot = out_author;
+    else if (code == 101) slot = out_publisher;
+    else if (code == 503) slot = out_title;
+    else if (code == 524) slot = out_language;
+
     if (slot && !*slot && payload > 0)
       *slot = g_strndup ((const char *) exth + off + 8, payload);
 
+    /* coverOffset (201) — uint, 0-based offset into resource records. */
+    if (code == 201 && payload >= 4 && out_cover_offset && *out_cover_offset == 0xffffffff)
+      *out_cover_offset = read_be32 (exth + off + 8);
+
     off += len;
   }
+}
+
+/* ── Image decoding — port of MOBI.loadResource ───────────────
+ *
+ * Foliate's loadResource peels off FONT/VIDE/AUDI prefixes and
+ * returns raw bytes. For images, the bytes are JPEG/PNG/GIF
+ * directly — gdk_texture_new_from_bytes handles all three.
+ * Magic-byte check filters obviously-non-image records (FLIS,
+ * FCIS, BOUNDARY, etc.) before we hand bytes to GdkTexture. */
+static gboolean
+looks_like_image (const guchar *p, gsize n)
+{
+  if (n < 4) return FALSE;
+  /* JPEG: FF D8 FF */
+  if (p[0] == 0xFF && p[1] == 0xD8 && p[2] == 0xFF) return TRUE;
+  /* PNG: 89 50 4E 47 */
+  if (p[0] == 0x89 && p[1] == 0x50 && p[2] == 0x4E && p[3] == 0x47) return TRUE;
+  /* GIF87a / GIF89a */
+  if (n >= 6 && memcmp (p, "GIF8", 4) == 0) return TRUE;
+  /* WebP: RIFF????WEBP */
+  if (n >= 12 && memcmp (p, "RIFF", 4) == 0 && memcmp (p + 8, "WEBP", 4) == 0) return TRUE;
+  return FALSE;
 }
 
 /* ── Top-level open ───────────────────────────────────────────── */
@@ -305,9 +316,15 @@ fw_mobi_parse (const char *path, GError **error)
   if (r0 + 244 <= r0_end)
     trailing_flags = read_be32 (data + r0 + 240);
 
+  /* resourceStart: foliate [108, 4]. The first PDB record at this
+   * index is the start of the image / font / media records. */
+  guint32 resource_start = (r0 + 112 <= r0_end)
+                             ? read_be32 (data + r0 + 108) : 0xffffffff;
+
   /* EXTH (gated by exthFlag, bit 0x40). foliate exthFlag offset = 128. */
   char *meta_title = NULL, *meta_author = NULL;
   char *meta_publisher = NULL, *meta_language = NULL;
+  guint32 cover_offset = 0xffffffff;
   guint32 exth_flag = (r0 + 132 <= r0_end) ? read_be32 (data + r0 + 128) : 0;
   if (exth_flag & 0x40) {
     /* foliate: getEXTH(buf.slice(mobi.length + 16), encoding).
@@ -317,7 +334,8 @@ fw_mobi_parse (const char *path, GError **error)
     if (exth_off + 12 <= r0_end) {
       walk_exth (data + exth_off, r0_end - exth_off,
                  &meta_title, &meta_author,
-                 &meta_publisher, &meta_language);
+                 &meta_publisher, &meta_language,
+                 &cover_offset);
     }
   }
   /* Title fallback: MobiHeader.titleOffset/Length. foliate offsets
@@ -377,14 +395,71 @@ fw_mobi_parse (const char *path, GError **error)
     utf8_body = g_string_free (body, FALSE);
   }
 
+  /* Image-record extraction. Walk records [resourceStart..end] —
+   * records that look like JPEG/PNG/GIF/WebP get decoded into a
+   * recindex → GdkTexture map. recindex is 1-based, so MOBI's
+   * `<img recindex="3">` points at images[3-1]. */
+  GHashTable *images_ht =
+    g_hash_table_new_full (g_str_hash, g_str_equal,
+                           g_free, g_object_unref);
+  guint cover_recindex = 0;
+
+  if (resource_start != 0xffffffff && resource_start < record_count) {
+    /* MOBI image records have 1-based indices. record at
+     * (resource_start + 0) is recindex 1. */
+    guint32 last = record_count;
+    /* Cap at a reasonable per-book image count. */
+    if (last - resource_start > 4096)
+      last = resource_start + 4096;
+
+    for (guint32 r = resource_start, idx = 0; r < last; r++, idx++) {
+      gsize off = roff[r];
+      gsize len = roff[r + 1] - off;
+      if (off + len > raw_len || len < 4) continue;
+      const guchar *p = data + off;
+
+      /* Foliate skips FONT (deobfuscate) / VIDE / AUDI prefixes;
+       * we don't support those formats yet — filter them out. */
+      if (memcmp (p, "FONT", 4) == 0 ||
+          memcmp (p, "VIDE", 4) == 0 ||
+          memcmp (p, "AUDI", 4) == 0 ||
+          memcmp (p, "BOUN", 4) == 0 ||      /* boundary marker */
+          memcmp (p, "FLIS", 4) == 0 ||
+          memcmp (p, "FCIS", 4) == 0 ||
+          memcmp (p, "FDST", 4) == 0 ||
+          memcmp (p, "DATP", 4) == 0 ||
+          memcmp (p, "SRCS", 4) == 0)
+        continue;
+
+      if (!looks_like_image (p, len)) continue;
+
+      g_autoptr (GBytes) bytes = g_bytes_new (p, len);
+      g_autoptr (GError) e = NULL;
+      GdkTexture *tex = gdk_texture_new_from_bytes (bytes, &e);
+      if (!tex) continue;
+
+      /* recindex is 1-based: idx 0 → "1". */
+      g_autofree char *key = g_strdup_printf ("%u", idx + 1);
+      g_hash_table_insert (images_ht, g_strdup (key), tex);
+
+      /* coverOffset (EXTH 201) is also a 0-based offset into the
+       * resource-record range. If it matches the current idx, this
+       * is the cover image. */
+      if (cover_offset != 0xffffffff && cover_offset == idx)
+        cover_recindex = idx + 1;
+    }
+  }
+
   FwMobiParsed *p = g_new0 (FwMobiParsed, 1);
-  p->body      = utf8_body;
-  p->body_len  = utf8_len;
-  p->title     = meta_title;
-  p->author    = meta_author;
-  p->language  = meta_language;
-  p->publisher = meta_publisher;
-  p->is_kf8    = is_kf8;
+  p->body           = utf8_body;
+  p->body_len       = utf8_len;
+  p->title          = meta_title;
+  p->author         = meta_author;
+  p->language       = meta_language;
+  p->publisher      = meta_publisher;
+  p->images         = images_ht;
+  p->cover_recindex = cover_recindex;
+  p->is_kf8         = is_kf8;
   return p;
 }
 
@@ -397,5 +472,6 @@ fw_mobi_parsed_free (FwMobiParsed *p)
   g_free (p->author);
   g_free (p->language);
   g_free (p->publisher);
+  g_clear_pointer (&p->images, g_hash_table_unref);
   g_free (p);
 }

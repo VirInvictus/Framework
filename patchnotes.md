@@ -2,6 +2,35 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.53.0 (2026-05-02)
+
+*MOBI image extraction — covers and inline graphics now display.* The MOBI parser walks the PDB resource records starting at `resourceStart` (foliate's [108, 4]), magic-sniffs each record, and decodes JPEG / PNG / GIF / WebP into `GdkTexture`s keyed by 1-based recindex. The HTML walker resolves `<img recindex="N">` to those textures via the existing image plumbing.
+
+### Pipeline
+
+`fw_mobi_parse` gains a `GHashTable<recindex_string, GdkTexture>` and a `cover_recindex` field. The walk filters out FONT / VIDE / AUDI / FLIS / FCIS / FDST / DATP / SRCS / BOUN container records (foliate's `loadResource` peels these off), then `looks_like_image` magic-sniffs JPEG (FF D8 FF), PNG (89 50 4E 47), GIF8x, and RIFF...WEBP. `gdk_texture_new_from_bytes` decodes — same path EPUB and FB2 already use.
+
+EXTH code 201 (`coverOffset`) tells us which resource record is the cover. When present, `mobi_open` pushes an `FW_BLOCK_IMAGE` referencing that recindex as the **first** block in the document, so the user sees the cover when the file opens.
+
+### `<img recindex>` block emission
+
+The MOBI HTML walker previously skipped `<img>` entirely. Now it pushes an `FW_BLOCK_IMAGE` with `image_id = recindex` for every `<img recindex="N">`. `mobi_get_image` looks up by that string in the document's images hash, returns the texture; the view's existing GtkPicture path renders it.
+
+### Verified
+
+The Broken God — opens with the cover image as the first block, full text + 5,336 blocks. ASan + UBSan clean. EPUB / FB2 / TXT regression checks pass. All 5 stress tests still pass.
+
+### Foliate parity
+
+This is a direct port of foliate's `MOBI.loadResource` + `MOBI6.loadRecindex` + `getCover` chain. The remaining MOBI parity items:
+
+- **NCX / guide TOC** — foliate's `MOBI6.getGuide` walks `<reference filepos>` from section 0 + `<a filepos>` in the TOC section. Our sidebar is still empty for MOBIs. Next slice.
+- **`filepos:N` anchor URIs** — internal-link scheme. Next slice alongside the TOC.
+- **KF8 / AZW3** — task #20.
+- **HuffDic compression** — rare; deferred.
+
+---
+
 ## v0.52.0 (2026-05-02)
 
 *Phase 13.1 Phase 4 — MOBI/KF7 backend, ported from foliate-js.* Real Calibre-generated `.mobi` files now open with full text. Algorithm port + tag-soup balancer + heuristic pagination.

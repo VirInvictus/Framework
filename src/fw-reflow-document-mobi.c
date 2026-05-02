@@ -21,6 +21,7 @@ struct _FwReflowDocumentMobi {
   GListStore   *toc;
   GHashTable   *metadata;
   GHashTable   *anchors;
+  GHashTable   *images;     /* gchar* (recindex string) → GdkTexture */
   char         *path;
 };
 
@@ -373,6 +374,28 @@ on_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
     return;
   }
 
+  /* MOBI <img recindex="N"> — N is the 1-based image record index.
+   * The image has been pre-decoded into the document's images hash;
+   * push an FW_BLOCK_IMAGE with image_id = recindex string. The view
+   * resolves this through fw_reflow_document_get_image. */
+  if (g_str_equal (name, "img")) {
+    flush_accum (cc);
+    const char *recindex = NULL;
+    for (int i = 0; attr_names[i]; i++) {
+      if (g_str_equal (attr_names[i], "recindex")) {
+        recindex = attr_values[i];
+        break;
+      }
+    }
+    if (recindex && *recindex) {
+      FwBlock *img = fw_block_new (FW_BLOCK_IMAGE, 0, NULL,
+                                    recindex, NULL, 0);
+      g_list_store_append (cc->blocks, img);
+      g_object_unref (img);
+    }
+    return;
+  }
+
   if (cc->accum_active) {
     const char *open = inline_open (name);
     if (open) g_string_append (cc->accum, open);
@@ -446,6 +469,23 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   g_hash_table_insert (self->metadata, g_strdup ("format"),
                        g_strdup ("Mobipocket (KF7)"));
 
+  /* Steal the image hash from the parsed struct — it carries
+   * already-decoded GdkTextures keyed by recindex string. */
+  if (m->images) {
+    g_clear_pointer (&self->images, g_hash_table_unref);
+    self->images = m->images;
+    m->images = NULL;
+  }
+
+  /* If a cover image was identified via EXTH-201, push it as the
+   * first block so the user sees the cover when the doc opens. */
+  if (m->cover_recindex > 0) {
+    g_autofree char *id = g_strdup_printf ("%u", m->cover_recindex);
+    FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL, 0);
+    g_list_store_append (self->blocks, cover);
+    g_object_unref (cover);
+  }
+
   if (m->body_len == 0) {
     /* Empty body — open succeeds with metadata only; user sees an
      * empty document. Better than failing the open path. */
@@ -512,7 +552,10 @@ static GListModel *mobi_get_block_model (FwReflowDocument *doc) {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_MOBI (doc)->blocks);
 }
 static GdkTexture *mobi_get_image (FwReflowDocument *doc, const char *id) {
-  (void) doc; (void) id; return NULL;
+  if (!id) return NULL;
+  FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
+  if (!self->images) return NULL;
+  return g_hash_table_lookup (self->images, id);
 }
 static GListModel *mobi_get_toc (FwReflowDocument *doc) {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_MOBI (doc)->toc);
@@ -551,6 +594,7 @@ fw_reflow_document_mobi_finalize (GObject *object)
   g_clear_object (&self->toc);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
   g_clear_pointer (&self->anchors,  g_hash_table_unref);
+  g_clear_pointer (&self->images,   g_hash_table_unref);
   g_clear_pointer (&self->path,     g_free);
   G_OBJECT_CLASS (fw_reflow_document_mobi_parent_class)->finalize (object);
 }
@@ -568,6 +612,8 @@ fw_reflow_document_mobi_init (FwReflowDocumentMobi *self)
   self->toc      = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
   self->metadata = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   self->anchors  = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  self->images   = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                          g_free, g_object_unref);
 }
 
 FwReflowDocumentMobi *
