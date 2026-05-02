@@ -23,4 +23,11 @@ void          fw_reflow_view_set_document  (FwReflowView     *self,
 void          fw_reflow_view_scroll_to_anchor (FwReflowView *self,
                                                const char   *anchor);
 
+/* Page-by-page navigation. `direction` of +1 advances one viewport, -1
+ * goes back one, 0 returns to the top, INT_MAX jumps to the end. The
+ * step matches the listview's vadjustment page-size so headings, list
+ * items and images all scroll uniformly. */
+void          fw_reflow_view_scroll_by_page   (FwReflowView *self,
+                                               int           direction);
+
 G_END_DECLS

@@ -209,7 +209,10 @@ prev_page_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  go_to_page (self, self->current_page - 1);
+  if (self->reflow_doc)
+    fw_reflow_view_scroll_by_page (self->reflow_view, -1);
+  else
+    go_to_page (self, self->current_page - 1);
 }
 
 static void
@@ -217,7 +220,10 @@ next_page_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  go_to_page (self, self->current_page + 1);
+  if (self->reflow_doc)
+    fw_reflow_view_scroll_by_page (self->reflow_view, +1);
+  else
+    go_to_page (self, self->current_page + 1);
 }
 
 static void
@@ -607,10 +613,26 @@ static void act_zoom_out   (GSimpleAction *a, GVariant *p, gpointer d) { (void)a
 static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; set_zoom(d, 1.0); }
 static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); }
 static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
-static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; go_to_page(w, w->current_page + 1); }
-static void act_prev_page  (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; go_to_page(w, w->current_page - 1); }
-static void act_first_page (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; go_to_page(d, 0); }
-static void act_last_page  (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; if(w->document) go_to_page(w, fw_document_get_page_count(w->document)-1); }
+static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, +1);
+  else               go_to_page (w, w->current_page + 1);
+}
+static void act_prev_page  (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, -1);
+  else               go_to_page (w, w->current_page - 1);
+}
+static void act_first_page (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, 0);
+  else               go_to_page (w, 0);
+}
+static void act_last_page  (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, G_MAXINT);
+  else if (w->document) go_to_page (w, fw_document_get_page_count(w->document) - 1);
+}
 static void act_toggle_sidebar (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; sidebar_clicked(NULL, w); }
 
 static void act_toggle_fullscreen (GSimpleAction *a, GVariant *p, gpointer d)
@@ -1112,6 +1134,11 @@ on_scroll (GtkEventControllerScroll *controller,
   if (!self->view || dy == 0)
     return FALSE;
 
+  /* Reflow path owns its own scrolled window with native kinetic
+   * scroll. Don't intercept — let the listview handle the event. */
+  if (self->reflow_doc)
+    return FALSE;
+
   GdkModifierType state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (controller));
   if ((state & GDK_CONTROL_MASK) != 0) {
     if (dy < 0) {
@@ -1151,6 +1178,24 @@ on_key_pressed (GtkEventControllerKey *controller,
 
   if (!self->view)
     return FALSE;
+
+  /* Reflow keymap: vertical arrows scroll, horizontal arrows turn
+   * pages, the listview's scrolled window handles the actual
+   * adjustment. */
+  if (self->reflow_doc) {
+    switch (keyval) {
+    case GDK_KEY_Left:
+      fw_reflow_view_scroll_by_page (self->reflow_view, -1);
+      return TRUE;
+    case GDK_KEY_Right:
+      fw_reflow_view_scroll_by_page (self->reflow_view, +1);
+      return TRUE;
+    /* Up / Down / Page* / Home / End — let GTK's default focus walk
+     * dispatch to the listview, which already handles them. */
+    default:
+      return FALSE;
+    }
+  }
 
   GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
   GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scroll);
@@ -1859,12 +1904,26 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   gtk_label_set_text (self->title_label, basename);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->title_label), path);
 
-  /* Reflow view doesn't expose page-count or zoom — clear the
-   * fixed-layout chrome so the header bar isn't lying. Hiding rather
-   * than rebuilding the header keeps Phase 1 minimal; the chrome
-   * comes back when a fixed-layout doc is opened next. */
-  if (self->page_entry)        gtk_editable_set_text (GTK_EDITABLE (self->page_entry), "");
-  if (self->zoom_entry)        gtk_editable_set_text (GTK_EDITABLE (self->zoom_entry), "");
+  /* Reflow view doesn't expose page-count or zoom — hide the
+   * fixed-layout chrome and swap the page-nav arrows from
+   * vertical (scroll) to horizontal (page-turn) glyphs. */
+  if (self->page_entry)
+    gtk_widget_set_visible (GTK_WIDGET (self->page_entry), FALSE);
+  if (self->zoom_entry) {
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),    FALSE);
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button),  FALSE);
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_out_button), FALSE);
+  }
+  if (self->prev_page_button) {
+    gtk_button_set_icon_name (self->prev_page_button, "go-previous-symbolic");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->prev_page_button),
+                                 "Previous page (Left, Page Up)");
+  }
+  if (self->next_page_button) {
+    gtk_button_set_icon_name (self->next_page_button, "go-next-symbolic");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->next_page_button),
+                                 "Next page (Right, Page Down)");
+  }
 
   /* Swap the sidebar to the reflow variant and feed it the TOC model. */
   fw_sidebar_set_toc (self->sidebar, NULL);
@@ -1936,6 +1995,25 @@ fw_window_open_file (FwWindow *self, const char *path)
   if (self->sidebar_scroll)
     gtk_scrolled_window_set_child (self->sidebar_scroll,
                                     GTK_WIDGET (self->sidebar));
+
+  /* Restore the fixed-layout header chrome. */
+  if (self->page_entry)
+    gtk_widget_set_visible (GTK_WIDGET (self->page_entry), TRUE);
+  if (self->zoom_entry) {
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),     TRUE);
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button), TRUE);
+    gtk_widget_set_visible (GTK_WIDGET (self->zoom_out_button),TRUE);
+  }
+  if (self->prev_page_button) {
+    gtk_button_set_icon_name (self->prev_page_button, "go-up-symbolic");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->prev_page_button),
+                                 "Previous page (Page Up)");
+  }
+  if (self->next_page_button) {
+    gtk_button_set_icon_name (self->next_page_button, "go-down-symbolic");
+    gtk_widget_set_tooltip_text (GTK_WIDGET (self->next_page_button),
+                                 "Next page (Page Down)");
+  }
 
   /* Update title */
   g_autofree char *basename = g_path_get_basename (path);

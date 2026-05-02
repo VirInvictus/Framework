@@ -2,6 +2,56 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.45.0 (2026-05-02)
+
+*Reflow nav routing fixes — the "stuck on page 1" symptom is gone, plus the listview hover highlight is suppressed and the header arrows reflect the active mode.*
+
+### Stuck-on-first-page bug
+
+The window's capture-phase scroll and key controllers were intercepting every event and applying the result to the **fixed-layout** scrolled window — even when the reflow view was the visible child. Wheel events and arrow keys got consumed by the window but written into a hidden vadjustment, so the EPUB looked unscrollable.
+
+Fix: both `on_scroll` and `on_key_pressed` now early-return to the default propagation path when `self->reflow_doc` is set, letting the listview's own scrolled window receive the event natively. The fixed-layout damping/cap (`SCROLL_MAX_STEP`) is preserved for PDF/DjVu where it matters; reflow gets GTK's stock kinetic scroll, which is what every native list-of-text widget on the platform expects.
+
+### Page-by-page nav for reflow
+
+New `fw_reflow_view_scroll_by_page(self, direction)` advances by viewport height, with a 40 px overlap so a line of context spans the page turn (matches Foliate's ergonomic). `direction` is +1 / -1 / 0 (jump to start) / `G_MAXINT` (jump to end).
+
+Wired through:
+
+- **`Page Down` / `Space` / scroll wheel** → handled natively by the listview.
+- **`Left` / `Right` arrow** → page-turn (LTR reading order).
+- **`win.next-page` / `win.prev-page`** actions → `scroll_by_page(±1)` for reflow, existing `go_to_page` for fixed-layout.
+- **`win.first-page` / `win.last-page`** actions → `scroll_by_page(0)` / `scroll_by_page(MAXINT)` for reflow.
+- **Header arrow buttons** — `prev_page_clicked` / `next_page_clicked` callbacks branch the same way.
+
+### Header chrome reflects mode
+
+When a reflow document opens:
+
+- The page-nav arrows swap from `go-up-symbolic` / `go-down-symbolic` (vertical scroll glyphs) to `go-previous-symbolic` / `go-next-symbolic` (horizontal page-turn glyphs) — the visual cue Brandon called out for EPUB / MOBI / AZW3.
+- The page entry hides (no concept of "page X of Y" in continuous reflow).
+- The zoom entry + ± buttons hide (no zoom in reflow; font-size adjustment lands in v0.46.0).
+
+When a fixed-layout document opens, all of the above are restored. Both icons get matching tooltip text.
+
+### Hover/selection highlight suppressed
+
+`GtkListView`'s default `:hover` and `:selected` row backgrounds are appropriate for picker UI but actively distracting for a book. The reflow listview now carries a `reflow-listview` CSS class; a few rules in the existing CSS provider null out `background`, `box-shadow`, and `outline` for `> row:hover`, `> row:selected`, `> row:focus`. Selection still works internally (the model tracks it for navigation) — it just doesn't draw any background.
+
+### Verified
+
+- *Verdant Passage* EPUB — opens, scrolls, pages through with arrow keys / header buttons / Page Down. ASan + UBSan clean.
+- PDF (Effective Java) regression — fixed-layout scroll cap + arrow-key behavior preserved.
+- All 5 stress tests still pass.
+
+### Still upcoming (per Brandon's feedback this round)
+
+- **v0.46.0** — bundled reading fonts (serif body, OpenDyslexic, monospace) + font-preference GSettings + a settings dialog. The infrastructure for picking a font lands here; defaults fall back to system fonts until the bundle is in.
+- **v0.47.0+** — true paginated single-page-at-a-time mode (current behavior is windowed continuous scroll); two-column option behind a toggle.
+- **Phase 13.1 Phase 4** — MOBI backend (PalmDOC LZ77 + KF7).
+
+---
+
 ## v0.44.0 (2026-05-02)
 
 *Reflow TOC sidebar — F9 in an EPUB or FB2 now shows a clickable chapter list, and clicking a chapter scrolls the listview to it.* The reflow backends were already producing `GListModel<FwReflowTocItem>`s; the missing pieces were a sidebar widget that consumes them and the dispatch wiring in the window.

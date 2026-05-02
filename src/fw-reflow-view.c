@@ -191,7 +191,18 @@ static const char REFLOW_CSS[] =
   "                    padding-left: 12px; }"
   ".reflow-chapter   { font-weight: bold; opacity: 0.6; }"
   ".reflow-image     { background: alpha(currentColor, 0.04); "
-  "                    border-radius: 4px; }";
+  "                    border-radius: 4px; }"
+  /* Suppress GtkListView's default row hover/selection highlight —
+   * a chat-app idiom inappropriate for a book reader. */
+  ".reflow-listview > row,"
+  ".reflow-listview > row:hover,"
+  ".reflow-listview > row:selected,"
+  ".reflow-listview > row:selected:focus,"
+  ".reflow-listview > row:focus {"
+  "    background: transparent;"
+  "    box-shadow: none;"
+  "    outline: none;"
+  "}";
 
 static void
 ensure_css (FwReflowView *self)
@@ -239,6 +250,37 @@ fw_reflow_view_scroll_to_anchor (FwReflowView *self, const char *anchor)
   if (self->list)
     gtk_list_view_scroll_to (self->list, pos,
                              GTK_LIST_SCROLL_FOCUS, NULL);
+}
+
+void
+fw_reflow_view_scroll_by_page (FwReflowView *self, int direction)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+  if (!self->scroll)
+    return;
+
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+  if (!vadj)
+    return;
+
+  double upper = gtk_adjustment_get_upper (vadj);
+  double lower = gtk_adjustment_get_lower (vadj);
+  double page  = gtk_adjustment_get_page_size (vadj);
+  double cur   = gtk_adjustment_get_value (vadj);
+
+  /* A small overlap keeps a line of context across the page turn — the
+   * common ergonomic for paginated readers (matches Foliate). */
+  double step = page > 60 ? page - 40 : page;
+
+  double next;
+  if (direction == 0)             next = lower;
+  else if (direction == G_MAXINT) next = upper - page;
+  else                            next = cur + (double) direction * step;
+
+  if (next < lower)         next = lower;
+  if (next > upper - page)  next = upper - page;
+
+  gtk_adjustment_set_value (vadj, next);
 }
 
 /* ── GObject lifecycle ────────────────────────────────────────────── */
@@ -295,6 +337,7 @@ fw_reflow_view_init (FwReflowView *self)
   gtk_list_view_set_show_separators (self->list, FALSE);
   gtk_list_view_set_single_click_activate (self->list, FALSE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->list), TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->list), "reflow-listview");
 
   self->scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (self->scroll, GTK_WIDGET (self->list));
