@@ -2175,6 +2175,17 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   fw_reflow_sidebar_set_toc (self->reflow_sidebar,
                              fw_reflow_document_get_toc (self->reflow_doc));
 
+  /* Restore reading position. fw_reflow_view_scroll_to_block queues
+   * the target if pagination hasn't run yet, so this works even when
+   * the listview hasn't been allocated. */
+  FwDocumentState *saved = fw_state_load (path);
+  if (saved) {
+    if (saved->reflow_block >= 0)
+      fw_reflow_view_scroll_to_block (self->reflow_view,
+                                       (guint) saved->reflow_block);
+    fw_document_state_free (saved);
+  }
+
   /* No file-monitor / state-restore in Phase 1. Both can land in a
    * later phase once the reflow path proves stable. */
 
@@ -2328,7 +2339,27 @@ fw_window_open_file (FwWindow *self, const char *path)
 static void
 fw_window_save_state (FwWindow *self)
 {
-  if (!self->file_path || !self->document)
+  if (!self->file_path)
+    return;
+
+  /* Reflow path: only the reflow_block matters; everything else
+   * defaults to "fixed-layout if you ever switch back". */
+  if (self->reflow_doc && self->reflow_view) {
+    int block = (int) fw_reflow_view_get_current_block (self->reflow_view);
+    FwDocumentState state = {
+      .page            = 0,
+      .scroll_position = 0,
+      .zoom_level      = 1.0,
+      .zoom_mode       = (char *) "reflow",
+      .view_mode       = (char *) "reflow",
+      .rotation        = 0,
+      .reflow_block    = block,
+    };
+    fw_state_save (self->file_path, &state);
+    return;
+  }
+
+  if (!self->document)
     return;
 
   /* Get current page and scroll position from the view */
@@ -2349,6 +2380,7 @@ fw_window_save_state (FwWindow *self)
     .zoom_mode       = (char *) "fit-width",
     .view_mode       = (char *) "continuous",
     .rotation        = self->rotation,
+    .reflow_block    = -1,
   };
 
   fw_state_save (self->file_path, &state);

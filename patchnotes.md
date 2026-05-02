@@ -2,6 +2,65 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.50.0 (2026-05-02)
+
+*Reading-position persistence for reflow documents — close an EPUB and reopen it tomorrow, you land on the same content you were reading.* The fixed-layout pipeline already had this via `fw-state.c`'s per-doc `state.json`; this slice extends the same mechanism to reflow.
+
+### `FwDocumentState::reflow_block`
+
+New field on the existing struct (`int`, defaults to `-1` for "not a reflow doc / never saved"). The fixed-layout pipeline ignores it; the reflow pipeline only cares about it.
+
+- **On save** — when `self->reflow_doc` is active, `fw_window_save_state` writes `reflow_block = fw_reflow_view_get_current_block(reflow_view)`. That returns the first-block index of the active page — block-stable across pagination changes (resize, font tweaks).
+- **On load** — `fw_window_open_reflow` calls `fw_state_load(path)` and, if `reflow_block >= 0`, dispatches it to `fw_reflow_view_scroll_to_block`.
+
+### `fw_reflow_view_scroll_to_block(block_index)`
+
+New public API. Two paths:
+
+1. **Pages already exist** — walk `pages[]`, find the range that contains the target block, set `current_page` accordingly, apply.
+2. **Pagination hasn't run yet** — stash the target in `pending_target_block` (a new `gint64` member, `-1` sentinel = no pending). The next pagination pass uses it as the anchor instead of the usual current-page-first-block heuristic, then clears it.
+
+This handles the common case: open EPUB → load saved state → call scroll_to_block → pagination idles → restored to last page.
+
+### `fw_reflow_view_get_current_block`
+
+Companion API. Returns the first-block index of the active page, or 0 when no document/no pages. Used by save_state to capture position.
+
+### Persistence format
+
+`state.json` entries now carry an extra integer member:
+
+```json
+"path/to/book.epub": {
+  "page": 0,
+  "scroll_position": 0.0,
+  "zoom_level": 1.0,
+  "zoom_mode": "reflow",
+  "view_mode": "reflow",
+  "rotation": 0,
+  "reflow_block": 1247,
+  "last_opened": "2026-05-02T20:54:11Z"
+}
+```
+
+`zoom_mode = "reflow"` flags the entry as belonging to a reflow doc (the loader doesn't actually branch on it yet, but it's a useful breadcrumb for future format-mode-mismatch detection).
+
+### Backwards-compatible
+
+Existing `state.json` entries without `reflow_block` get `-1` from `json_object_get_int_member_with_default` and the open path becomes a no-op for that key — so this slice doesn't break the existing fixed-layout state for the existing corpus.
+
+### Verified
+
+- Build clean. ASan + UBSan clean on the *Verdant Passage* open path.
+- All 5 stress tests still pass.
+- Manual test: open EPUB, navigate forward several pages, close, reopen → resumes at the same page (modulo viewport/font changes between sessions, which re-paginate).
+
+### Up next
+
+- Phase 13.1 Phase 4 — MOBI backend (PalmDOC LZ77 + KF7).
+
+---
+
 ## v0.49.0 (2026-05-02)
 
 *Two-column reflow spread + reading-mode font-size shortcuts.* The "(with the option of 2)" half of Brandon's earlier ask, plus an in-flow keyboard path for adjusting body size while reading.

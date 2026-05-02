@@ -109,6 +109,7 @@ fw_state_load (const char *path)
   state->zoom_mode       = g_strdup (json_object_get_string_member_with_default (entry, "zoom_mode", "fit-width"));
   state->view_mode       = g_strdup (json_object_get_string_member_with_default (entry, "view_mode", "continuous"));
   state->rotation        = (int) json_object_get_int_member_with_default (entry, "rotation", 0);
+  state->reflow_block    = (int) json_object_get_int_member_with_default (entry, "reflow_block", -1);
 
   return state;
 }
@@ -128,6 +129,7 @@ fw_state_save (const char *path, const FwDocumentState *state)
   json_object_set_string_member (entry, "zoom_mode", state->zoom_mode ? state->zoom_mode : "fit-width");
   json_object_set_string_member (entry, "view_mode", state->view_mode ? state->view_mode : "continuous");
   json_object_set_int_member (entry, "rotation", state->rotation);
+  json_object_set_int_member (entry, "reflow_block", state->reflow_block);
 
   g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
   g_autofree char *timestamp = g_date_time_format_iso8601 (now);

@@ -38,6 +38,18 @@ void          fw_reflow_view_scroll_by_page   (FwReflowView *self,
 guint         fw_reflow_view_get_current_page (FwReflowView *self);
 guint         fw_reflow_view_get_total_pages  (FwReflowView *self);
 
+/* Resume reading at a specific block index — used by state-restore
+ * to land on the same content the user was viewing last session.
+ * If pagination hasn't run yet (size_allocate hasn't fired), the
+ * target is queued and applied after the next pagination. */
+void          fw_reflow_view_scroll_to_block  (FwReflowView *self,
+                                               guint         block_index);
+
+/* First-block index of the currently-active page. Used by save_state
+ * to remember the user's reading position across sessions. Returns 0
+ * when no document is loaded or no pages exist. */
+guint         fw_reflow_view_get_current_block (FwReflowView *self);
+
 /* Signal:
  *   "page-changed" (uint current, uint total) — emitted after pagination
  *   recomputes or after fw_reflow_view_scroll_by_page changes pages. */

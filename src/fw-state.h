@@ -16,6 +16,11 @@ typedef struct {
   char  *zoom_mode;
   char  *view_mode;
   int    rotation;
+  /* Reflow-only: first-block index of the active page when the doc
+   * was last closed. -1 = not a reflow doc (or never saved). The
+   * fixed-layout pipeline ignores this field; the reflow pipeline
+   * ignores zoom_level / zoom_mode / view_mode / rotation. */
+  int    reflow_block;
 } FwDocumentState;
 
 void             fw_state_init    (void);

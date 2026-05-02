@@ -58,6 +58,11 @@ struct _FwReflowView {
   int                 last_alloc_w;
   int                 last_alloc_h;
   guint               repaginate_idle;
+
+  /* Pending state-restore target — set by scroll_to_block when called
+   * before pagination has produced a page table. Recompute uses it to
+   * land on the right page. -1 = no pending target. */
+  gint64              pending_target_block;
 };
 
 enum {
@@ -573,10 +578,14 @@ recompute_pagination (FwReflowView *self)
   int page_h = vh - 24;   /* small breathing room */
   if (page_h < 200) page_h = vh;
 
-  /* Remember which block the current page starts on so we can land
-   * back at approximately the same content after re-pagination. */
+  /* Anchor selection: a state-restore target wins (set by
+   * scroll_to_block before pagination existed). Otherwise preserve
+   * the user's current reading position by content. */
   guint anchor_block = 0;
-  if (self->pages->len > 0 && self->current_page < self->pages->len) {
+  if (self->pending_target_block >= 0) {
+    anchor_block = (guint) self->pending_target_block;
+    self->pending_target_block = -1;
+  } else if (self->pages->len > 0 && self->current_page < self->pages->len) {
     anchor_block =
       g_array_index (self->pages, FwPageRange, self->current_page).first;
   }
@@ -747,6 +756,43 @@ fw_reflow_view_get_total_pages (FwReflowView *self)
   return self->pages ? self->pages->len : 0;
 }
 
+void
+fw_reflow_view_scroll_to_block (FwReflowView *self, guint block_index)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+
+  /* If pagination hasn't produced pages yet, stash the target. The
+   * idle-driven recompute uses pending_target_block instead of the
+   * usual current-page anchor. */
+  if (!self->pages || self->pages->len == 0) {
+    self->pending_target_block = (gint64) block_index;
+    queue_repaginate (self);
+    return;
+  }
+
+  for (guint p = 0; p < self->pages->len; p++) {
+    FwPageRange r = g_array_index (self->pages, FwPageRange, p);
+    if (block_index >= r.first && block_index < r.first + r.count) {
+      self->current_page = p;
+      apply_current_page (self);
+      return;
+    }
+  }
+
+  /* Off the end — land on the last page. */
+  self->current_page = self->pages->len - 1;
+  apply_current_page (self);
+}
+
+guint
+fw_reflow_view_get_current_block (FwReflowView *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_VIEW (self), 0);
+  if (!self->pages || self->pages->len == 0) return 0;
+  if (self->current_page >= self->pages->len) return 0;
+  return g_array_index (self->pages, FwPageRange, self->current_page).first;
+}
+
 /* ── GObject lifecycle ────────────────────────────────────────────── */
 
 static void
@@ -872,10 +918,11 @@ fw_reflow_view_init (FwReflowView *self)
 {
   ensure_css (self);
 
-  self->pages         = g_array_new (FALSE, FALSE, sizeof (FwPageRange));
-  self->current_page  = 0;
-  self->last_alloc_w  = 0;
-  self->last_alloc_h  = 0;
+  self->pages                = g_array_new (FALSE, FALSE, sizeof (FwPageRange));
+  self->current_page         = 0;
+  self->last_alloc_w         = 0;
+  self->last_alloc_h         = 0;
+  self->pending_target_block = -1;
 
   /* Two columns; right one starts hidden. The active column count
    * is driven by the reading-two-column GSetting (via
