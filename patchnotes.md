@@ -2,6 +2,48 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.49.0 (2026-05-02)
+
+*Two-column reflow spread + reading-mode font-size shortcuts.* The "(with the option of 2)" half of Brandon's earlier ask, plus an in-flow keyboard path for adjusting body size while reading.
+
+### Two-column mode
+
+New `reading-two-column` GSetting (boolean, default false). When on:
+
+- **Layout**: `FwReflowView` now hosts a horizontal `GtkBox` with two `GtkListView`s. Each listview has its own `GtkSliceListModel` windowing the doc's block model — left = `pages[current_page]`, right = `pages[current_page + 1]`. The right listview is hidden when the setting is off.
+- **Pagination**: width passed to `measure_block_height` is halved (less a 32 px gutter), so paragraphs measure taller and more pages are produced. The page table is pre-computed correctly for the active mode.
+- **Navigation**: `fw_reflow_view_scroll_by_page` steps by 2 in two-column mode, and `current_page` is always pinned to an even index so spreads stay contiguous. `last_page` lands on the even page that pairs with the last odd page (or the last page itself when the count is even).
+- **Header label**: `"3–4 / 250"` in two-column mode (range), `"3 / 250"` in single-column.
+
+Toggleable three ways:
+
+- **F10** — captured in the reflow keymap (fixed-layout's F10/facing-pages is unaffected; the two never overlap).
+- **Reading Settings dialog** — new "Layout" group with an `AdwSwitchRow`.
+- **Direct `gsettings set io.github.virinvictus.framework reading-two-column true`** — the GSetting is the source of truth.
+
+### Reading-mode font-size shortcuts
+
+`Ctrl++` / `Ctrl+-` / `Ctrl+0` now drive the body font size when a reflow document is active (clamped 8.0–32.0 pt; `Ctrl+0` resets to 13.0). When a fixed-layout doc is active they zoom the page render as before. The same actions, the same accelerators — they branch on `self->reflow_doc`.
+
+The dynamic CSS regenerator already listens to `changed::reading-font-size`, so font tweaks reflow live: tweaked size → CSS rebuilt → listview re-laid-out → pagination recomputes (size_allocate path) → page count updates. All on idle, no jank.
+
+### Implementation polish
+
+- `build_column` extracts the (slice, selection, listview) triple into a helper called twice from init — left and right columns share factory logic but have independent slices/selections.
+- Schema XML had to be re-touched + recompiled mid-build to surface the new key — meson's gschemas.compiled rule wasn't picking up `mtime` changes on the schema source while a sanitizer rebuild was in flight. Documented for next time.
+- Dispose now clears `selection_right` and `page_slice_right` alongside their left-column counterparts.
+
+### Verified
+
+- *Verdant Passage* EPUB — toggling F10 swaps to two-column spread; pagination recomputes (~250 pages → ~500 pages at half-width); page label switches to range form; `Ctrl++` bumps font size live and pagination follows. ASan + UBSan clean. All 5 stress tests still pass.
+
+### Up next
+
+- Reading-position persistence — open same EPUB tomorrow → resume on the same page.
+- Phase 13.1 Phase 4 — MOBI backend (PalmDOC LZ77 + KF7).
+
+---
+
 ## v0.48.0 (2026-05-02)
 
 *True paginated single-page-at-a-time reading for reflow documents.* The previous "scroll by viewport height" model is gone — pages are now discrete, content-aligned units. Right Arrow / Page Down jump exactly to the next page; the content above moves out of view entirely; no half-paragraphs hanging off the bottom.

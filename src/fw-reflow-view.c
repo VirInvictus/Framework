@@ -36,10 +36,13 @@ struct _FwReflowView {
   FwReflowDocument   *document;     /* owned */
 
   GtkScrolledWindow  *scroll;       /* fills our area */
-  GtkListView        *list;
+  GtkBox             *cols;         /* horizontal box hosting one or two listviews */
+  GtkListView        *list;         /* left column / single column */
+  GtkListView        *list_right;   /* right column (visible only in 2-col mode) */
   GtkSingleSelection *selection;
-  GtkSliceListModel  *page_slice;   /* windows the doc's block model
-                                     * to the current page */
+  GtkSingleSelection *selection_right;
+  GtkSliceListModel  *page_slice;       /* windows blocks → left page */
+  GtkSliceListModel  *page_slice_right; /* windows blocks → right page */
 
   GtkCssProvider     *css;
   GSettings          *settings;
@@ -49,6 +52,7 @@ struct _FwReflowView {
   GListModel         *all_blocks;   /* unowned (held by document) */
   GArray             *pages;        /* FwPageRange[] */
   guint               current_page;
+  gboolean            two_column;
 
   /* Repagination triggers */
   int                 last_alloc_w;
@@ -500,6 +504,10 @@ apply_current_page (FwReflowView *self)
   if (!self->pages || self->pages->len == 0) {
     gtk_slice_list_model_set_offset (self->page_slice, 0);
     gtk_slice_list_model_set_size   (self->page_slice, 0);
+    if (self->page_slice_right) {
+      gtk_slice_list_model_set_offset (self->page_slice_right, 0);
+      gtk_slice_list_model_set_size   (self->page_slice_right, 0);
+    }
     emit_page_changed (self);
     return;
   }
@@ -507,9 +515,30 @@ apply_current_page (FwReflowView *self)
   if (self->current_page >= self->pages->len)
     self->current_page = self->pages->len - 1;
 
+  /* In two-column mode pages always come in pairs starting at an
+   * even index, so the spread feels stable when navigating. */
+  if (self->two_column && (self->current_page & 1u))
+    self->current_page--;
+
   FwPageRange r = g_array_index (self->pages, FwPageRange, self->current_page);
   gtk_slice_list_model_set_offset (self->page_slice, r.first);
   gtk_slice_list_model_set_size   (self->page_slice, r.count);
+
+  /* Right column: next page if it exists in 2-col mode, else empty. */
+  if (self->page_slice_right) {
+    if (self->two_column && self->current_page + 1 < self->pages->len) {
+      FwPageRange r2 = g_array_index (self->pages, FwPageRange,
+                                       self->current_page + 1);
+      gtk_slice_list_model_set_offset (self->page_slice_right, r2.first);
+      gtk_slice_list_model_set_size   (self->page_slice_right, r2.count);
+    } else {
+      gtk_slice_list_model_set_offset (self->page_slice_right, 0);
+      gtk_slice_list_model_set_size   (self->page_slice_right, 0);
+    }
+  }
+
+  if (self->list_right)
+    gtk_widget_set_visible (GTK_WIDGET (self->list_right), self->two_column);
 
   /* Reset scroll to top of the page (in case content overflows the
    * viewport — rare but possible for a single very tall block). */
@@ -533,7 +562,13 @@ recompute_pagination (FwReflowView *self)
    * fire again with real dimensions. */
   if (vw < 200 || vh < 200) return;
 
-  int content_w = vw - 2 * READING_COLUMN_MARGIN;
+  /* In 2-col mode the column width is roughly half the viewport
+   * (less the inter-column gutter), so paragraphs measured at that
+   * narrower width naturally produce more pages — exactly what we
+   * want for a two-spread paginated reading. */
+  int columns = self->two_column ? 2 : 1;
+  int gutter  = self->two_column ? 32 : 0;
+  int content_w = (vw - 2 * READING_COLUMN_MARGIN - gutter) / columns;
   if (content_w < 100) content_w = vw;
   int page_h = vh - 24;   /* small breathing room */
   if (page_h < 200) page_h = vh;
@@ -628,6 +663,11 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
     gtk_slice_list_model_set_offset (self->page_slice, 0);
     gtk_slice_list_model_set_size   (self->page_slice, 0);
   }
+  if (self->page_slice_right) {
+    gtk_slice_list_model_set_model (self->page_slice_right, self->all_blocks);
+    gtk_slice_list_model_set_offset (self->page_slice_right, 0);
+    gtk_slice_list_model_set_size   (self->page_slice_right, 0);
+  }
 
   if (self->pages)
     g_array_set_size (self->pages, 0);
@@ -667,13 +707,25 @@ fw_reflow_view_scroll_by_page (FwReflowView *self, int direction)
     return;
 
   guint last = self->pages->len - 1;
+  guint step = self->two_column ? 2 : 1;
   guint next = self->current_page;
 
-  if (direction == 0)             next = 0;
-  else if (direction == G_MAXINT) next = last;
-  else if (direction > 0)         next = MIN (self->current_page + 1, last);
-  else if (direction < 0)         next = (self->current_page > 0)
-                                          ? self->current_page - 1 : 0;
+  if (direction == 0) {
+    next = 0;
+  } else if (direction == G_MAXINT) {
+    /* In 2-col mode land on the even page that paired with the last
+     * page so the spread is contiguous and the last page is on the
+     * right when the count is even, alone-on-left when odd. */
+    next = self->two_column ? (last & ~1u) : last;
+  } else if (direction > 0) {
+    next = (self->current_page + step <= last)
+             ? self->current_page + step : last;
+  } else if (direction < 0) {
+    next = (self->current_page >= step) ? self->current_page - step : 0;
+  }
+
+  if (self->two_column)
+    next &= ~1u;   /* always start a spread on an even page */
 
   if (next == self->current_page)
     return;
@@ -738,7 +790,9 @@ fw_reflow_view_dispose (GObject *object)
   g_clear_object (&self->document);
   g_clear_object (&self->css);
   g_clear_object (&self->selection);
+  g_clear_object (&self->selection_right);
   g_clear_object (&self->page_slice);
+  g_clear_object (&self->page_slice_right);
   self->all_blocks = NULL;
   g_clear_pointer (&self->pages, g_array_unref);
 
@@ -764,6 +818,55 @@ fw_reflow_view_class_init (FwReflowViewClass *klass)
                   G_TYPE_NONE, 2, G_TYPE_UINT, G_TYPE_UINT);
 }
 
+/* Build a (slice, selection, listview) triple bound to `all_blocks`.
+ * Used twice — once for the left/single column, once for the right
+ * column. Each gets its own factory so the listviews don't share
+ * setup/bind state. Out-params take ownership refs the caller must
+ * release on dispose. */
+static void
+build_column (FwReflowView         *self,
+              GtkSliceListModel   **out_slice,
+              GtkSingleSelection  **out_selection,
+              GtkListView         **out_list)
+{
+  GListStore *empty = g_list_store_new (FW_TYPE_BLOCK);
+  *out_slice = gtk_slice_list_model_new (G_LIST_MODEL (empty), 0, 0);
+
+  *out_selection = GTK_SINGLE_SELECTION (
+    gtk_single_selection_new (G_LIST_MODEL (g_object_ref (*out_slice))));
+  gtk_single_selection_set_can_unselect (*out_selection, TRUE);
+  gtk_single_selection_set_autoselect    (*out_selection, FALSE);
+
+  GtkSignalListItemFactory *factory =
+    GTK_SIGNAL_LIST_ITEM_FACTORY (gtk_signal_list_item_factory_new ());
+  g_signal_connect (factory, "setup", G_CALLBACK (on_factory_setup), self);
+  g_signal_connect (factory, "bind",  G_CALLBACK (on_factory_bind),  self);
+
+  *out_list = GTK_LIST_VIEW (gtk_list_view_new (
+    GTK_SELECTION_MODEL (g_object_ref (*out_selection)),
+    GTK_LIST_ITEM_FACTORY (factory)));
+  gtk_list_view_set_show_separators (*out_list, FALSE);
+  gtk_list_view_set_single_click_activate (*out_list, FALSE);
+  gtk_widget_set_hexpand   (GTK_WIDGET (*out_list), TRUE);
+  gtk_widget_set_halign    (GTK_WIDGET (*out_list), GTK_ALIGN_FILL);
+  gtk_widget_add_css_class (GTK_WIDGET (*out_list), "reflow-listview");
+}
+
+static void
+on_two_column_setting_changed (GSettings  *settings,
+                               const char *key G_GNUC_UNUSED,
+                               gpointer    user_data)
+{
+  FwReflowView *self = FW_REFLOW_VIEW (user_data);
+  gboolean two = g_settings_get_boolean (settings, "reading-two-column");
+  if (two == self->two_column)
+    return;
+  self->two_column = two;
+  /* Width changed → page boundaries do too. Recompute on idle so
+   * the visibility-change layout settles first. */
+  queue_repaginate (self);
+}
+
 static void
 fw_reflow_view_init (FwReflowView *self)
 {
@@ -774,44 +877,38 @@ fw_reflow_view_init (FwReflowView *self)
   self->last_alloc_w  = 0;
   self->last_alloc_h  = 0;
 
-  /* Slice wraps an initially-empty model. set_document swaps in the
-   * doc's block model; apply_current_page sets offset/size each page. */
-  GListStore *empty = g_list_store_new (FW_TYPE_BLOCK);
-  self->page_slice = gtk_slice_list_model_new (G_LIST_MODEL (empty), 0, 0);
-  /* gtk_slice_list_model_new takes ownership of `empty`. */
+  /* Two columns; right one starts hidden. The active column count
+   * is driven by the reading-two-column GSetting (via
+   * on_two_column_setting_changed). */
+  build_column (self, &self->page_slice,       &self->selection,       &self->list);
+  build_column (self, &self->page_slice_right, &self->selection_right, &self->list_right);
 
-  self->selection = GTK_SINGLE_SELECTION (
-    gtk_single_selection_new (G_LIST_MODEL (g_object_ref (self->page_slice))));
-  gtk_single_selection_set_can_unselect (self->selection, TRUE);
-  gtk_single_selection_set_autoselect    (self->selection, FALSE);
-
-  GtkSignalListItemFactory *factory =
-    GTK_SIGNAL_LIST_ITEM_FACTORY (gtk_signal_list_item_factory_new ());
-  g_signal_connect (factory, "setup", G_CALLBACK (on_factory_setup), self);
-  g_signal_connect (factory, "bind",  G_CALLBACK (on_factory_bind),  self);
-
-  /* gtk_list_view_new takes ownership (transfer-full) of both the
-   * selection model and the factory — do NOT unref after. */
-  self->list = GTK_LIST_VIEW (gtk_list_view_new (
-    GTK_SELECTION_MODEL (g_object_ref (self->selection)),
-    GTK_LIST_ITEM_FACTORY (factory)));
-  gtk_list_view_set_show_separators (self->list, FALSE);
-  gtk_list_view_set_single_click_activate (self->list, FALSE);
-  gtk_widget_set_hexpand (GTK_WIDGET (self->list), TRUE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->list), "reflow-listview");
+  self->cols = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 32));
+  gtk_box_append (self->cols, GTK_WIDGET (self->list));
+  gtk_box_append (self->cols, GTK_WIDGET (self->list_right));
+  gtk_widget_set_visible (GTK_WIDGET (self->list_right), FALSE);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->cols), TRUE);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->cols), TRUE);
 
   self->scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
-  gtk_scrolled_window_set_child (self->scroll, GTK_WIDGET (self->list));
+  gtk_scrolled_window_set_child (self->scroll, GTK_WIDGET (self->cols));
   gtk_scrolled_window_set_policy (self->scroll,
                                    GTK_POLICY_NEVER,
                                    GTK_POLICY_AUTOMATIC);
-  gtk_scrolled_window_set_max_content_width (self->scroll,
-                                              READING_COLUMN_MAX_WIDTH);
-  gtk_scrolled_window_set_propagate_natural_width (self->scroll, FALSE);
 
   gtk_widget_set_hexpand (GTK_WIDGET (self->scroll), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->scroll), TRUE);
   gtk_widget_set_parent  (GTK_WIDGET (self->scroll), GTK_WIDGET (self));
+
+  /* Wire two-column toggle. settings was already created by
+   * ensure_css → reload_css path; reuse it. */
+  if (self->settings) {
+    self->two_column = g_settings_get_boolean (self->settings,
+                                                "reading-two-column");
+    gtk_widget_set_visible (GTK_WIDGET (self->list_right), self->two_column);
+    g_signal_connect (self->settings, "changed::reading-two-column",
+                      G_CALLBACK (on_two_column_setting_changed), self);
+  }
 }
 
 FwReflowView *

@@ -146,5 +146,18 @@
       </description>
     </key>
 
+    <key name="reading-two-column" type="b">
+      <default>false</default>
+      <summary>Render reflow documents as two columns side-by-side</summary>
+      <description>
+        When true, FwReflowView lays out two adjacent pages as a
+        spread, splitting the viewport horizontally. Pagination
+        recomputes at half-content-width so each column gets
+        appropriate line wrapping. Page navigation advances by two
+        pages per step. Toggleable from the Reading Settings dialog
+        or via F10 while a reflow document is open.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

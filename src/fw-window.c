@@ -613,9 +613,37 @@ static void act_nav_forward (GSimpleAction *a, GVariant *p, gpointer d)
 
 /* ── Window actions ───────────────────────────────────────────────── */
 
-static void act_zoom_in    (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, w->zoom + 0.1); }
-static void act_zoom_out   (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, w->zoom - 0.1); }
-static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; set_zoom(d, 1.0); }
+/* In reflow mode, Ctrl+/Ctrl- bump the body font size up/down by 1 pt
+ * (clamped to the same range as the spin row in Reading Settings).
+ * In fixed-layout mode they zoom the page render. */
+static void act_zoom_in (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc && w->settings) {
+    double s = g_settings_get_double (w->settings, "reading-font-size");
+    g_settings_set_double (w->settings, "reading-font-size",
+                           CLAMP (s + 1.0, 8.0, 32.0));
+  } else {
+    set_zoom (w, w->zoom + 0.1);
+  }
+}
+static void act_zoom_out (GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc && w->settings) {
+    double s = g_settings_get_double (w->settings, "reading-font-size");
+    g_settings_set_double (w->settings, "reading-font-size",
+                           CLAMP (s - 1.0, 8.0, 32.0));
+  } else {
+    set_zoom (w, w->zoom - 0.1);
+  }
+}
+static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) {
+  (void)a;(void)p; FwWindow *w=d;
+  if (w->reflow_doc && w->settings) {
+    g_settings_set_double (w->settings, "reading-font-size", 13.0);
+  } else {
+    set_zoom (w, 1.0);
+  }
+}
 static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); }
 static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
 static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) {
@@ -1022,6 +1050,23 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
 
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_size);
 
+  /* Layout group — two-column toggle. */
+  AdwPreferencesGroup *g_layout =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_layout, "Layout");
+
+  AdwSwitchRow *two_col_row = ADW_SWITCH_ROW (adw_switch_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (two_col_row),
+                                 "Two-column spread");
+  adw_action_row_set_subtitle (ADW_ACTION_ROW (two_col_row),
+    "Pages render side-by-side; navigation advances by two pages "
+    "per step. Toggleable in-flow with F10.");
+  g_settings_bind (self->settings, "reading-two-column",
+                   two_col_row, "active", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_layout, GTK_WIDGET (two_col_row));
+
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_layout);
+
   /* Presets */
   AdwPreferencesGroup *g_pre =
     ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
@@ -1336,6 +1381,13 @@ on_key_pressed (GtkEventControllerKey *controller,
       return TRUE;
     case GDK_KEY_Right:
       fw_reflow_view_scroll_by_page (self->reflow_view, +1);
+      return TRUE;
+    case GDK_KEY_F10:
+      if (self->settings) {
+        gboolean cur = g_settings_get_boolean (self->settings,
+                                                "reading-two-column");
+        g_settings_set_boolean (self->settings, "reading-two-column", !cur);
+      }
       return TRUE;
     /* Up / Down / Page* / Home / End — let GTK's default focus walk
      * dispatch to the listview, which already handles them. */
@@ -1924,9 +1976,18 @@ on_reflow_page_changed (FwReflowView *view G_GNUC_UNUSED,
   FwWindow *self = FW_WINDOW (user_data);
   if (!self->reflow_page_label)
     return;
-  g_autofree char *txt = total > 0
-    ? g_strdup_printf ("%u / %u", current + 1, total)
-    : g_strdup ("…");
+
+  gboolean two_col = self->settings &&
+    g_settings_get_boolean (self->settings, "reading-two-column");
+
+  g_autofree char *txt = NULL;
+  if (total == 0) {
+    txt = g_strdup ("…");
+  } else if (two_col && current + 1 < total) {
+    txt = g_strdup_printf ("%u–%u / %u", current + 1, current + 2, total);
+  } else {
+    txt = g_strdup_printf ("%u / %u", current + 1, total);
+  }
   gtk_label_set_text (self->reflow_page_label, txt);
 }
 
