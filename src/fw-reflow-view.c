@@ -30,8 +30,19 @@ G_DEFINE_FINAL_TYPE (FwReflowView, fw_reflow_view, GTK_TYPE_WIDGET)
 
 /* ── Factory: FwBlock → GtkWidget ─────────────────────────────────── */
 
+#define IMAGE_MAX_HEIGHT_PX 600
+
+/* Each row hosts a GtkStack with two named children:
+ *   "text"  → a wrapping, selectable GtkLabel for paragraph / heading /
+ *             code / blockquote / hr / chapter blocks.
+ *   "image" → a GtkPicture with content-fit=contain, capped at
+ *             IMAGE_MAX_HEIGHT_PX so a cover image never dominates the
+ *             viewport.
+ * Bind switches the visible page; the unused widget is preserved so
+ * recycled rows skip widget churn when the kind toggles back. */
+
 static GtkWidget *
-make_paragraph_label (void)
+make_text_label (void)
 {
   GtkLabel *label = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_wrap (label, TRUE);
@@ -45,9 +56,27 @@ make_paragraph_label (void)
   gtk_widget_set_margin_end    (GTK_WIDGET (label), READING_COLUMN_MARGIN);
   gtk_widget_set_margin_top    (GTK_WIDGET (label), 4);
   gtk_widget_set_margin_bottom (GTK_WIDGET (label), 4);
-  gtk_widget_set_size_request  (GTK_WIDGET (label), -1, -1);
   gtk_widget_add_css_class     (GTK_WIDGET (label), "reflow-paragraph");
   return GTK_WIDGET (label);
+}
+
+static GtkWidget *
+make_image_picture (void)
+{
+  GtkPicture *pic = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_can_shrink     (pic, TRUE);
+  gtk_picture_set_content_fit    (pic, GTK_CONTENT_FIT_CONTAIN);
+  gtk_widget_set_halign          (GTK_WIDGET (pic), GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand         (GTK_WIDGET (pic), TRUE);
+  gtk_widget_set_margin_start    (GTK_WIDGET (pic), READING_COLUMN_MARGIN);
+  gtk_widget_set_margin_end      (GTK_WIDGET (pic), READING_COLUMN_MARGIN);
+  gtk_widget_set_margin_top      (GTK_WIDGET (pic), 8);
+  gtk_widget_set_margin_bottom   (GTK_WIDGET (pic), 8);
+  /* Min-height is the natural floor; combined with content-fit=contain,
+   * the picture scales down to fit the row width without ballooning. */
+  gtk_widget_set_size_request    (GTK_WIDGET (pic), -1, IMAGE_MAX_HEIGHT_PX);
+  gtk_widget_add_css_class       (GTK_WIDGET (pic), "reflow-image");
+  return GTK_WIDGET (pic);
 }
 
 static void
@@ -55,74 +84,96 @@ on_factory_setup (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
                   GObject                  *listitem,
                   gpointer                  user_data G_GNUC_UNUSED)
 {
-  /* One label that switches role at bind time based on FwBlock kind.
-   * Cheap default: paragraph styling. Headings/code/HR rebind props on
-   * bind. Cleaner long-term is per-kind widgets in a GtkStack — when
-   * EPUB lands and needs GtkPicture for images, that's the upgrade. */
-  GtkWidget *label = make_paragraph_label ();
-  gtk_list_item_set_child (GTK_LIST_ITEM (listitem), label);
+  GtkStack *stack = GTK_STACK (gtk_stack_new ());
+  gtk_stack_set_transition_type (stack, GTK_STACK_TRANSITION_TYPE_NONE);
+  gtk_stack_add_named (stack, make_text_label (),    "text");
+  gtk_stack_add_named (stack, make_image_picture (), "image");
+  gtk_list_item_set_child (GTK_LIST_ITEM (listitem), GTK_WIDGET (stack));
 }
 
 static void
 on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
                  GObject                  *listitem,
-                 gpointer                  user_data G_GNUC_UNUSED)
+                 gpointer                  user_data)
 {
-  GtkListItem *item   = GTK_LIST_ITEM (listitem);
-  GtkWidget   *child  = gtk_list_item_get_child (item);
-  FwBlock     *block  = FW_BLOCK (gtk_list_item_get_item (item));
+  FwReflowView *self  = FW_REFLOW_VIEW (user_data);
+  GtkListItem  *item  = GTK_LIST_ITEM (listitem);
+  GtkStack     *stack = GTK_STACK (gtk_list_item_get_child (item));
+  FwBlock      *block = FW_BLOCK (gtk_list_item_get_item (item));
 
-  if (!child || !block)
+  if (!stack || !block)
     return;
 
-  /* Reset state that bind sites might mutate. */
-  gtk_widget_remove_css_class (child, "reflow-heading");
-  gtk_widget_remove_css_class (child, "reflow-code");
-  gtk_widget_remove_css_class (child, "reflow-blockquote");
-  gtk_widget_remove_css_class (child, "reflow-chapter");
+  GtkWidget *text_w  = gtk_stack_get_child_by_name (stack, "text");
+  GtkWidget *image_w = gtk_stack_get_child_by_name (stack, "image");
 
-  GtkLabel *label = GTK_LABEL (child);
+  /* Image branch — try to resolve the texture; fall through to the
+   * text page if the image isn't available. */
+  if (fw_block_get_kind (block) == FW_BLOCK_IMAGE) {
+    const char *id  = fw_block_get_image_id (block);
+    GdkTexture *tex = NULL;
+    if (id && self->document)
+      tex = fw_reflow_document_get_image (self->document, id);
+    if (tex) {
+      gtk_picture_set_paintable (GTK_PICTURE (image_w), GDK_PAINTABLE (tex));
+      gtk_stack_set_visible_child_name (stack, "image");
+      return;
+    }
+    /* fall through to text fallback */
+    GtkLabel *label = GTK_LABEL (text_w);
+    gtk_label_set_use_markup (label, FALSE);
+    gtk_label_set_text (label, id ? id : "[image]");
+    gtk_stack_set_visible_child_name (stack, "text");
+    return;
+  }
+
+  /* Text branch */
+  GtkLabel *label = GTK_LABEL (text_w);
+  gtk_widget_remove_css_class (text_w, "reflow-heading");
+  gtk_widget_remove_css_class (text_w, "reflow-code");
+  gtk_widget_remove_css_class (text_w, "reflow-blockquote");
+  gtk_widget_remove_css_class (text_w, "reflow-chapter");
 
   switch (fw_block_get_kind (block)) {
     case FW_BLOCK_HEADING: {
-      gtk_widget_add_css_class (child, "reflow-heading");
+      gtk_widget_add_css_class (text_w, "reflow-heading");
       g_autofree char *cls = g_strdup_printf ("reflow-h%d",
                                               CLAMP (fw_block_get_level (block), 1, 6));
-      gtk_widget_add_css_class (child, cls);
+      gtk_widget_add_css_class (text_w, cls);
       gtk_label_set_use_markup (label, TRUE);
       gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
       break;
     }
     case FW_BLOCK_CODE:
-      gtk_widget_add_css_class (child, "reflow-code");
+      gtk_widget_add_css_class (text_w, "reflow-code");
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, fw_block_get_text (block) ?: "");
       break;
     case FW_BLOCK_BLOCKQUOTE:
-      gtk_widget_add_css_class (child, "reflow-blockquote");
+      gtk_widget_add_css_class (text_w, "reflow-blockquote");
       gtk_label_set_use_markup (label, TRUE);
       gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
       break;
     case FW_BLOCK_HR:
-      /* Render as a thin separator-style line of glyphs. Trivial
-       * placeholder until FwReflowView gets a real per-kind factory. */
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, "———");
       break;
     case FW_BLOCK_CHAPTER:
-      gtk_widget_add_css_class (child, "reflow-chapter");
+      gtk_widget_add_css_class (text_w, "reflow-chapter");
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, fw_block_get_text (block) ?: "");
       break;
-    case FW_BLOCK_IMAGE:
     case FW_BLOCK_LIST:
     case FW_BLOCK_LIST_ITEM:
     case FW_BLOCK_PARAGRAPH:
+    case FW_BLOCK_IMAGE:        /* unreachable — handled above */
     default:
       gtk_label_set_use_markup (label, TRUE);
       gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
       break;
   }
+
+  gtk_stack_set_visible_child_name (stack, "text");
 }
 
 /* ── CSS for typography ───────────────────────────────────────────── */
@@ -138,7 +189,9 @@ static const char REFLOW_CSS[] =
   ".reflow-blockquote{ font-style: italic; opacity: 0.8; "
   "                    border-left: 3px solid alpha(currentColor, 0.3); "
   "                    padding-left: 12px; }"
-  ".reflow-chapter   { font-weight: bold; opacity: 0.6; }";
+  ".reflow-chapter   { font-weight: bold; opacity: 0.6; }"
+  ".reflow-image     { background: alpha(currentColor, 0.04); "
+  "                    border-radius: 4px; }";
 
 static void
 ensure_css (FwReflowView *self)

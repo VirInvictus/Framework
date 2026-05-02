@@ -2,6 +2,36 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.43.0 (2026-05-02)
+
+*Image rendering in `FwReflowView` — covers and inline graphics in EPUB/FB2 now display as native `GdkTexture`s instead of falling through to the text-label placeholder.* The `IMAGE` blocks every reflow backend already produced are finally rendered.
+
+### Per-row factory upgrade
+
+`FwReflowView`'s factory previously wrapped every block in a `GtkLabel`, which meant `FW_BLOCK_IMAGE` showed up as the image-id string. Now each row hosts a two-page `GtkStack`:
+
+- **`text`** page — the existing wrapping, selectable `GtkLabel` for paragraph / heading / code / blockquote / hr / chapter blocks.
+- **`image`** page — a `GtkPicture` with `content-fit=contain`, `can-shrink=TRUE`, centered halign, and a 600 px height cap so a cover image can't dominate the viewport.
+
+Bind switches the visible page based on `fw_block_get_kind`. The unused widget stays alive in the off page so a recycled row toggling between kinds skips widget churn. Image lookup goes through `fw_reflow_document_get_image` against the active document; if the texture isn't available (decode failed at open, or the manifest didn't carry the id) the row gracefully falls back to the text page with the image-id as plain text.
+
+### Lookup keys
+
+- **EPUB** — `IMAGE.image_id` is the resolved zip path (e.g. `cover.jpg`); the EPUB backend stores textures under that path *and* under the manifest id, so both work.
+- **FB2** — `IMAGE.image_id` is the binary's `id` attribute (leading `#` stripped); the FB2 backend stores by the same id.
+
+The two backends were already keying their image hashes the way the view expects — this slice was just the view-side dispatch.
+
+### CSS
+
+New `.reflow-image` class adds a faint `currentColor`-tinted background and rounded corners so the image's bounding box is visible against the reading column even on transparent pages. Pure aesthetics, ~3 lines of CSS.
+
+### Files
+
+`src/fw-reflow-view.c` — replaced single-label factory with stack/label/picture factory. ~80 LOC delta. ASan + UBSan clean on the *Verdant Passage* EPUB; smoke-tested on the FB2 sample. All 5 stress tests still pass — fixed-layout pipeline untouched.
+
+---
+
 ## v0.42.0 (2026-05-02)
 
 *Phase 13.1 Phase 3 — EPUB reflow backend (the marquee delivery).* `.epub` now routes through `FwReflowDocumentEpub`. The full pipeline — `META-INF/container.xml` → OPF → manifest + spine + metadata → per-chapter XHTML → blocks; NCX → TOC; manifest images → `GdkTexture` hash — runs end-to-end on real Calibre-generated EPUBs.
