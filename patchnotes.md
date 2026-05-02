@@ -2,6 +2,64 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.52.0 (2026-05-02)
+
+*Phase 13.1 Phase 4 — MOBI/KF7 backend, ported from foliate-js.* Real Calibre-generated `.mobi` files now open with full text. Algorithm port + tag-soup balancer + heuristic pagination.
+
+### `fw-mobi-parser.{h,c}` — port of `.foliate-js/mobi.js` core
+
+PalmDB envelope + PalmDOC LZ77 decoder + EXTH metadata walker, transcribed line-by-line from Foliate's MIT-licensed JavaScript with explicit guards to mirror its accidental tolerance properties:
+
+- **LZ77 bad back-references emit `0`** instead of erroring out. Matches JS `output[output.length - distance]` returning `undefined`, which `Uint8Array.from` coerces to `0`.
+- **Trailing-data byte counts that exceed the record length clamp to "strip everything"**. Matches JS `array.subarray(0, -length)` clamping when `length > array.length`. The trailing-flag VLI logic produces nonsense values on some Calibre-generated MOBIs (the bytes preceding the multibyte trailer aren't VLI-encoded — they're compressed text); foliate's runtime tolerates it via clamp, our C does the same explicitly.
+- **Encrypted (DRM) MOBIs surface as a clean error**.
+- **HuffDic compression** — flagged as unsupported (rare in modern Calibre output; can be added later by porting foliate's `huffcdic` function).
+
+The MOBI header offsets are foliate-table absolute (record-0-relative): `length` at byte 20, `version` at byte 36, `exthFlag` at 128, `trailingFlags` at 240, etc. (Earlier hand-rolled attempts had spec-relative offsets which produced bogus reads.) `version >= 8` flags KF8/AZW3 — Phase 5; the `0xFFFFFFFF` "unset" sentinel is treated as "unknown — assume KF7", which several real Calibre MOBIs use.
+
+### `fw-reflow-document-mobi.{h,c}` — backend with tag-soup balancer
+
+The decompressed MOBI body is one giant HTML stream that's universally malformed in real-world output: orphan `</blockquote>`, `<img>` not self-closed for XML, unquoted attribute values like `<reference filepos=0>`. GMarkupParser is strict and aborts on the first issue, so `balance_html` runs as a pre-pass:
+
+- **Orphan close tags dropped**, missing closes synthesised at EOF.
+- **Void HTML elements** (`<img>`, `<br>`, `<hr>`, `<meta>`, `<link>`, etc., plus MOBI's `<mbp:pagebreak>`) are emitted as `<foo/>` regardless of source form.
+- **Unquoted attribute values** (`filepos=0`) are wrapped in `"..."` with `<>&` entity-escaped inline.
+
+Tag-soup parsing in ~150 LOC. `<mbp:pagebreak/>` becomes `FW_BLOCK_HR`, `<mbp:section>` becomes `FW_BLOCK_CHAPTER`. Otherwise the same XHTML walker as the EPUB backend.
+
+### Heuristic pagination for large block counts
+
+A 5000-block MOBI took ~5 seconds to paginate via `gtk_widget_measure` (one temp widget per block). UI sat empty during that — Brandon reported "nothing displays". `FwReflowView::recompute_pagination` now branches on block count:
+
+- **< 800 blocks**: exact `gtk_widget_measure` (current behavior; sub-pixel precision).
+- **≥ 800 blocks**: heuristic measurement based on text length × characters-per-line × line-height, derived from the active GSettings font size. Image height = scaled aspect; HR = 4 px; CHAPTER = 12 px. ~50× faster.
+
+Pages computed with the heuristic may be off by a paragraph at the boundary, but the user sees content immediately. Foliate's column-based pagination is itself only line-accurate.
+
+### Verified
+
+Brandon's three Calibre MOBIs:
+
+| File | body bytes | blocks |
+|---|---:|---:|
+| The Broken God — Gareth Ryder-Hanrahan | 1,356,725 | 5,336 |
+| Shield of Thunder — David Gemmell      | 1,182,186 | 4,577 |
+| Fall of Kings — David Gemmell          | 1,220,112 | 4,460 |
+
+All three open and display real text. ASan + UBSan clean. EPUB / TXT / FB2 regression checks pass. All 5 stress tests still pass.
+
+### What's deferred
+
+- **KF8 / AZW3** — `version >= 8` files reject. Port of foliate's `KF8` class is task #20.
+- **HuffDic-compressed MOBIs** — rare; foliate has the `huffcdic` decoder; port if a real file shows up.
+- **MOBI image record extraction** — `<img recindex="N">` references aren't resolved yet; would need to walk PDB records `resourceStart..end`.
+- **NCX / guide TOC** — foliate's MOBI6 `getGuide` reads `<reference>` elements; we currently produce no TOC for MOBIs (sidebar is empty).
+- **`filepos:N` anchor URIs** — MOBI's internal-link scheme; needs a separate resolver pass.
+
+These are the next slices. The core "open a MOBI and read it" UX works now.
+
+---
+
 ## v0.51.0 (2026-05-02)
 
 *Reference-repo swap: `.fractal/` → `.foliate/` + `.foliate-js/`. Naming correction throughout.*

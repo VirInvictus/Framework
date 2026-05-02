@@ -478,8 +478,82 @@ make_measure_widget_for (FwReflowView *self, FwBlock *block)
   return GTK_WIDGET (label);
 }
 
+/* Fast heuristic measurement — avoids creating a temp widget per
+ * block (gtk_widget_measure on 5 000+ blocks takes ~5 seconds and
+ * keeps the UI empty during open). For each block kind we estimate
+ * height from text length × characters-per-line × line-height,
+ * derived from the active GSettings font size. Slightly inaccurate
+ * (pages may end up a paragraph short or long), but the user sees
+ * content immediately, and the worst case is a blank line at the
+ * page boundary — same as Foliate's column-based pagination. */
 static int
-measure_block_height (FwReflowView *self, FwBlock *block, int width)
+heuristic_block_height (FwReflowView *self, FwBlock *block, int width)
+{
+  double font_pt = 13.0, line_h = 1.5;
+  if (self->settings) {
+    font_pt = g_settings_get_double (self->settings, "reading-font-size");
+    line_h  = g_settings_get_double (self->settings, "reading-line-height");
+  }
+
+  /* 1 pt ≈ 1.333 px on the standard 96 DPI display. */
+  double font_px      = font_pt * 1.333;
+  double line_px      = font_px * line_h;
+  /* Pango's default is ~0.5em per character for proportional fonts;
+   * use 0.55 as a safe upper bound so we don't underestimate. */
+  double avg_char_px  = font_px * 0.55;
+  if (avg_char_px < 1) avg_char_px = 1;
+  int chars_per_line = (int) ((double) width / avg_char_px);
+  if (chars_per_line < 10) chars_per_line = 10;
+
+  switch (fw_block_get_kind (block)) {
+    case FW_BLOCK_HR:      return 4;
+    case FW_BLOCK_CHAPTER: return 12;
+    case FW_BLOCK_IMAGE: {
+      GdkTexture *tex = NULL;
+      const char *id  = fw_block_get_image_id (block);
+      if (id && self->document)
+        tex = fw_reflow_document_get_image (self->document, id);
+      if (tex) {
+        int tw = gdk_texture_get_width  (tex);
+        int th = gdk_texture_get_height (tex);
+        if (tw > 0)
+          return MIN (th, (int) ((double) th * width / tw));
+      }
+      return 200;
+    }
+    case FW_BLOCK_HEADING: {
+      double scale = 1.0;
+      switch (fw_block_get_level (block)) {
+        case 1: scale = (font_pt + 9) / font_pt; break;
+        case 2: scale = (font_pt + 5) / font_pt; break;
+        case 3: scale = (font_pt + 2) / font_pt; break;
+        case 4: scale = (font_pt + 1) / font_pt; break;
+        default: scale = 1.0; break;
+      }
+      double h_line = font_px * scale * 1.2;
+      const char *t = fw_block_get_text (block);
+      int n = t ? (int) strlen (t) : 0;
+      int cpl = (int) ((double) chars_per_line / scale);
+      int lines = n > 0 ? (n / cpl) + 1 : 1;
+      /* CSS .reflow-heading: margin-top 1.0em + margin-bottom 0.4em. */
+      return (int) (lines * h_line + font_px * 1.4);
+    }
+    default: {
+      const char *t = fw_block_get_text (block);
+      int n = t ? (int) strlen (t) : 0;
+      int lines = n > 0 ? (n / chars_per_line) + 1 : 1;
+      /* CSS .reflow-paragraph: margin-bottom 0.4em. */
+      return (int) (lines * line_px + font_px * 0.4);
+    }
+  }
+}
+
+#define HEURISTIC_THRESHOLD 800   /* Below this many blocks, use exact widget
+                                   * measurement; above, use the heuristic so
+                                   * pagination doesn't stall the UI. */
+
+static int
+measure_block_height_widget (FwReflowView *self, FwBlock *block, int width)
 {
   GtkWidget *m = make_measure_widget_for (self, block);
   /* Sink the floating ref so we own it. */
@@ -599,12 +673,20 @@ recompute_pagination (FwReflowView *self)
     return;
   }
 
+  /* Pick measurement strategy: exact widget measurement is precise
+   * but slow; heuristic is ~50× faster and adequate for the typical
+   * "one paragraph break wrong per page" tolerance. Foliate's
+   * column-based pagination is itself only line-accurate. */
+  gboolean use_heuristic = (n >= HEURISTIC_THRESHOLD);
+
   guint page_start = 0;
   int   page_acc   = 0;
 
   for (guint i = 0; i < n; i++) {
     g_autoptr (FwBlock) b = g_list_model_get_item (self->all_blocks, i);
-    int h = measure_block_height (self, b, content_w);
+    int h = use_heuristic
+              ? heuristic_block_height (self, b, content_w)
+              : measure_block_height_widget (self, b, content_w);
     if (h <= 0) h = 1;
 
     if (i > page_start && page_acc + h > page_h) {

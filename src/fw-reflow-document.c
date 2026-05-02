@@ -7,6 +7,7 @@
 #include "fw-reflow-document-txt.h"
 #include "fw-reflow-document-fb2.h"
 #include "fw-reflow-document-epub.h"
+#include "fw-reflow-document-mobi.h"
 
 #include <string.h>
 
@@ -211,11 +212,13 @@ gboolean
 fw_reflow_path_is_supported (const char *path)
 {
   /* Phase 1: TXT (v0.40.0).  Phase 2: FB2 (v0.41.0).
-   * Phase 3: EPUB (v0.42.0). MOBI/AZW3 still flow through MuPDF
-   * until their phases land. */
+   * Phase 3: EPUB (v0.42.0). Phase 4: MOBI/PRC (v0.52.0).
+   * AZW3/KF8 still flows through MuPDF until Phase 5. */
   return path_has_ext (path, "txt") ||
          path_has_ext (path, "fb2") ||
-         path_has_ext (path, "epub");
+         path_has_ext (path, "epub") ||
+         path_has_ext (path, "mobi") ||
+         path_has_ext (path, "prc");
 }
 
 FwReflowDocument *
@@ -231,6 +234,8 @@ fw_reflow_document_new_for_path (const char *path, GError **error)
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_fb2_new ());
   else if (path_has_ext (path, "epub"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_epub_new ());
+  else if (path_has_ext (path, "mobi") || path_has_ext (path, "prc"))
+    doc = FW_REFLOW_DOCUMENT (fw_reflow_document_mobi_new ());
 
   if (!doc) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
