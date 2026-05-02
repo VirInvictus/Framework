@@ -93,11 +93,13 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   gtk_file_filter_add_pattern (filter, "*.epub");
   gtk_file_filter_add_pattern (filter, "*.fb2");
   gtk_file_filter_add_pattern (filter, "*.mobi");
+  gtk_file_filter_add_pattern (filter, "*.txt");
   gtk_file_filter_add_mime_type (filter, "application/oxps");
   gtk_file_filter_add_mime_type (filter, "application/vnd.ms-xpsdocument");
   gtk_file_filter_add_mime_type (filter, "application/epub+zip");
   gtk_file_filter_add_mime_type (filter, "application/x-fictionbook+xml");
   gtk_file_filter_add_mime_type (filter, "application/x-mobipocket-ebook");
+  gtk_file_filter_add_mime_type (filter, "text/plain");
 
   GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
   g_list_store_append (filters, filter);

@@ -10,6 +10,8 @@
 #include "fw-search.h"
 #include "fw-cache.h"
 #include "fw-document.h"
+#include "fw-reflow-document.h"
+#include "fw-reflow-view.h"
 #include "fw-state.h"
 #include "fw-debug.h"
 #include <gdk/gdk.h>
@@ -43,9 +45,11 @@ struct _FwWindow {
   AdwToastOverlay      *toast_overlay;  /* wraps content; hosts AdwToasts */
   AdwOverlaySplitView  *split_view;
   FwSidebar            *sidebar;
-  GtkStack             *content_stack;  /* "empty" | "document" */
+  GtkStack             *content_stack;  /* "empty" | "document" | "reflow" */
   GtkScrolledWindow    *scroll;
   FwView               *view;
+  FwReflowDocument     *reflow_doc;     /* set when a reflow format is open */
+  FwReflowView         *reflow_view;
   FwSearch             *search;
   GtkSearchBar         *search_bar;
   GtkSearchEntry       *search_entry;
@@ -1456,12 +1460,17 @@ fw_window_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "pill");
   adw_status_page_set_child (empty, GTK_WIDGET (empty_btn));
 
+  /* Reflow view — Phase 13.1 path for .txt and (later) EPUB/MOBI/FB2.
+   * Hosted in the same content_stack as a peer to "document". */
+  self->reflow_view = fw_reflow_view_new ();
+
   /* Stack flips between the empty state and the rendered document. */
   self->content_stack = GTK_STACK (gtk_stack_new ());
   gtk_stack_set_transition_type (self->content_stack,
                                   GTK_STACK_TRANSITION_TYPE_CROSSFADE);
   gtk_stack_add_named (self->content_stack, GTK_WIDGET (empty), "empty");
   gtk_stack_add_named (self->content_stack, GTK_WIDGET (overlay), "document");
+  gtk_stack_add_named (self->content_stack, GTK_WIDGET (self->reflow_view), "reflow");
   gtk_stack_set_visible_child_name (self->content_stack, "empty");
   gtk_widget_set_vexpand (GTK_WIDGET (self->content_stack), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->content_stack), TRUE);
@@ -1784,6 +1793,70 @@ fw_window_start_monitor (FwWindow *self, const char *path)
 
 /* ── Open file ────────────────────────────────────────────────────── */
 
+static void
+fw_window_close_active_document (FwWindow *self)
+{
+  /* Tear down whichever pipeline is active so the next open starts
+   * from a clean slate. Both branches are safe to no-op when nothing
+   * is loaded. */
+  if (self->cache) {
+    FW_TRACE_MEM ("closing previous doc: cache=%p doc=%p",
+                  (void *) self->cache, (void *) self->document);
+    fw_cache_stop (self->cache);
+    g_clear_object (&self->cache);
+  }
+  g_clear_object (&self->document);
+
+  if (self->reflow_view)
+    fw_reflow_view_set_document (self->reflow_view, NULL);
+  g_clear_object (&self->reflow_doc);
+
+  g_clear_pointer (&self->file_path, g_free);
+}
+
+static gboolean
+fw_window_open_reflow (FwWindow *self, const char *path)
+{
+  g_autoptr (GError) error = NULL;
+  FwReflowDocument *doc = fw_reflow_document_new_for_path (path, &error);
+  if (!doc) {
+    AdwAlertDialog *dlg = ADW_ALERT_DIALOG (
+      adw_alert_dialog_new ("Cannot Open Document",
+                            error ? error->message : "Unknown error"));
+    adw_alert_dialog_add_response (dlg, "ok", "OK");
+    adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (self));
+    return FALSE;
+  }
+
+  self->reflow_doc = doc;
+  self->file_path  = g_strdup (path);
+
+  fw_reflow_view_set_document (self->reflow_view, self->reflow_doc);
+
+  if (self->content_stack)
+    gtk_stack_set_visible_child_name (self->content_stack, "reflow");
+
+  g_autofree char *basename = g_path_get_basename (path);
+  gtk_label_set_text (self->title_label, basename);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->title_label), path);
+
+  /* Reflow view doesn't expose page-count or zoom — clear the
+   * fixed-layout chrome so the header bar isn't lying. Hiding rather
+   * than rebuilding the header keeps Phase 1 minimal; the chrome
+   * comes back when a fixed-layout doc is opened next. */
+  if (self->page_entry)        gtk_editable_set_text (GTK_EDITABLE (self->page_entry), "");
+  if (self->zoom_entry)        gtk_editable_set_text (GTK_EDITABLE (self->zoom_entry), "");
+
+  /* Sidebar TOC — empty for TXT, but keep the slot ready. */
+  fw_sidebar_set_toc (self->sidebar, NULL);
+
+  /* No file-monitor / state-restore in Phase 1. Both can land in a
+   * later phase once the reflow path proves stable. */
+
+  FW_TRACE_WINDOW ("open_file (reflow) done: '%s'", path);
+  return TRUE;
+}
+
 void
 fw_window_open_file (FwWindow *self, const char *path)
 {
@@ -1803,17 +1876,16 @@ fw_window_open_file (FwWindow *self, const char *path)
    * change events firing on the path we're about to swap. */
   fw_window_stop_monitor (self);
 
-  /* Clean up previous document */
-  if (self->cache) {
-    FW_TRACE_MEM ("closing previous doc: cache=%p doc=%p",
-                  (void *) self->cache, (void *) self->document);
-    fw_cache_stop (self->cache);
-    g_clear_object (&self->cache);
-  }
-  g_clear_object (&self->document);
-  g_clear_pointer (&self->file_path, g_free);
+  /* Tear down whichever pipeline was active. */
+  fw_window_close_active_document (self);
 
-  /* Open new document */
+  /* Reflow path — TXT in Phase 1, EPUB/MOBI/FB2 in later phases. */
+  if (fw_reflow_path_is_supported (path)) {
+    fw_window_open_reflow (self, path);
+    return;
+  }
+
+  /* Open new document (fixed-layout backend) */
   g_autoptr (GError) error = NULL;
   self->document = fw_document_new_for_path (path, &error);
 
@@ -1963,6 +2035,9 @@ fw_window_dispose (GObject *object)
                 (void *) self->document,
                 self->file_path ? self->file_path : "(null)");
   g_clear_object (&self->document);
+  if (self->reflow_view)
+    fw_reflow_view_set_document (self->reflow_view, NULL);
+  g_clear_object (&self->reflow_doc);
   g_clear_pointer (&self->file_path, g_free);
   g_clear_pointer (&self->nav_back,    g_array_unref);
   g_clear_pointer (&self->nav_forward, g_array_unref);

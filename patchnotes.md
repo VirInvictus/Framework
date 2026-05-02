@@ -2,6 +2,36 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.40.0 (2026-05-02)
+
+*Phase 13.1 Phase 1 — Fractal-style reflow architecture lands as a TXT-only proof.* The new pipeline runs in parallel to the existing `FwView` + `FwCache` + `FwDocument` stack, dispatched at file-open time. `.txt` files now route through `FwReflowDocument` + `FwReflowView`; PDF / DjVu / CBZ / CB7 / CBT / CBR / XPS / EPUB / FB2 / MOBI continue to flow through MuPDF. EPUB / MOBI / AZW3 / FB2 will move to the reflow pipeline in later Phase 13.1 phases — the architecture is in, the format work is the next slice.
+
+### New: `FwReflowDocument` interface
+
+`src/fw-reflow-document.{h,c}` defines the parallel interface from `docs/fractal-rewrite.md` §2. The `FwBlock` GObject (kind enum + level + Pango-markup text + image_id + anchor_id + flags) plus a `FwReflowTocItem` GObject. The interface vtable: `open` / `close`, `get_block_model` (the hot path — bound directly to `GtkListView`), `get_image`, `get_toc`, `find_block_by_anchor`, `search`, `get_metadata`. `FwBlockKind` rather than `FwBlockType` to dodge the GObject-getter naming collision; otherwise tracks the design doc 1:1.
+
+### New: `FwReflowDocumentTxt` backend
+
+`src/fw-reflow-document-txt.{h,c}`. Reads the file, normalizes the encoding (UTF-8 BOM strip, UTF-16 LE/BE BOM via `g_convert`, UTF-8 validate, ISO-8859-1 fallback), splits on blank-line runs (Markdown convention), Pango-escapes each chunk, pushes a `FW_BLOCK_PARAGRAPH` per paragraph into a `GListStore<FwBlock>`. Empty TOC, NULL `get_image`. Trivial — exactly as scoped in the design doc §3 "TXT (easiest — start here)".
+
+### New: `FwReflowView` widget
+
+`src/fw-reflow-view.{h,c}`. `GtkWidget` with a `GTK_TYPE_BIN_LAYOUT` hosting a `GtkScrolledWindow` → `GtkListView` → `GtkSingleSelection`. `GtkSignalListItemFactory` setup creates a `selectable=TRUE` wrapping `GtkLabel`; the bind handler swaps CSS classes per `FwBlockKind` (HEADING / CODE / BLOCKQUOTE / HR / CHAPTER / PARAGRAPH). CSS loaded once at view init drives typography (font-size, line-height, the blockquote vertical bar). Reading column capped at 720 px via `gtk_scrolled_window_set_max_content_width` so wide windows don't produce inhumane line lengths. Pango wrapping + native `GtkLabel` selection are GTK-native — no custom snapshot work for text rendering.
+
+### Window dispatch
+
+`fw-window.c` gains `reflow_doc` / `reflow_view` peers to `document` / `view`; the content stack now has three pages: `empty`, `document` (fixed-layout), `reflow`. `fw_window_open_file` checks `fw_reflow_path_is_supported(path)` (Phase 1: `.txt` only) and branches to a dedicated `fw_window_open_reflow` helper. Both paths share `fw_window_close_active_document` for teardown so swaps between fixed-layout and reflow are clean. `fw-application.c`'s file-open dialog gains `*.txt` + `text/plain`. Most fixed-layout actions (zoom, rotation, crop, loupe, ruler) are still wired but no-op when the reflow view is active because they all begin with `if (!self->document) return;`. State persistence, file-monitor auto-reload, navigation history, and search aren't wired for the reflow pipeline yet — those land alongside FB2 / EPUB.
+
+### Bug caught during smoke test
+
+`gtk_list_view_new` is `transfer-full` for both its model and factory args — the initial draft passed both then `g_object_unref`'d the factory afterward, dropping it to refcount 0 mid-construction. The first model swap segfaulted in `g_value_object_collect_value` during `gtk_list_view_create_list_widget`. Fix: the listview now consumes the original factory ref and gets an explicit `g_object_ref` of `self->selection` so the view holds its own ref independent of the listview's. ASan + UBSan clean across the smoke corpus, all 5 stress tests still pass.
+
+### Build
+
+Three new sources — `fw-reflow-document.c`, `fw-reflow-document-txt.c`, `fw-reflow-view.c` — appended to `framework_lib_sources`. No new dependencies: GTK, GLib, GIO, libadwaita, Cairo were already in. The reflow pipeline links into `framework-core` so the existing test harness can reach it once Phase 13.1 grows tests.
+
+---
+
 ## v0.39.1 (2026-05-01)
 
 *Comprehensive attribution sweep across `README.md`.* Reframed the project's opening to be transparent that Framework is a deliberate synthesis — SumatraPDF's cache + threading idioms, zathura-pdf-mupdf's zero-copy MuPDF→cairo pipeline + Zathura's `GThreadPool` priority dispatch, YACReader's loupe + double-spread detection, and (Phase 13.1) Fractal's native-GTK reflow architecture, glued into a minimalist libadwaita UI. Sioyek, Plato, MComix, Komikku, Foliate listed as additional pattern sources.
