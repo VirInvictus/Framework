@@ -915,23 +915,33 @@ static void
 prefs_apply_preset (FwWindow *self, const char *preset)
 {
   if (!self->settings || !preset) return;
-  /* Each preset writes a {body, mono, size, line-height} bundle. */
+  /* Each preset writes a {body, mono, size, line-height} bundle that
+   * names a bundled OFL family. The fonts ship in
+   * `${datadir}/framework/fonts/` and are registered with FontConfig
+   * at app startup, so all three names always resolve locally. */
   if (g_str_equal (preset, "default")) {
-    g_settings_set_string (self->settings, "reading-font-family", "");
+    g_settings_set_string (self->settings, "reading-font-family",
+                           "Atkinson Hyperlegible");
     g_settings_set_string (self->settings, "reading-monospace-family", "");
     g_settings_set_double (self->settings, "reading-font-size",   13.0);
     g_settings_set_double (self->settings, "reading-line-height", 1.5);
-  } else if (g_str_equal (preset, "dyslexic")) {
-    g_settings_set_string (self->settings, "reading-font-family", "OpenDyslexic");
-    g_settings_set_string (self->settings, "reading-monospace-family", "OpenDyslexic Mono");
+  } else if (g_str_equal (preset, "serif")) {
+    g_settings_set_string (self->settings, "reading-font-family",
+                           "Crimson Pro");
+    g_settings_set_string (self->settings, "reading-monospace-family", "");
     g_settings_set_double (self->settings, "reading-font-size",   14.0);
-    g_settings_set_double (self->settings, "reading-line-height", 1.7);
+    g_settings_set_double (self->settings, "reading-line-height", 1.55);
   } else if (g_str_equal (preset, "compact")) {
+    g_settings_set_string (self->settings, "reading-font-family",
+                           "Atkinson Hyperlegible");
     g_settings_set_double (self->settings, "reading-font-size",   11.5);
     g_settings_set_double (self->settings, "reading-line-height", 1.3);
-  } else if (g_str_equal (preset, "comfortable")) {
+  } else if (g_str_equal (preset, "dyslexic")) {
+    g_settings_set_string (self->settings, "reading-font-family",
+                           "OpenDyslexic");
+    g_settings_set_string (self->settings, "reading-monospace-family", "");
     g_settings_set_double (self->settings, "reading-font-size",   14.0);
-    g_settings_set_double (self->settings, "reading-line-height", 1.6);
+    g_settings_set_double (self->settings, "reading-line-height", 1.7);
   }
 }
 
@@ -1022,10 +1032,10 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
   gtk_widget_add_css_class     (GTK_WIDGET (btn_box), "linked");
 
   struct { const char *id, *label; } presets[] = {
-    { "default",     "Default"     },
-    { "compact",     "Compact"     },
-    { "comfortable", "Comfortable" },
-    { "dyslexic",    "Dyslexic"    },
+    { "default",  "Default"   },     /* Atkinson Hyperlegible */
+    { "serif",    "Serif"     },     /* Crimson Pro */
+    { "compact",  "Compact"   },
+    { "dyslexic", "Dyslexic"  },     /* OpenDyslexic */
   };
   for (size_t i = 0; i < G_N_ELEMENTS (presets); i++) {
     GtkButton *b = GTK_BUTTON (gtk_button_new_with_label (presets[i].label));

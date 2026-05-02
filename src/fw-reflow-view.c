@@ -34,16 +34,22 @@ G_DEFINE_FINAL_TYPE (FwReflowView, fw_reflow_view, GTK_TYPE_WIDGET)
 
 /* ── Factory: FwBlock → GtkWidget ─────────────────────────────────── */
 
-#define IMAGE_MAX_HEIGHT_PX 600
-
 /* Each row hosts a GtkStack with two named children:
  *   "text"  → a wrapping, selectable GtkLabel for paragraph / heading /
  *             code / blockquote / hr / chapter blocks.
- *   "image" → a GtkPicture with content-fit=contain, capped at
- *             IMAGE_MAX_HEIGHT_PX so a cover image never dominates the
- *             viewport.
+ *   "image" → a GtkPicture sized to its natural dimensions, fit-contained
+ *             into the row width.
  * Bind switches the visible page; the unused widget is preserved so
- * recycled rows skip widget churn when the kind toggles back. */
+ * recycled rows skip widget churn when the kind toggles back.
+ *
+ * IMPORTANT: keep widget-side margins to zero. All vertical rhythm
+ * comes from CSS margin-top/bottom on the per-kind classes, applied
+ * conditionally — that way an empty CHAPTER block doesn't double-pad
+ * its row, and PARAGRAPH spacing is determined purely by the active
+ * line-height setting. The previous 4px widget margins stacked with
+ * GtkListView's default row padding to produce ~16px of dead space
+ * between every paragraph.
+ */
 
 static GtkWidget *
 make_text_label (void)
@@ -58,8 +64,6 @@ make_text_label (void)
   gtk_widget_set_halign (GTK_WIDGET (label), GTK_ALIGN_FILL);
   gtk_widget_set_margin_start  (GTK_WIDGET (label), READING_COLUMN_MARGIN);
   gtk_widget_set_margin_end    (GTK_WIDGET (label), READING_COLUMN_MARGIN);
-  gtk_widget_set_margin_top    (GTK_WIDGET (label), 4);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (label), 4);
   gtk_widget_add_css_class     (GTK_WIDGET (label), "reflow-paragraph");
   return GTK_WIDGET (label);
 }
@@ -74,11 +78,6 @@ make_image_picture (void)
   gtk_widget_set_hexpand         (GTK_WIDGET (pic), TRUE);
   gtk_widget_set_margin_start    (GTK_WIDGET (pic), READING_COLUMN_MARGIN);
   gtk_widget_set_margin_end      (GTK_WIDGET (pic), READING_COLUMN_MARGIN);
-  gtk_widget_set_margin_top      (GTK_WIDGET (pic), 8);
-  gtk_widget_set_margin_bottom   (GTK_WIDGET (pic), 8);
-  /* Min-height is the natural floor; combined with content-fit=contain,
-   * the picture scales down to fit the row width without ballooning. */
-  gtk_widget_set_size_request    (GTK_WIDGET (pic), -1, IMAGE_MAX_HEIGHT_PX);
   gtk_widget_add_css_class       (GTK_WIDGET (pic), "reflow-image");
   return GTK_WIDGET (pic);
 }
@@ -182,27 +181,55 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
 
 /* ── CSS for typography (regenerated from GSettings) ──────────────── */
 
-/* Static structural CSS — selection highlight suppression, image
- * background, blockquote bar. Stable across font-preference changes
- * so we don't have to rebuild the whole rule set on every spin. */
+/* Static structural CSS — listview row reset (the source of the
+ * "huge whitespace" complaint: GtkListView's default row CSS adds
+ * 6–8 px top/bottom padding intended for picker UIs, which stacks
+ * onto every paragraph), plus image background and blockquote bar.
+ * Stable across font-preference changes so the regeneration only
+ * has to rewrite the size/family rules. */
 static const char REFLOW_STATIC_CSS[] =
-  ".reflow-blockquote{ font-style: italic; opacity: 0.85; "
-  "                    border-left: 3px solid alpha(currentColor, 0.3); "
-  "                    padding-left: 12px; }"
-  ".reflow-chapter   { font-weight: bold; opacity: 0.5; "
-  "                    margin-top: 24px; margin-bottom: 4px; }"
-  ".reflow-image     { background: alpha(currentColor, 0.04); "
-  "                    border-radius: 4px; }"
-  /* Suppress GtkListView's default row hover/selection highlight —
-   * a chat-app idiom inappropriate for a book reader. */
+  /* Reset row chrome — no padding, no min-height, no hover or
+   * selection highlight. The rows are reading-text containers, not
+   * list-picker rows. */
+  ".reflow-listview,"
   ".reflow-listview > row,"
   ".reflow-listview > row:hover,"
   ".reflow-listview > row:selected,"
   ".reflow-listview > row:selected:focus,"
   ".reflow-listview > row:focus {"
+  "    padding: 0;"
+  "    margin: 0;"
+  "    min-height: 0;"
   "    background: transparent;"
   "    box-shadow: none;"
   "    outline: none;"
+  "    border: none;"
+  "}"
+  /* Blockquote vertical bar + small left padding. */
+  ".reflow-blockquote {"
+  "    font-style: italic;"
+  "    opacity: 0.85;"
+  "    border-left: 3px solid alpha(currentColor, 0.3);"
+  "    padding-left: 12px;"
+  "    margin-top: 6px;"
+  "    margin-bottom: 6px;"
+  "}"
+  /* CHAPTER blocks have no text — they're a tiny gap that signals a
+   * new spine entry / FB2 section. 12 px total (no widget margins,
+   * just CSS). */
+  ".reflow-chapter {"
+  "    min-height: 12px;"
+  "    margin: 0;"
+  "    padding: 0;"
+  "}"
+  /* IMAGE rows: a hint of frame around the picture. The picture
+   * itself sizes to its natural dimensions, capped by row width via
+   * content-fit=contain. */
+  ".reflow-image {"
+  "    background: alpha(currentColor, 0.03);"
+  "    border-radius: 6px;"
+  "    margin-top: 8px;"
+  "    margin-bottom: 8px;"
   "}";
 
 static char *
@@ -223,6 +250,20 @@ build_reflow_css (FwReflowView *self)
     mono_family = g_strdup ("");
   }
 
+  /* Default body family: Atkinson Hyperlegible (bundled, designed for
+   * high readability) when the user hasn't picked one. The bundled
+   * fonts are registered with FontConfig at app startup so this
+   * always resolves locally. */
+  const char *body_used = (body_family && *body_family)
+                            ? body_family
+                            : "Atkinson Hyperlegible";
+
+  /* Default monospace: system mono — Source Code Pro is on most
+   * dev systems and any GTK install on GNOME ships a fallback. */
+  const char *mono_used = (mono_family && *mono_family)
+                            ? mono_family
+                            : "monospace";
+
   /* Heading sizes scale relative to the body size. */
   double h1 = size + 9;
   double h2 = size + 5;
@@ -231,39 +272,57 @@ build_reflow_css (FwReflowView *self)
 
   GString *css = g_string_new (REFLOW_STATIC_CSS);
 
-  if (body_family && *body_family) {
-    g_string_append_printf (
-      css,
-      ".reflow-paragraph, .reflow-heading, .reflow-blockquote, .reflow-chapter "
-      "{ font-family: \"%s\"; }",
-      body_family);
-  }
-  if (mono_family && *mono_family) {
-    g_string_append_printf (css,
-      ".reflow-code { font-family: \"%s\"; } ", mono_family);
-  } else {
-    g_string_append (css, ".reflow-code { font-family: monospace; } ");
-  }
-
+  /* Body family applied to text-bearing classes. The reflow-image
+   * rule doesn't need a font; reflow-code overrides with monospace. */
   g_string_append_printf (
     css,
-    ".reflow-paragraph { font-size: %.1fpt; line-height: %.2f; } "
-    ".reflow-heading   { font-weight: bold; line-height: 1.2; "
-    "                    margin-top: 16px; margin-bottom: 6px; } "
-    ".reflow-h1        { font-size: %.1fpt; } "
-    ".reflow-h2        { font-size: %.1fpt; } "
-    ".reflow-h3        { font-size: %.1fpt; } "
-    ".reflow-h4        { font-size: %.1fpt; } "
-    ".reflow-h5        { font-size: %.1fpt; } "
-    ".reflow-h6        { font-size: %.1fpt; } "
-    ".reflow-code      { font-size: %.1fpt; line-height: %.2f; } "
-    ".reflow-blockquote{ font-size: %.1fpt; line-height: %.2f; } "
-    ".reflow-chapter   { font-size: %.1fpt; }",
+    ".reflow-paragraph, .reflow-heading, .reflow-blockquote, .reflow-chapter "
+    "{ font-family: \"%s\"; } "
+    ".reflow-code { font-family: \"%s\"; } ",
+    body_used, mono_used);
+
+  /* Tight, reading-app-grade vertical rhythm.
+   *
+   * - Paragraphs: line-height drives the in-block leading; a 0.4em
+   *   inter-block margin gives a paragraph break without doubling
+   *   into the row gutter (which is now 0). Pango's logical descent
+   *   already includes some space below the last line of each
+   *   paragraph, so 0.4em is enough to feel like a paragraph break
+   *   without floating away from the previous one.
+   * - Headings: more breathing room before than after — typical
+   *   chapter-heading rhythm. */
+  g_string_append_printf (
+    css,
+    ".reflow-paragraph {"
+    "  font-size: %.1fpt;"
+    "  line-height: %.2f;"
+    "  margin-top: 0;"
+    "  margin-bottom: 0.4em;"
+    "}"
+    ".reflow-heading {"
+    "  font-weight: bold;"
+    "  line-height: 1.15;"
+    "  margin-top: 1.0em;"
+    "  margin-bottom: 0.4em;"
+    "}"
+    ".reflow-h1 { font-size: %.1fpt; }"
+    ".reflow-h2 { font-size: %.1fpt; }"
+    ".reflow-h3 { font-size: %.1fpt; }"
+    ".reflow-h4 { font-size: %.1fpt; }"
+    ".reflow-h5 { font-size: %.1fpt; }"
+    ".reflow-h6 { font-size: %.1fpt; }"
+    ".reflow-code {"
+    "  font-size: %.1fpt;"
+    "  line-height: %.2f;"
+    "}"
+    ".reflow-blockquote {"
+    "  font-size: %.1fpt;"
+    "  line-height: %.2f;"
+    "}",
     size, line_height,
     h1, h2, h3, h4, size, size,
     size - 1, line_height,
-    size, line_height,
-    size - 1);
+    size, line_height);
 
   return g_string_free (css, FALSE);
 }

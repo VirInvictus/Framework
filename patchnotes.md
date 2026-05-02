@@ -2,6 +2,81 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.47.0 (2026-05-02)
+
+*Reading rendering overhaul — three OFL fonts ship with the application, and the "huge whitespace" between paragraphs is gone.* The previous default looked nothing like a finished reading experience; v0.47.0 fixes both root causes.
+
+### The whitespace problem
+
+Two bugs compounded into a 16–24 px gap between every paragraph:
+
+1. **`GtkListView`'s default row CSS** adds `padding: 8px 0` plus an internal `min-height` ~24 px. Those are good defaults for a settings picker; they're terrible for prose.
+2. **My setup-time widget margins** added another `margin-top: 4 + margin-bottom: 4 = 8 px` on top of that.
+
+`FwReflowView`'s static CSS now resets both. The `.reflow-listview, .reflow-listview > row` block zeros `padding`, `margin`, `min-height`, `border`, `box-shadow`, `outline`, and `background` — for normal, hover, focus, selected, and selected:focus states. The setup-time widget margins are gone too. All vertical rhythm now comes from CSS class margins applied per block kind:
+
+- **`.reflow-paragraph`** — `margin-bottom: 0.4em`. A real paragraph break, scaled to the active font size, with no top margin (so the gap doesn't double when paragraphs follow each other).
+- **`.reflow-heading`** — `margin-top: 1.0em; margin-bottom: 0.4em`. Standard heading rhythm.
+- **`.reflow-blockquote`** — `margin-top: 6px; margin-bottom: 6px` (block-frame).
+- **`.reflow-chapter`** — `min-height: 12px; margin: 0; padding: 0`. Down from the previous ~36 px empty gap. Just enough to signal a new spine entry / FB2 section.
+- **`.reflow-image`** — `margin-top: 8px; margin-bottom: 8px`; the previous 600 px `min-height` request is gone (was making any image-bearing row balloon to half a screen). `content-fit=contain` + `can-shrink=TRUE` constrain the picture naturally.
+
+The default body line-height of 1.5 multiplied by the font size now drives the in-paragraph leading. The total gap between two consecutive paragraphs is `0.4em` (~5 px at 13 pt) plus Pango's natural descent — which is what every other reading app on the platform does.
+
+### Bundled fonts (1.7 MB total)
+
+Three OFL-licensed families committed to `data/fonts/` and installed to `${datadir}/framework/fonts/<Family>/`:
+
+| Family | Bytes | Role | Source |
+|---|---:|---|---|
+| **Atkinson Hyperlegible** | 224 KB | Default body (designed by the Braille Institute for low-vision readability) | github.com/googlefonts/atkinson-hyperlegible |
+| **Crimson Pro** | 588 KB | Body serif option (Garamond-derived, OFL) | github.com/Fonthausen/CrimsonPro |
+| **OpenDyslexic** | 852 KB | Accessibility / dyslexic-friendly | github.com/antijingoist/opendyslexic v0.91.12 |
+
+Each subdirectory carries the `OFL.txt` license text alongside the font files so license compliance is self-contained.
+
+### `fw-fonts.{h,c}` — runtime registration
+
+New `fontconfig` build dependency. At app startup (`FwApplication::startup`), `fw_fonts_register()` walks four candidate roots in priority order and calls `FcConfigAppFontAddDir` on the first one that exists:
+
+1. `$FW_FONT_DIR` (env override for dev / CI)
+2. `$FRAMEWORK_DATADIR/framework/fonts/`
+3. `<install-prefix>/share/framework/fonts/` (set at compile time via the new `FW_DATADIR` config define)
+4. `<source-root>/data/fonts/` (fallback for `meson devenv` / direct ./builddir runs)
+
+Pango/GTK then sees the bundled families as if the user had installed them system-wide, but only for this process — no global side effect, no `~/.fonts` writes.
+
+`FW_DEBUG=1` prints which root + which families registered, so you can confirm at startup that the bundle landed.
+
+### Default body font
+
+`reading-font-family` GSetting still defaults to `""`, but the build_reflow_css fallback now resolves `""` to **`"Atkinson Hyperlegible"`** instead of `"system serif"`. So out-of-the-box reading uses the bundled high-readability sans regardless of what the user has installed locally.
+
+### Preset overhaul
+
+The Reading Settings dialog's preset row is now four buttons that actually deliver what they claim, because every named family is guaranteed available:
+
+| Preset | Body | Size | Line-height |
+|---|---|---:|---:|
+| Default | Atkinson Hyperlegible | 13.0 | 1.50 |
+| Serif | Crimson Pro | 14.0 | 1.55 |
+| Compact | Atkinson Hyperlegible | 11.5 | 1.30 |
+| Dyslexic | OpenDyslexic | 14.0 | 1.70 |
+
+(The previous "Comfortable" preset rolled into "Serif" — comfortable reading at this scale is essentially "use a serif at 14 pt.")
+
+### Verified
+
+- *Verdant Passage* EPUB renders without the whitespace bloat — paragraphs flow at natural reading density. Cover image fits the viewport, doesn't stretch to 600 px. Cycling all four presets live re-renders cleanly.
+- ASan + UBSan clean.
+- All 5 stress tests still pass.
+
+### Notes for packagers
+
+`data/fonts/` is part of the source tree now. Flatpak manifests will pick them up automatically through `install_subdir`. The fonts add ~1.7 MB to the install footprint — acceptable for a reading app where typography is the user-facing surface.
+
+---
+
 ## v0.46.0 (2026-05-02)
 
 *Reading Settings dialog — body font family, size, line-height, monospace family, all live-applied.* The first half of the typography work Brandon called out. The bundled-fonts piece (OpenDyslexic + a serif) ships in v0.47.0; this slice gets the plumbing in place and lets users point at any locally-installed font.

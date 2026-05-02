@@ -24,4 +24,17 @@ install_data(
 
 gnome.compile_schemas(build_by_default: true)
 
+# Bundled reading fonts (Phase 13.1). Three OFL families:
+#   * OpenDyslexic — accessibility / dyslexic-friendly
+#   * Atkinson Hyperlegible — high-readability sans (default)
+#   * Crimson Pro — body serif option
+# Installed to ${datadir}/framework/fonts/, registered with FontConfig
+# at app startup by fw-fonts.c. Each subdir ships an OFL.txt license.
+foreach family : ['OpenDyslexic', 'AtkinsonHyperlegible', 'CrimsonPro']
+  install_subdir('fonts' / family,
+    install_dir: get_option('datadir') / 'framework' / 'fonts',
+    exclude_files: [],
+  )
+endforeach
+
 subdir('icons')

@@ -15,9 +15,10 @@ mupdf_dep = declare_dependency(
   ],
 )
 
-djvu_dep    = dependency('ddjvuapi',    version: '>= 3.5.28')
-archive_dep = dependency('libarchive', version: '>= 3.6')
-m_dep       = cc.find_library('m', required: false)
+djvu_dep       = dependency('ddjvuapi',    version: '>= 3.5.28')
+archive_dep    = dependency('libarchive', version: '>= 3.6')
+fontconfig_dep = dependency('fontconfig')
+m_dep          = cc.find_library('m', required: false)
 
 # Source list, partitioned so tests can link against the engine without
 # pulling in main(). Everything except main.c is compiled into a static
@@ -42,6 +43,7 @@ framework_lib_sources = files(
   'fw-state.c',
   'fw-debug.c',
   'fw-sandbox.c',
+  'fw-fonts.c',
 )
 
 framework_main_sources = files('main.c')
@@ -55,6 +57,7 @@ framework_deps = [
   mupdf_dep,
   djvu_dep,
   archive_dep,
+  fontconfig_dep,
   m_dep,
 ]
 

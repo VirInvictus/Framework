@@ -7,6 +7,7 @@
 #include "fw-application.h"
 #include "fw-window.h"
 #include "fw-state.h"
+#include "fw-fonts.h"
 
 struct _FwApplication {
   AdwApplication parent_instance;
@@ -125,6 +126,11 @@ static void
 fw_application_startup (GApplication *app)
 {
   G_APPLICATION_CLASS (fw_application_parent_class)->startup (app);
+
+  /* Register bundled reading fonts with FontConfig before any view
+   * widget tries to resolve a font family. Must happen before window
+   * construction so the CSS provider's first load sees them. */
+  fw_fonts_register ();
 
   /* Prune stale state entries */
   fw_state_init ();
