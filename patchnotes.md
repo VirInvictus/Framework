@@ -2,6 +2,42 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.41.0 (2026-05-02)
+
+*Phase 13.1 Phase 2 — FB2 (FictionBook 2) reflow backend.* `.fb2` now routes through `FwReflowDocumentFb2` instead of MuPDF's reflow path. Walks the file with `GMarkupParser`, building a flat block list with section structure preserved as CHAPTER markers + nested HEADING blocks, paragraphs as PARAGRAPH (with inline `<emphasis>`/`<strong>`/`<code>`/`<sub>`/`<sup>`/`<strikethrough>` translated to Pango markup), `<cite>`/`<epigraph>` as BLOCKQUOTE, `<empty-line/>` as HR, and `<image l:href="#X">` references resolved against the document's `<binary id="X">` attachments (decoded from base64 → `GdkTexture` via `gdk_texture_new_from_bytes`).
+
+### Coverage
+
+- **Sections**: each `<section>` increments depth and emits a CHAPTER marker; section's `id` attribute (when present) becomes the block's anchor for ToC/find_block_by_anchor lookups.
+- **Headings**: `<title>` (only inside a section) accumulates into a HEADING with `level = section_depth`. `<p>` children are joined with single spaces rather than starting their own blocks.
+- **Paragraphs**: `<p>` and `<subtitle>` outside `<title>` start a PARAGRAPH accumulator; trailing whitespace trimmed at flush.
+- **Inline styles**: `emphasis`→`<i>`, `strong`→`<b>`, `code`→`<tt>`, `sub`→`<sub>`, `sup`→`<sup>`, `strikethrough`→`<s>`. Unrecognized inline tags are silently skipped (text inside still flows).
+- **Images**: `<image>` (anywhere in body) pushes an `FW_BLOCK_IMAGE` referencing the binary by id (leading `#` stripped). Resolved at render time via `fw_reflow_document_get_image`. Three `href` namespace prefixes accepted: `l:href`, `xlink:href`, plain `href`.
+- **Binaries**: parsed even when they appear after the body (FB2's typical layout). Bad image data triggers a `g_warning` and the entry is dropped — the document still opens.
+- **TOC**: each section title pushes an `FwReflowTocItem` with the section's anchor id. Plain text — no Pango markup — to keep sidebar labels safe.
+- **Metadata**: `<title-info>` populates `title` (from `<book-title>`), `lang`, `src-lang`, `annotation`, and a synthesized `author` field from `<first-name>` + `<middle-name>` + `<last-name>`. Falls back to filename for `title` when missing.
+- **Encoding**: `<?xml encoding="..."?>` other than UTF-8 is converted via `g_convert` before parsing — `GMarkupParser` is UTF-8 only. UTF-8 (and no declaration) takes the zero-copy fast path.
+
+### Anchor map
+
+`anchors[anchor_id] = block_position + 1` (1-based so the GHashTable's NULL value can mean "not found"). `fw_reflow_document_find_block_by_anchor` now returns a real result for FB2; TXT still returns 0.
+
+### Out of scope (this slice)
+
+- `.fb2.zip` archives — `.fb2` only for now. Zip-wrapped FB2 is the same XML inside a libarchive read; tracked as a follow-up.
+- Verse / poem layout (`<v>`, `<stanza>`) — render as plain paragraphs at the moment. Real verse formatting needs the view to support left-margin variants.
+- `<a l:href="...">` anchor links — text passes through; the link target isn't recorded yet (no internal-link support in `FwReflowView` yet).
+- Search — every reflow backend's `search()` still returns NULL until Phase 6 polish lands.
+- Image rendering — `FwReflowView` still treats `FW_BLOCK_IMAGE` as a text fallback (the bind handler's `default:` case). The binaries are parsed and held; the view upgrade lands when EPUB's image cover page makes it indispensable.
+
+### Files
+
+`src/fw-reflow-document-fb2.{h,c}` (~440 LOC). `fw_reflow_path_is_supported` and the factory in `fw-reflow-document.c` extended for `.fb2`. Source list in `src/meson.build` updated. ASan + UBSan clean on a synthesized FB2 covering sections, nested sections, inline styles, images, binary, multi-paragraph chapter content, character escapes, and `<empty-line/>` markers. All 5 stress tests still pass.
+
+The fixed-layout dispatcher in `fw-document.c` still has `.fb2 → MuPDF` for the case where the reflow path bails — leaving that wired keeps a working fallback if a real-world FB2 trips the parser. The dispatch order in `fw_window_open_file` puts the reflow check first, so MuPDF only gets the file when reflow refuses.
+
+---
+
 ## v0.40.0 (2026-05-02)
 
 *Phase 13.1 Phase 1 — Fractal-style reflow architecture lands as a TXT-only proof.* The new pipeline runs in parallel to the existing `FwView` + `FwCache` + `FwDocument` stack, dispatched at file-open time. `.txt` files now route through `FwReflowDocument` + `FwReflowView`; PDF / DjVu / CBZ / CB7 / CBT / CBR / XPS / EPUB / FB2 / MOBI continue to flow through MuPDF. EPUB / MOBI / AZW3 / FB2 will move to the reflow pipeline in later Phase 13.1 phases — the architecture is in, the format work is the next slice.

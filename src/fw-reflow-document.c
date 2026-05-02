@@ -5,6 +5,7 @@
 
 #include "fw-reflow-document.h"
 #include "fw-reflow-document-txt.h"
+#include "fw-reflow-document-fb2.h"
 
 #include <string.h>
 
@@ -208,9 +209,10 @@ path_has_ext (const char *path, const char *ext_lower)
 gboolean
 fw_reflow_path_is_supported (const char *path)
 {
-  /* Phase 1: TXT only. EPUB/MOBI/AZW3/FB2 land in later phases — until
-   * then they fall through to the MuPDF fixed-layout backend. */
-  return path_has_ext (path, "txt");
+  /* Phase 1: TXT (v0.40.0).  Phase 2: FB2 (v0.41.0).
+   * EPUB/MOBI/AZW3 still flow through MuPDF until their phases land. */
+  return path_has_ext (path, "txt") ||
+         path_has_ext (path, "fb2");
 }
 
 FwReflowDocument *
@@ -222,6 +224,8 @@ fw_reflow_document_new_for_path (const char *path, GError **error)
 
   if (path_has_ext (path, "txt"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_txt_new ());
+  else if (path_has_ext (path, "fb2"))
+    doc = FW_REFLOW_DOCUMENT (fw_reflow_document_fb2_new ());
 
   if (!doc) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
