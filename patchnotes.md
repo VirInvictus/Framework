@@ -2,6 +2,43 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.42.0 (2026-05-02)
+
+*Phase 13.1 Phase 3 — EPUB reflow backend (the marquee delivery).* `.epub` now routes through `FwReflowDocumentEpub`. The full pipeline — `META-INF/container.xml` → OPF → manifest + spine + metadata → per-chapter XHTML → blocks; NCX → TOC; manifest images → `GdkTexture` hash — runs end-to-end on real Calibre-generated EPUBs.
+
+### Pipeline
+
+1. **ZIP read** (libarchive). One streaming pass enumerates every entry and caches its bytes into a `path → GBytes` hash. EPUB sizes are typically 1–50 MB; trading peak open-time memory for random access through the rest of the open path is the right call versus re-streaming for each lookup.
+2. **`META-INF/container.xml`** — strict GMarkupParser, walks `<rootfile>` for `full-path`. Errors here fail open; the file isn't a recognizable EPUB.
+3. **OPF parse** — manifest (`<item id href media-type>`), spine (`<itemref idref>` order), `<spine toc="...">` for the NCX id, and `<metadata>` for `dc:title` (→ `title`), `dc:creator` (→ `author`), `dc:language` (→ `lang`), `dc:publisher`, `dc:date`. First-write-wins on metadata so multiple `<dc:creator>` entries don't churn the canonical author. All hrefs resolved relative to the OPF directory by a `resolve_zip_path` helper that normalizes `./` and `..` segments.
+4. **Spine walk** — for each idref in declaration order, look up the manifest entry, look up the bytes in the zip hash, run them through the XHTML parser. Failed chapters are warned and skipped — the rest of the book still opens (the design's resilience strategy).
+5. **XHTML → blocks**. Strict GMarkupParser (real Calibre EPUBs are well-formed XHTML; libxml2's tolerant mode is the next iteration if real-world breakage shows up). Tag map: `<h1..h6>` → `HEADING` (level = N); `<p>` → `PARAGRAPH`; `<blockquote>` → `BLOCKQUOTE`; `<pre>` → `CODE`; `<li>` → `PARAGRAPH` with `"•  "` prefix; `<hr>` → `HR`; `<br>` → newline within active accumulator; `<img src>` → `IMAGE` with src resolved against the chapter's directory. Inline tags (`em`/`i`, `strong`/`b`, `code`/`tt`/`kbd`/`samp`, `sub`, `sup`, `s`/`strike`/`del`, `u`/`ins`/`a`) translate to Pango markup. Whitespace is collapsed at append time (single space between runs) so the source file's pretty-printed indentation doesn't leak into rendered text. CSS is dropped by design — Framework's typography wins.
+6. **CHAPTER markers** — emitted lazily, on the first content block of each spine entry rather than blindly at chapter-open. The marker's anchor is the chapter's resolved zip path so NCX `<content src="chapter02.html">` lookups land on it. Anchored elements with `id="..."` get a composite `chapter.html#frag` anchor.
+7. **NCX TOC** — `<navPoint><navLabel><text>...</text></navLabel><content src="..."/></navPoint>` walked in document order. The `src` is split on `#` to honor mid-chapter fragments. Resolved against the NCX file's directory (which is usually but not always the OPF directory). EPUB 3 `nav.xhtml` is a follow-up; falling back to NCX picks up most EPUB 3s anyway since publishers typically ship both for backwards compatibility.
+8. **Image decode** — every manifest item with media-type `image/*` is decoded via `gdk_texture_new_from_bytes`. Each texture lands in the images hash under both its resolved zip path (matches `IMAGE` blocks emitted by the XHTML parser) and its manifest id (for hand-rolled callers).
+
+### Verified on
+
+Five real EPUBs from `/home/bdkl/docs/Calibre Library/`: *The Verdant Passage* (Denning), *The Fall* (Cahill), *20th Century Ghosts* (Hill), *Red Rising* (Brown), and *The Ego and His Own* (Stirner, Z-Library version). All open without warnings or parse errors. ASan + UBSan clean on the *Verdant Passage* path. All 5 stress tests still pass — the existing fixed-layout pipeline is untouched.
+
+### Files
+
+- `src/fw-reflow-document-epub.{h,c}` — ~700 LOC.
+- `fw-reflow-document.c` — `.epub` routes to the new backend (was: through MuPDF as a "reflowable" format).
+- `src/meson.build` — source list updated; no new dependency (libarchive was already in for CBR).
+
+### Out of scope (this slice)
+
+- **Image rendering** — `FwReflowView` still treats `FW_BLOCK_IMAGE` as a text label fallback. The textures are decoded and held; the `GtkPicture` upgrade in the view is the next focused slice and unlocks rendering for both EPUB and FB2 simultaneously.
+- **EPUB 3 nav.xhtml** — NCX is the only TOC source for now. EPUB 3 publishers ship NCX for backward compatibility, so this isn't a blocker; lands when a real EPUB 3-only book turns up.
+- **Tolerant HTML parsing** — strict GMarkupParser handles every test EPUB so far. libxml2 stays out of the dep set until real-world breakage forces it.
+- **Search inside reflowed content** — `epub_search` returns `NULL` like every other reflow backend's `search()`. Phase 6 polish.
+- **DRM-encrypted EPUBs** — surface as parse errors and the document fails to open. No circumvention; out of scope.
+
+`fw-document.c`'s `.epub → MuPDF` fallback is still in the fixed-layout factory — kept for the case where the reflow path bails on a malformed book. Dispatch order in `fw_window_open_file` puts the reflow path first, so MuPDF only sees an EPUB if reflow refused.
+
+---
+
 ## v0.41.0 (2026-05-02)
 
 *Phase 13.1 Phase 2 — FB2 (FictionBook 2) reflow backend.* `.fb2` now routes through `FwReflowDocumentFb2` instead of MuPDF's reflow path. Walks the file with `GMarkupParser`, building a flat block list with section structure preserved as CHAPTER markers + nested HEADING blocks, paragraphs as PARAGRAPH (with inline `<emphasis>`/`<strong>`/`<code>`/`<sub>`/`<sup>`/`<strikethrough>` translated to Pango markup), `<cite>`/`<epigraph>` as BLOCKQUOTE, `<empty-line/>` as HR, and `<image l:href="#X">` references resolved against the document's `<binary id="X">` attachments (decoded from base64 → `GdkTexture` via `gdk_texture_new_from_bytes`).

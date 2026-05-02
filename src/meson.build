@@ -34,6 +34,7 @@ framework_lib_sources = files(
   'fw-reflow-document.c',
   'fw-reflow-document-txt.c',
   'fw-reflow-document-fb2.c',
+  'fw-reflow-document-epub.c',
   'fw-reflow-view.c',
   'fw-sidebar.c',
   'fw-search.c',
