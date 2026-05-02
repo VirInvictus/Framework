@@ -211,9 +211,14 @@ path_has_ext (const char *path, const char *ext_lower)
 gboolean
 fw_reflow_path_is_supported (const char *path)
 {
-  /* Phase 1: TXT (v0.40.0).  Phase 2: FB2 (v0.41.0).
-   * Phase 3: EPUB (v0.42.0). Phase 4: MOBI/PRC (v0.52.0).
-   * AZW3/KF8 still flows through MuPDF until Phase 5. */
+  /* Reflow-handled formats (foliate-js ports):
+   *   TXT  (v0.40.0)
+   *   FB2  (v0.41.0)
+   *   EPUB (v0.42.0)
+   *   MOBI / PRC — KF7 only (v0.52.0)
+   *
+   * AZW3 / .azw / KF8 — handled by MuPDF's reflowable backend
+   * until full KF8 (foliate's INDX + SKEL + FRAG splice) lands. */
   return path_has_ext (path, "txt") ||
          path_has_ext (path, "fb2") ||
          path_has_ext (path, "epub") ||

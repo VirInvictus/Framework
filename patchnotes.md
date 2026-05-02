@@ -2,6 +2,34 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.54.0 (2026-05-02)
+
+*Reflow-refusal falls through to MuPDF; AZW3 / .azw / .prc accepted by file dialog and dispatcher.* The native reflow port doesn't yet handle KF8 / AZW3 (foliate's INDX + SKEL + FRAG splice is task #20, ~600 LOC) — until that lands, those files route to MuPDF's reflowable backend, which reads them acceptably even if the UX doesn't have our paginated reading model.
+
+### Soft refusal
+
+`fw_window_open_reflow` previously showed an `AdwAlertDialog` on any failure (corrupt file, KF8 hybrid, encryption, encoding bust). Now it returns FALSE quietly; `fw_window_open_file` notices and continues to the fixed-layout dispatcher. The fixed-layout backend has its own alert dialog for terminal failures, so user-visible errors are unchanged for genuinely unopenable files. Net effect: KF8 hybrids no longer pop a "Phase 5 follow-up" dialog — they fall through and just open.
+
+### File dialog + factory
+
+- `fw-application.c` adds `*.azw`, `*.azw3`, `*.prc` patterns to the file filter.
+- `fw-document.c` factory routes `.azw` / `.azw3` / `.prc` to MuPDF as "Reflowable (MuPDF)" alongside the existing EPUB / FB2 / MOBI list.
+- `fw_reflow_path_is_supported` documents the AZW3 deferral with a comment naming the pending KF8 work.
+
+### Verified
+
+- *Datapoint* (Lamont Wood, AZW3) — opens via MuPDF, 1 page rendered. MuPDF emits a CSS lookup warning for an embedded `kindle:flow:0001?mime=text/css` URI that doesn't break the render.
+- *Fall of Kings* (Gemmell, KF7 MOBI) — still takes the reflow path, 4,460 blocks.
+- ASan + UBSan clean. EPUB / FB2 / TXT regression checks pass. All 5 stress tests pass.
+
+### Up next
+
+- **Task #20: full KF8 / AZW3 port** — INDX parser, SKEL + FRAG indexes, skeleton+fragment splice. Foliate's `KF8` class (~400 LOC of dense JS). Real lift; deferred behind the EPUB / FB2 rewrites.
+- **Task #19: EPUB rewrite from foliate-js/epub.js** — current EPUB works on Calibre output but is hand-rolled. Foliate's parser handles edge cases ours misses (EPUB 3 nav.xhtml, encrypted detection, OPF manifest properties).
+- **Task #21: FB2 rewrite from foliate-js/fb2.js** — same shape.
+
+---
+
 ## v0.53.0 (2026-05-02)
 
 *MOBI image extraction — covers and inline graphics now display.* The MOBI parser walks the PDB resource records starting at `resourceStart` (foliate's [108, 4]), magic-sniffs each record, and decodes JPEG / PNG / GIF / WebP into `GdkTexture`s keyed by 1-based recindex. The HTML walker resolves `<img recindex="N">` to those textures via the existing image plumbing.

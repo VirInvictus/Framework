@@ -2124,11 +2124,11 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   g_autoptr (GError) error = NULL;
   FwReflowDocument *doc = fw_reflow_document_new_for_path (path, &error);
   if (!doc) {
-    AdwAlertDialog *dlg = ADW_ALERT_DIALOG (
-      adw_alert_dialog_new ("Cannot Open Document",
-                            error ? error->message : "Unknown error"));
-    adw_alert_dialog_add_response (dlg, "ok", "OK");
-    adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (self));
+    /* Reflow refused — return FALSE quietly so fw_window_open_file
+     * can fall through to the fixed-layout MuPDF backend (which
+     * handles EPUB / FB2 / MOBI / AZW3 acceptably even if the
+     * reflow port doesn't yet). The fixed-layout path's own alert
+     * dialog covers final failures. */
     return FALSE;
   }
 
@@ -2215,10 +2215,13 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* Tear down whichever pipeline was active. */
   fw_window_close_active_document (self);
 
-  /* Reflow path — TXT in Phase 1, EPUB/MOBI/FB2 in later phases. */
+  /* Reflow path — TXT / FB2 / EPUB / MOBI handled natively. If
+   * reflow refuses (e.g. corrupt file, KF8 hybrid we don't yet
+   * understand), fall through to the fixed-layout MuPDF backend
+   * which can also read these formats. */
   if (fw_reflow_path_is_supported (path)) {
-    fw_window_open_reflow (self, path);
-    return;
+    if (fw_window_open_reflow (self, path))
+      return;
   }
 
   /* Open new document (fixed-layout backend) */

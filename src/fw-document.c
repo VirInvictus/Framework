@@ -345,7 +345,10 @@ fw_document_new_for_path (const char *path, GError **error)
     backend_label = "XPS (MuPDF)";
   } else if (g_ascii_strcasecmp (dot, ".epub") == 0 ||
              g_ascii_strcasecmp (dot, ".fb2") == 0 ||
-             g_ascii_strcasecmp (dot, ".mobi") == 0) {
+             g_ascii_strcasecmp (dot, ".mobi") == 0 ||
+             g_ascii_strcasecmp (dot, ".azw") == 0 ||
+             g_ascii_strcasecmp (dot, ".azw3") == 0 ||
+             g_ascii_strcasecmp (dot, ".prc") == 0) {
     doc = FW_DOCUMENT (fw_document_pdf_new ());
     backend_label = "Reflowable (MuPDF)";
   } else if (g_ascii_strcasecmp (dot, ".djvu") == 0 ||
