@@ -2,6 +2,28 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.44.0 (2026-05-02)
+
+*Reflow TOC sidebar — F9 in an EPUB or FB2 now shows a clickable chapter list, and clicking a chapter scrolls the listview to it.* The reflow backends were already producing `GListModel<FwReflowTocItem>`s; the missing pieces were a sidebar widget that consumes them and the dispatch wiring in the window.
+
+### `FwReflowSidebar`
+
+`src/fw-reflow-sidebar.{h,c}` (~150 LOC). Lightweight peer to the existing fixed-layout `FwSidebar` — `GtkListView` + `GtkSingleSelection` + `GtkSignalListItemFactory` (one row = one ellipsizing `GtkLabel`), `single-click-activate=TRUE`. The `activate` signal handler emits a new `anchor-requested(string)` signal carrying the `FwReflowTocItem`'s anchor id. Reflow TOCs are flat — no tree-list-model expansion machinery needed.
+
+### `fw_reflow_view_scroll_to_anchor`
+
+New API on `FwReflowView`. Resolves the anchor via `fw_reflow_document_find_block_by_anchor` (which returns 1-based positions, with 0 = not found), then calls `gtk_list_view_scroll_to(list, pos, GTK_LIST_SCROLL_FOCUS, NULL)`. EPUB anchors are typically `chapter.html` or `chapter.html#fragment` and resolve against the chapter map populated at parse time. FB2 anchors are section ids.
+
+### Window dispatch
+
+`fw-window.c` gains a `sidebar_scroll` member (was a constructor-local) that hosts whichever sidebar widget matches the active document. On reflow open, `gtk_scrolled_window_set_child` swaps the fixed-layout `FwSidebar` out for `FwReflowSidebar` and feeds it the document's TOC model. On fixed-layout open the swap reverses. The window connects both `page-requested` (fixed) and `anchor-requested` (reflow) signals at startup; the active sidebar's signal fires, the inactive one stays silent.
+
+### Verified
+
+EPUB *Verdant Passage* sidebar populates with all NCX chapters; clicking each row scrolls the listview to the right place. FB2 sample sidebar shows the two test chapters. ASan + UBSan clean. PDF (fixed-layout) regression check on *Effective Java* passes — sidebar swap-back works on transition. All 5 stress tests still pass.
+
+---
+
 ## v0.43.0 (2026-05-02)
 
 *Image rendering in `FwReflowView` — covers and inline graphics in EPUB/FB2 now display as native `GdkTexture`s instead of falling through to the text-label placeholder.* The `IMAGE` blocks every reflow backend already produced are finally rendered.

@@ -14,8 +14,13 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE (FwReflowView, fw_reflow_view, FW, REFLOW_VIEW, GtkWidget)
 
-FwReflowView *fw_reflow_view_new          (void);
-void          fw_reflow_view_set_document (FwReflowView     *self,
-                                           FwReflowDocument *doc);
+FwReflowView *fw_reflow_view_new           (void);
+void          fw_reflow_view_set_document  (FwReflowView     *self,
+                                            FwReflowDocument *doc);
+
+/* Scroll the view so the block carrying `anchor` is visible. No-op when
+ * the active document doesn't recognise the anchor. */
+void          fw_reflow_view_scroll_to_anchor (FwReflowView *self,
+                                               const char   *anchor);
 
 G_END_DECLS

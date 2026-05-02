@@ -224,6 +224,23 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
   }
 }
 
+void
+fw_reflow_view_scroll_to_anchor (FwReflowView *self, const char *anchor)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+  if (!self->document || !anchor || !*anchor)
+    return;
+
+  guint pos1 = fw_reflow_document_find_block_by_anchor (self->document, anchor);
+  if (pos1 == 0)   /* 1-based — 0 = not found */
+    return;
+  guint pos = pos1 - 1;
+
+  if (self->list)
+    gtk_list_view_scroll_to (self->list, pos,
+                             GTK_LIST_SCROLL_FOCUS, NULL);
+}
+
 /* ── GObject lifecycle ────────────────────────────────────────────── */
 
 static void

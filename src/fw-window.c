@@ -12,6 +12,7 @@
 #include "fw-document.h"
 #include "fw-reflow-document.h"
 #include "fw-reflow-view.h"
+#include "fw-reflow-sidebar.h"
 #include "fw-state.h"
 #include "fw-debug.h"
 #include <gdk/gdk.h>
@@ -50,6 +51,8 @@ struct _FwWindow {
   FwView               *view;
   FwReflowDocument     *reflow_doc;     /* set when a reflow format is open */
   FwReflowView         *reflow_view;
+  FwReflowSidebar      *reflow_sidebar;
+  GtkScrolledWindow    *sidebar_scroll; /* host for the active sidebar widget */
   FwSearch             *search;
   GtkSearchBar         *search_bar;
   GtkSearchEntry       *search_entry;
@@ -110,6 +113,9 @@ static void nav_push_current               (FwWindow *self);
 static void on_kinetic_setting_changed     (GSettings *settings,
                                             const char *key,
                                             gpointer user_data);
+static void on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar,
+                                                const char      *anchor,
+                                                gpointer         user_data);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -1479,15 +1485,18 @@ fw_window_constructed (GObject *object)
   self->sidebar = fw_sidebar_new ();
   g_signal_connect (self->sidebar, "page-requested",
                     G_CALLBACK (on_sidebar_page_requested), self);
-  GtkScrolledWindow *sidebar_scroll = GTK_SCROLLED_WINDOW (
-    gtk_scrolled_window_new ());
-  gtk_scrolled_window_set_child (sidebar_scroll,
+  self->reflow_sidebar = fw_reflow_sidebar_new ();
+  g_signal_connect (self->reflow_sidebar, "anchor-requested",
+                    G_CALLBACK (on_reflow_sidebar_anchor_requested), self);
+
+  self->sidebar_scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
+  gtk_scrolled_window_set_child (self->sidebar_scroll,
                                   GTK_WIDGET (self->sidebar));
 
   /* Split view */
   self->split_view = ADW_OVERLAY_SPLIT_VIEW (adw_overlay_split_view_new ());
   adw_overlay_split_view_set_sidebar (self->split_view,
-                                       GTK_WIDGET (sidebar_scroll));
+                                       GTK_WIDGET (self->sidebar_scroll));
   adw_overlay_split_view_set_content (self->split_view,
                                        GTK_WIDGET (self->content_stack));
   adw_overlay_split_view_set_show_sidebar (self->split_view, FALSE);
@@ -1688,6 +1697,16 @@ restore_state_tick (GtkWidget *widget, GdkFrameClock *clock,
 /* ── Settings change handlers ────────────────────────────────────── */
 
 static void
+on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar G_GNUC_UNUSED,
+                                    const char      *anchor,
+                                    gpointer         user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  if (self->reflow_view)
+    fw_reflow_view_scroll_to_anchor (self->reflow_view, anchor);
+}
+
+static void
 on_kinetic_setting_changed (GSettings *settings, const char *key,
                             gpointer user_data)
 {
@@ -1847,8 +1866,13 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   if (self->page_entry)        gtk_editable_set_text (GTK_EDITABLE (self->page_entry), "");
   if (self->zoom_entry)        gtk_editable_set_text (GTK_EDITABLE (self->zoom_entry), "");
 
-  /* Sidebar TOC — empty for TXT, but keep the slot ready. */
+  /* Swap the sidebar to the reflow variant and feed it the TOC model. */
   fw_sidebar_set_toc (self->sidebar, NULL);
+  if (self->sidebar_scroll)
+    gtk_scrolled_window_set_child (self->sidebar_scroll,
+                                    GTK_WIDGET (self->reflow_sidebar));
+  fw_reflow_sidebar_set_toc (self->reflow_sidebar,
+                             fw_reflow_document_get_toc (self->reflow_doc));
 
   /* No file-monitor / state-restore in Phase 1. Both can land in a
    * later phase once the reflow path proves stable. */
@@ -1906,6 +1930,12 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* Switch from empty state to the document view. */
   if (self->content_stack)
     gtk_stack_set_visible_child_name (self->content_stack, "document");
+
+  /* Restore the fixed-layout sidebar in case we just switched away
+   * from a reflow document. */
+  if (self->sidebar_scroll)
+    gtk_scrolled_window_set_child (self->sidebar_scroll,
+                                    GTK_WIDGET (self->sidebar));
 
   /* Update title */
   g_autofree char *basename = g_path_get_basename (path);
