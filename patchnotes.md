@@ -2,6 +2,46 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.46.0 (2026-05-02)
+
+*Reading Settings dialog — body font family, size, line-height, monospace family, all live-applied.* The first half of the typography work Brandon called out. The bundled-fonts piece (OpenDyslexic + a serif) ships in v0.47.0; this slice gets the plumbing in place and lets users point at any locally-installed font.
+
+### GSettings schema
+
+Four new keys under `io.github.virinvictus.framework`:
+
+| Key | Type / range | Default | What it drives |
+|---|---|---|---|
+| `reading-font-family` | string | `""` (system serif fallback) | Pango family for paragraph / heading / blockquote / chapter blocks |
+| `reading-font-size` | double, 8.0–32.0 | 13.0 | Body-text size; headings scale from this (h1 = +9pt, h2 = +5pt, h3 = +2pt, h4 = +1pt) |
+| `reading-line-height` | double, 1.0–2.5 | 1.5 | Line-height multiplier |
+| `reading-monospace-family` | string | `""` (system mono fallback) | Pango family for `<code>` / `<pre>` blocks |
+
+### `FwReflowView` regenerates CSS on change
+
+`FwReflowView` now holds a `GSettings` handle and subscribes to `changed` on the schema. On every settings-key change, `build_reflow_css` rebuilds the entire rule set — typography rules merged with the static set (selection-highlight suppression, image background, blockquote bar). The single `GtkCssProvider` reloads via `gtk_css_provider_load_from_string` so the live document re-renders on the next frame. No restart required.
+
+### Reading Settings dialog
+
+`AdwDialog` containing an `AdwPreferencesPage` with three groups:
+
+- **Fonts** — two `AdwEntryRow`s for body family and monospace family, both bound directly to GSettings via `g_settings_bind` (`G_SETTINGS_BIND_DEFAULT`). Empty = system fallback.
+- **Size & spacing** — two `AdwSpinRow`s for font size and line height, also `g_settings_bind`'d.
+- **Presets** — four buttons in a linked `GtkBox` (`Default`, `Compact`, `Comfortable`, `Dyslexic`) that write the matching `{family, mono, size, line-height}` bundle into GSettings. The Dyslexic preset names "OpenDyslexic" / "OpenDyslexic Mono" — works once the user has the font installed (or the bundle from v0.47.0 lands).
+
+Wired to a new `win.reading-settings` action and a new "Reading Settings…" entry in the primary menu (above "Document Properties…").
+
+### Verified
+
+- *Verdant Passage* EPUB — opening the dialog, changing font size live, switching presets, all reflow text re-renders immediately. ASan + UBSan clean.
+- All 5 stress tests still pass.
+
+### Next slice
+
+v0.47.0 — bundle OpenDyslexic + a body serif, register them with FontConfig at app startup, so the "Dyslexic" preset works out of the box without the user needing to install fonts.
+
+---
+
 ## v0.45.0 (2026-05-02)
 
 *Reflow nav routing fixes — the "stuck on page 1" symptom is gone, plus the listview hover highlight is suppressed and the header arrows reflect the active mode.*

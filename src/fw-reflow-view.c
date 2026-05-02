@@ -10,6 +10,8 @@
  */
 
 #include "fw-reflow-view.h"
+#include "fw-config.h"
+#include <gio/gio.h>
 
 #define READING_COLUMN_MAX_WIDTH 720   /* px — caps comfortable line length */
 #define READING_COLUMN_MARGIN     24
@@ -24,6 +26,8 @@ struct _FwReflowView {
   GtkSingleSelection *selection;
 
   GtkCssProvider    *css;
+  GSettings         *settings;
+  gulong             settings_handler;
 };
 
 G_DEFINE_FINAL_TYPE (FwReflowView, fw_reflow_view, GTK_TYPE_WIDGET)
@@ -176,20 +180,17 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
   gtk_stack_set_visible_child_name (stack, "text");
 }
 
-/* ── CSS for typography ───────────────────────────────────────────── */
+/* ── CSS for typography (regenerated from GSettings) ──────────────── */
 
-static const char REFLOW_CSS[] =
-  ".reflow-paragraph { font-size: 12pt; line-height: 1.5; }"
-  ".reflow-heading   { font-weight: bold; font-size: 14pt; margin-top: 12px; }"
-  ".reflow-h1        { font-size: 22pt; }"
-  ".reflow-h2        { font-size: 18pt; }"
-  ".reflow-h3        { font-size: 15pt; }"
-  ".reflow-h4        { font-size: 13pt; }"
-  ".reflow-code      { font-family: monospace; font-size: 11pt; }"
-  ".reflow-blockquote{ font-style: italic; opacity: 0.8; "
+/* Static structural CSS — selection highlight suppression, image
+ * background, blockquote bar. Stable across font-preference changes
+ * so we don't have to rebuild the whole rule set on every spin. */
+static const char REFLOW_STATIC_CSS[] =
+  ".reflow-blockquote{ font-style: italic; opacity: 0.85; "
   "                    border-left: 3px solid alpha(currentColor, 0.3); "
   "                    padding-left: 12px; }"
-  ".reflow-chapter   { font-weight: bold; opacity: 0.6; }"
+  ".reflow-chapter   { font-weight: bold; opacity: 0.5; "
+  "                    margin-top: 24px; margin-bottom: 4px; }"
   ".reflow-image     { background: alpha(currentColor, 0.04); "
   "                    border-radius: 4px; }"
   /* Suppress GtkListView's default row hover/selection highlight —
@@ -204,17 +205,108 @@ static const char REFLOW_CSS[] =
   "    outline: none;"
   "}";
 
+static char *
+build_reflow_css (FwReflowView *self)
+{
+  /* Read GSettings; fall back to safe defaults if settings aren't
+   * bound yet (very early in init). */
+  g_autofree char *body_family = NULL;
+  g_autofree char *mono_family = NULL;
+  double size = 13.0, line_height = 1.5;
+  if (self->settings) {
+    body_family = g_settings_get_string (self->settings, "reading-font-family");
+    mono_family = g_settings_get_string (self->settings, "reading-monospace-family");
+    size        = g_settings_get_double (self->settings, "reading-font-size");
+    line_height = g_settings_get_double (self->settings, "reading-line-height");
+  } else {
+    body_family = g_strdup ("");
+    mono_family = g_strdup ("");
+  }
+
+  /* Heading sizes scale relative to the body size. */
+  double h1 = size + 9;
+  double h2 = size + 5;
+  double h3 = size + 2;
+  double h4 = size + 1;
+
+  GString *css = g_string_new (REFLOW_STATIC_CSS);
+
+  if (body_family && *body_family) {
+    g_string_append_printf (
+      css,
+      ".reflow-paragraph, .reflow-heading, .reflow-blockquote, .reflow-chapter "
+      "{ font-family: \"%s\"; }",
+      body_family);
+  }
+  if (mono_family && *mono_family) {
+    g_string_append_printf (css,
+      ".reflow-code { font-family: \"%s\"; } ", mono_family);
+  } else {
+    g_string_append (css, ".reflow-code { font-family: monospace; } ");
+  }
+
+  g_string_append_printf (
+    css,
+    ".reflow-paragraph { font-size: %.1fpt; line-height: %.2f; } "
+    ".reflow-heading   { font-weight: bold; line-height: 1.2; "
+    "                    margin-top: 16px; margin-bottom: 6px; } "
+    ".reflow-h1        { font-size: %.1fpt; } "
+    ".reflow-h2        { font-size: %.1fpt; } "
+    ".reflow-h3        { font-size: %.1fpt; } "
+    ".reflow-h4        { font-size: %.1fpt; } "
+    ".reflow-h5        { font-size: %.1fpt; } "
+    ".reflow-h6        { font-size: %.1fpt; } "
+    ".reflow-code      { font-size: %.1fpt; line-height: %.2f; } "
+    ".reflow-blockquote{ font-size: %.1fpt; line-height: %.2f; } "
+    ".reflow-chapter   { font-size: %.1fpt; }",
+    size, line_height,
+    h1, h2, h3, h4, size, size,
+    size - 1, line_height,
+    size, line_height,
+    size - 1);
+
+  return g_string_free (css, FALSE);
+}
+
+static void
+reload_css (FwReflowView *self)
+{
+  if (!self->css)
+    return;
+  g_autofree char *css = build_reflow_css (self);
+  gtk_css_provider_load_from_string (self->css, css);
+}
+
+static void
+on_reading_setting_changed (GSettings   *settings G_GNUC_UNUSED,
+                            const char  *key      G_GNUC_UNUSED,
+                            gpointer     user_data)
+{
+  reload_css (FW_REFLOW_VIEW (user_data));
+}
+
 static void
 ensure_css (FwReflowView *self)
 {
   if (self->css)
     return;
   self->css = gtk_css_provider_new ();
-  gtk_css_provider_load_from_string (self->css, REFLOW_CSS);
+
+  if (!self->settings)
+    self->settings = g_settings_new (APP_ID);
+
+  reload_css (self);
+
   gtk_style_context_add_provider_for_display (
     gdk_display_get_default (),
     GTK_STYLE_PROVIDER (self->css),
     GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+  /* Single subscriber for all four reading-* keys — the handler
+   * regenerates the whole CSS so stale rules don't leak. */
+  self->settings_handler = g_signal_connect (
+    self->settings, "changed",
+    G_CALLBACK (on_reading_setting_changed), self);
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -297,6 +389,11 @@ fw_reflow_view_dispose (GObject *object)
     child = next;
   }
 
+  if (self->settings && self->settings_handler) {
+    g_signal_handler_disconnect (self->settings, self->settings_handler);
+    self->settings_handler = 0;
+  }
+  g_clear_object (&self->settings);
   g_clear_object (&self->document);
   g_clear_object (&self->css);
 

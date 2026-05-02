@@ -98,5 +98,53 @@
       </description>
     </key>
 
+    <!-- Reflow reading preferences (Phase 13.1) -->
+
+    <key name="reading-font-family" type="s">
+      <default>''</default>
+      <summary>Font family used for the body text of reflow documents</summary>
+      <description>
+        Pango font family name for paragraph text in EPUB / FB2 / TXT /
+        MOBI / AZW3 reading. Empty string (the default) lets the
+        system serif fallback take over. Set to "OpenDyslexic" or
+        another locally-installed family to override. Picked from the
+        Reading Settings dialog in the primary menu.
+      </description>
+    </key>
+
+    <key name="reading-font-size" type="d">
+      <default>13.0</default>
+      <range min="8.0" max="32.0"/>
+      <summary>Font size in points for body text in reflow documents</summary>
+      <description>
+        Body-text font size, in points, applied to PARAGRAPH /
+        BLOCKQUOTE / LIST_ITEM blocks in reflow documents. Headings
+        scale relative to this value. Default of 13pt matches a
+        comfortable laptop reading distance.
+      </description>
+    </key>
+
+    <key name="reading-line-height" type="d">
+      <default>1.5</default>
+      <range min="1.0" max="2.5"/>
+      <summary>Line-height multiplier for body text in reflow documents</summary>
+      <description>
+        Line-height as a multiple of the font size. 1.5 is the standard
+        comfortable-reading default; 1.2 packs more text on screen;
+        1.8 feels generous and accessible.
+      </description>
+    </key>
+
+    <key name="reading-monospace-family" type="s">
+      <default>''</default>
+      <summary>Monospace font family used for code blocks in reflow</summary>
+      <description>
+        Pango font family for CODE blocks and inline monospace spans
+        in reflow documents. Empty string falls back to the system
+        monospace alias. Set to a locally-installed monospace family
+        (Iosevka, JetBrains Mono, etc.) to override.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

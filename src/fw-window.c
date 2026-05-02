@@ -909,6 +909,138 @@ static void act_copy (GSimpleAction *a, GVariant *p, gpointer d)
   }
 }
 
+/* ── Reading Settings dialog (Phase 13.1 typography prefs) ─────── */
+
+static void
+prefs_apply_preset (FwWindow *self, const char *preset)
+{
+  if (!self->settings || !preset) return;
+  /* Each preset writes a {body, mono, size, line-height} bundle. */
+  if (g_str_equal (preset, "default")) {
+    g_settings_set_string (self->settings, "reading-font-family", "");
+    g_settings_set_string (self->settings, "reading-monospace-family", "");
+    g_settings_set_double (self->settings, "reading-font-size",   13.0);
+    g_settings_set_double (self->settings, "reading-line-height", 1.5);
+  } else if (g_str_equal (preset, "dyslexic")) {
+    g_settings_set_string (self->settings, "reading-font-family", "OpenDyslexic");
+    g_settings_set_string (self->settings, "reading-monospace-family", "OpenDyslexic Mono");
+    g_settings_set_double (self->settings, "reading-font-size",   14.0);
+    g_settings_set_double (self->settings, "reading-line-height", 1.7);
+  } else if (g_str_equal (preset, "compact")) {
+    g_settings_set_double (self->settings, "reading-font-size",   11.5);
+    g_settings_set_double (self->settings, "reading-line-height", 1.3);
+  } else if (g_str_equal (preset, "comfortable")) {
+    g_settings_set_double (self->settings, "reading-font-size",   14.0);
+    g_settings_set_double (self->settings, "reading-line-height", 1.6);
+  }
+}
+
+static void
+on_preset_clicked (GtkButton *btn, gpointer user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  const char *preset = g_object_get_data (G_OBJECT (btn), "preset");
+  prefs_apply_preset (self, preset);
+}
+
+static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a; (void)p;
+  FwWindow *self = d;
+  if (!self->settings)
+    return;
+
+  AdwDialog *dlg = adw_dialog_new ();
+  adw_dialog_set_title (dlg, "Reading Settings");
+  adw_dialog_set_content_width (dlg, 480);
+  adw_dialog_set_content_height (dlg, 540);
+
+  GtkWidget *toolbar = adw_toolbar_view_new ();
+  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), adw_header_bar_new ());
+  adw_dialog_set_child (dlg, toolbar);
+
+  GtkWidget *page = adw_preferences_page_new ();
+  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
+
+  /* Font group */
+  AdwPreferencesGroup *g_font =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_font, "Fonts");
+  adw_preferences_group_set_description (g_font,
+    "Empty fields fall back to the system serif and monospace defaults.");
+
+  /* Body family — AdwEntryRow bound to the GSetting. */
+  AdwEntryRow *body_row = ADW_ENTRY_ROW (adw_entry_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (body_row), "Body font family");
+  g_settings_bind (self->settings, "reading-font-family",
+                   body_row, "text", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_font, GTK_WIDGET (body_row));
+
+  AdwEntryRow *mono_row = ADW_ENTRY_ROW (adw_entry_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (mono_row), "Monospace family");
+  g_settings_bind (self->settings, "reading-monospace-family",
+                   mono_row, "text", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_font, GTK_WIDGET (mono_row));
+
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_font);
+
+  /* Size + line-height group */
+  AdwPreferencesGroup *g_size =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_size, "Size & spacing");
+
+  AdwSpinRow *size_row = ADW_SPIN_ROW (
+    adw_spin_row_new_with_range (8.0, 32.0, 0.5));
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (size_row), "Font size (pt)");
+  adw_spin_row_set_digits (size_row, 1);
+  g_settings_bind (self->settings, "reading-font-size",
+                   size_row, "value", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_size, GTK_WIDGET (size_row));
+
+  AdwSpinRow *lh_row = ADW_SPIN_ROW (
+    adw_spin_row_new_with_range (1.0, 2.5, 0.05));
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (lh_row), "Line height");
+  adw_spin_row_set_digits (lh_row, 2);
+  g_settings_bind (self->settings, "reading-line-height",
+                   lh_row, "value", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_size, GTK_WIDGET (lh_row));
+
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_size);
+
+  /* Presets */
+  AdwPreferencesGroup *g_pre =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_pre, "Presets");
+  adw_preferences_group_set_description (g_pre,
+    "Quick combinations of font, size and line-height. Apply, then "
+    "fine-tune above.");
+
+  GtkBox *btn_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8));
+  gtk_widget_set_margin_top    (GTK_WIDGET (btn_box), 4);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (btn_box), 4);
+  gtk_widget_set_halign        (GTK_WIDGET (btn_box), GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class     (GTK_WIDGET (btn_box), "linked");
+
+  struct { const char *id, *label; } presets[] = {
+    { "default",     "Default"     },
+    { "compact",     "Compact"     },
+    { "comfortable", "Comfortable" },
+    { "dyslexic",    "Dyslexic"    },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (presets); i++) {
+    GtkButton *b = GTK_BUTTON (gtk_button_new_with_label (presets[i].label));
+    g_object_set_data_full (G_OBJECT (b), "preset",
+                            g_strdup (presets[i].id), g_free);
+    g_signal_connect (b, "clicked",
+                      G_CALLBACK (on_preset_clicked), self);
+    gtk_box_append (btn_box, GTK_WIDGET (b));
+  }
+  adw_preferences_group_add (g_pre, GTK_WIDGET (btn_box));
+  adw_preferences_page_add  (ADW_PREFERENCES_PAGE (page), g_pre);
+
+  adw_dialog_present (dlg, GTK_WIDGET (self));
+}
+
 /* ── Keyboard Shortcuts dialog ──────────────────────────────────── */
 
 static void
@@ -1373,6 +1505,7 @@ fw_window_constructed (GObject *object)
 
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
+  g_menu_append (menu, "Reading Settings…", "win.reading-settings");
   g_menu_append (menu, "Document Properties…", "win.properties");
   g_menu_append (menu, "Keyboard Shortcuts", "win.show-help-overlay");
   g_menu_append (menu, "About Framework", "win.about");
@@ -1595,6 +1728,7 @@ fw_window_constructed (GObject *object)
     { .name = "print",         .activate = act_print },
     { .name = "save-attachments",  .activate = act_save_attachments },
     { .name = "properties",        .activate = act_properties },
+    { .name = "reading-settings",  .activate = act_reading_settings },
     { .name = "show-help-overlay", .activate = act_shortcuts },
     { .name = "about",             .activate = act_about },
   };
