@@ -2,6 +2,49 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.55.0 (2026-05-02)
+
+*Phase 13.1 Phase 5 — KF8 / AZW3 native reflow support.* Brandon's three Calibre-generated `.azw3` books now open through the same paginated, font-preference-aware, position-persistent reflow stack as KF7 MOBIs. Foliate-derived from `.foliate-js/mobi.js`'s `KF8` class.
+
+### `fw-mobi-parser.c` additions
+
+- **KF8 boundary detection** (foliate's two-step check): `mobi.version >= 8` flags pure AZW3; otherwise EXTH-121 `boundary < 0xFFFFFFFF` flags a combo MOBI/KF8 file. For combo files, parser re-bases to the boundary record and re-reads the MOBI header from there.
+- **`kf8_start` record offset** — 0 for pure AZW3, equals the boundary for combo files. All KF8-relative record indices (`resourceStart`, `kf8.skel`, `kf8.frag`) get `kf8_start` added to land on absolute file record indices. Text record loop also adjusts.
+- **INDX parser** (port of foliate's `getIndexData`). The TAGX schema lives at the start of the primary INDX record; tag values use bit-controlled variable-length integers. ~150 LOC of dense bit twiddling matched against foliate's. CNCX (string lookup table) is parsed as a stub — only TOC needs it; not extracted in this slice.
+- **SKEL + FRAG splice** (port of foliate's `loadSection` chain). For each skeleton entry, the section copies bytes from the concatenated text body at `[skel.offset, +skel.length)`, then splices each fragment's bytes at `(frag.insertOffset - skel.offset + inserted_so_far)`. Output is the real KF8 HTML body, concatenated across all skeleton sections.
+
+### `fw-reflow-document-mobi.c` rewrite
+
+The hand-rolled `balance_html` + GMarkupParser walker is gone. Foliate parses MOBI HTML through DOMParser, which is tolerant of every malformation (orphan close tags, unclosed elements, unquoted attributes, embedded XML declarations, `<a>` wrapping multiple `<p>`s, etc.). **libxml2's `htmlReadMemory` with `HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING`** gives us the same tolerance, plus a real DOM tree we walk preorder.
+
+The `WalkCtx` mirrors what the GMarkupParser handlers had, with one new addition: a `GPtrArray *open_inlines` stack tracking currently-open Pango inline tags (`i`, `b`, `u`, `tt`, `sub`, `sup`, `s`). When an inline span crosses a block boundary in the source HTML — e.g. an `<a>` wrapping multiple `<p>`s — `flush_accum` appends auto-closes for everything still on the stack, and the next block's `start_accum` calls `re_emit_open_inlines` to re-open them. This is what GtkLabel's Pango-markup parser needs (well-formed nesting per block).
+
+The "leaks `</u>` into the next block" bug from the first test pass: an inline-close handler was unconditionally appending `</u>` to the accumulator even when accum_active was FALSE — meaning the close-tag would land in the buffer right before the next `start_accum` truncated it. Fix: guard the append with `if (cc->accum_active)`. AZW3s now produce clean Pango markup throughout.
+
+### Build dep
+
+`libxml-2.0 >= 2.9` added to `framework_deps`. Already pulled in transitively by GTK (Fedora's `pkg-config --modversion libxml-2.0` reports 2.12.10), so no new install footprint. Used only by the MOBI/AZW3 backend — EPUB/FB2/TXT keep GMarkupParser.
+
+### Verified
+
+| File | Path | Status |
+|---|---|---|
+| **Datapoint** (Wood, AZW3) | KF8 native | clean |
+| **Spam Nation** (Krebs, AZW3) | KF8 native | clean |
+| **My Husband's Wife** (Feeney, AZW3) | KF8 native | clean |
+| **The Broken God** (Ryder-Hanrahan, MOBI) | KF7 native | clean |
+| **Fall of Kings** (Gemmell, MOBI) | KF7 native | clean |
+
+ASan + UBSan clean on AZW3. EPUB/FB2/TXT regression checks pass. All 5 stress tests pass.
+
+### What's still deferred
+
+- **MOBI / AZW3 TOC sidebar** — foliate's `MOBI6.getGuide` walks `<reference filepos>` pointers and `<a filepos>` anchors. Our sidebar is empty for both formats; navigation would need filepos→block resolution. Tracked separately.
+- **HuffDic compression** — rare; foliate has the `huffcdic` decoder; port if a real file shows up.
+- **EPUB rewrite from `.foliate-js/epub.js`** — task #19, the next slice. Current EPUB is hand-rolled with `GMarkupParser`; rewriting against libxml2 + foliate's structural walker brings EPUB 3 nav.xhtml support, encrypted detection, and consistency with the MOBI port.
+
+---
+
 ## v0.54.0 (2026-05-02)
 
 *Reflow-refusal falls through to MuPDF; AZW3 / .azw / .prc accepted by file dialog and dispatcher.* The native reflow port doesn't yet handle KF8 / AZW3 (foliate's INDX + SKEL + FRAG splice is task #20, ~600 LOC) — until that lands, those files route to MuPDF's reflowable backend, which reads them acceptably even if the UX doesn't have our paginated reading model.

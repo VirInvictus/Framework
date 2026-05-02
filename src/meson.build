@@ -18,6 +18,7 @@ mupdf_dep = declare_dependency(
 djvu_dep       = dependency('ddjvuapi',    version: '>= 3.5.28')
 archive_dep    = dependency('libarchive', version: '>= 3.6')
 fontconfig_dep = dependency('fontconfig')
+libxml_dep     = dependency('libxml-2.0',  version: '>= 2.9')
 m_dep          = cc.find_library('m', required: false)
 
 # Source list, partitioned so tests can link against the engine without
@@ -60,6 +61,7 @@ framework_deps = [
   djvu_dep,
   archive_dep,
   fontconfig_dep,
+  libxml_dep,
   m_dep,
 ]
 

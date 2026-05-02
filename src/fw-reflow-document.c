@@ -215,15 +215,15 @@ fw_reflow_path_is_supported (const char *path)
    *   TXT  (v0.40.0)
    *   FB2  (v0.41.0)
    *   EPUB (v0.42.0)
-   *   MOBI / PRC — KF7 only (v0.52.0)
-   *
-   * AZW3 / .azw / KF8 — handled by MuPDF's reflowable backend
-   * until full KF8 (foliate's INDX + SKEL + FRAG splice) lands. */
+   *   MOBI / PRC — KF7 (v0.52.0) and KF8 (v0.55.0)
+   *   AZW / AZW3 — KF8 (v0.55.0) */
   return path_has_ext (path, "txt") ||
          path_has_ext (path, "fb2") ||
          path_has_ext (path, "epub") ||
          path_has_ext (path, "mobi") ||
-         path_has_ext (path, "prc");
+         path_has_ext (path, "prc") ||
+         path_has_ext (path, "azw") ||
+         path_has_ext (path, "azw3");
 }
 
 FwReflowDocument *
@@ -239,7 +239,8 @@ fw_reflow_document_new_for_path (const char *path, GError **error)
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_fb2_new ());
   else if (path_has_ext (path, "epub"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_epub_new ());
-  else if (path_has_ext (path, "mobi") || path_has_ext (path, "prc"))
+  else if (path_has_ext (path, "mobi") || path_has_ext (path, "prc") ||
+           path_has_ext (path, "azw")  || path_has_ext (path, "azw3"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_mobi_new ());
 
   if (!doc) {

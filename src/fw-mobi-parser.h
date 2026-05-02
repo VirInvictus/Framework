@@ -56,8 +56,10 @@ typedef struct {
   GHashTable   *images;          /* gchar* "1", "2", ... → GdkTexture* */
   guint         cover_recindex;  /* 1-based; 0 = no cover */
 
-  /* True when the file is a KF8/AZW3 container (we don't extract
-   * KF8 records yet — caller should fall through to MuPDF). */
+  /* True when the file is a KF8/AZW3 container. KF7 fall-back
+   * (combo MOBI/KF8) is handled internally — body always contains
+   * the highest-quality version available. is_kf8 just reports
+   * which path was taken so the backend can label the format. */
   gboolean      is_kf8;
 } FwMobiParsed;
 

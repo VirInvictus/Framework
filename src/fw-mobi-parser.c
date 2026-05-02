@@ -23,6 +23,37 @@ static guint32 read_be32 (const guchar *p) {
          ((guint32)p[2] <<  8) |  (guint32)p[3];
 }
 
+/* Variable-length integer (forward-read, MSB-first). 1–4 bytes;
+ * stop when bit 7 is set. Direct port of foliate's `getVarLen`. */
+typedef struct { guint32 value; guint length; } FwMobiVarLen;
+static FwMobiVarLen
+read_var_len (const guchar *p, gsize len, gsize from)
+{
+  FwMobiVarLen out = { 0, 0 };
+  for (gsize i = from; i < len && i < from + 4; i++) {
+    out.value = (out.value << 7) | (p[i] & 0x7F);
+    out.length++;
+    if (p[i] & 0x80) break;
+  }
+  return out;
+}
+
+static guint
+count_bits_set (guint32 x)
+{
+  guint c = 0;
+  while (x) { if (x & 1) c++; x >>= 1; }
+  return c;
+}
+
+static guint
+count_unset_end (guint32 x)
+{
+  guint c = 0;
+  while ((x & 1) == 0) { x >>= 1; c++; if (c >= 32) break; }
+  return c;
+}
+
 /* ── PalmDOC LZ77 decompressor — port of decompressPalmDOC ─────
  *
  * foliate-js JavaScript:
@@ -214,6 +245,282 @@ looks_like_image (const guchar *p, gsize n)
   return FALSE;
 }
 
+/* ── INDX parser (port of foliate's getIndexData) ─────────────────
+ *
+ * INDX records carry a tag-controlled table with variable-length
+ * fields. Used by KF8 SKEL and FRAG indexes. The parser reads:
+ *
+ *   1. The "primary" INDX record (at indxIndex). Header gives us
+ *      the number of secondary records and the encoding. The TAGX
+ *      block immediately following the INDX header defines the
+ *      tag schema (tag id, num_values, mask, end-flag).
+ *   2. CNCX records (skipped here — only TOC needs them).
+ *   3. Secondary INDX records. Each has its own header + IDXT
+ *      block listing per-entry offsets within that record. Each
+ *      entry has a name (length-prefixed string), then control
+ *      bytes that drive variable-length tag values.
+ *
+ * Output: an array of IndxEntry (name + tag→values map). The
+ * SKEL/FRAG callers pull specific tags out of each entry's map.
+ */
+
+typedef struct {
+  guint8  tag;
+  guint8  num_values;
+  guint8  mask;
+  guint8  end;
+} IndxTagx;
+
+typedef struct {
+  char         *name;          /* owned */
+  GHashTable   *tag_map;       /* guint (tag id) → GArray<guint32> */
+} IndxEntry;
+
+static void
+indx_entry_free (gpointer p)
+{
+  IndxEntry *e = p;
+  g_free (e->name);
+  if (e->tag_map) g_hash_table_unref (e->tag_map);
+  g_free (e);
+}
+
+/* For one INDX-table record, parse its IDXT and per-entry tags. */
+static void
+parse_indx_record_body (const guchar *rec, gsize rec_len,
+                        const IndxTagx *tagx_table, gsize num_tagx,
+                        guint num_ctrl_bytes,
+                        GPtrArray *entries_out)
+{
+  if (rec_len < 24 || memcmp (rec, "INDX", 4) != 0) return;
+  /* INDX_HEADER fields we need:
+   *   idxt:       offset 20
+   *   numRecords: offset 24
+   */
+  guint32 idxt        = read_be32 (rec + 20);
+  guint32 num_records = read_be32 (rec + 24);
+
+  for (guint32 j = 0; j < num_records; j++) {
+    gsize off_off = idxt + 4 + 2 * j;
+    if (off_off + 2 > rec_len) break;
+    guint16 entry_off = read_be16 (rec + off_off);
+    if (entry_off >= rec_len) continue;
+
+    /* Entry: 1-byte name-length, then name bytes, then control
+     * bytes, then tag-value bytes. */
+    guchar name_len = rec[entry_off];
+    gsize  name_start = entry_off + 1;
+    if (name_start + name_len > rec_len) continue;
+
+    IndxEntry *e = g_new0 (IndxEntry, 1);
+    e->name = g_strndup ((const char *) rec + name_start, name_len);
+    e->tag_map = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                        NULL, (GDestroyNotify) g_array_unref);
+
+    gsize start_pos     = name_start + name_len;
+    gsize ctrl_byte_idx = 0;
+    gsize pos           = start_pos + num_ctrl_bytes;
+
+    /* First pass: figure out which tags are present, with how many
+     * values each. The tag-table iteration matches foliate's. */
+    typedef struct {
+      guint8  tag, num_values;
+      guint8  value_count;     /* fixed count; 0 = use value_bytes */
+      guint32 value_bytes;     /* number of bytes to consume via VLI */
+    } LiveTag;
+
+    GArray *live = g_array_new (FALSE, FALSE, sizeof (LiveTag));
+
+    for (gsize t = 0; t < num_tagx; t++) {
+      const IndxTagx *tx = &tagx_table[t];
+      if (tx->end & 1) { ctrl_byte_idx++; continue; }
+      gsize ctrl_off = start_pos + ctrl_byte_idx;
+      if (ctrl_off >= rec_len) break;
+      guchar ctrl = rec[ctrl_off];
+      guchar v = ctrl & tx->mask;
+
+      if (v == tx->mask) {
+        if (count_bits_set (tx->mask) > 1) {
+          FwMobiVarLen vl = read_var_len (rec, rec_len, pos);
+          LiveTag lt = { tx->tag, tx->num_values, 0, vl.value };
+          g_array_append_val (live, lt);
+          pos += vl.length;
+        } else {
+          LiveTag lt = { tx->tag, tx->num_values, 1, 0 };
+          g_array_append_val (live, lt);
+        }
+      } else {
+        guchar shifted = v >> count_unset_end (tx->mask);
+        LiveTag lt = { tx->tag, tx->num_values, shifted, 0 };
+        g_array_append_val (live, lt);
+      }
+    }
+
+    /* Second pass: read the actual values. */
+    for (guint k = 0; k < live->len; k++) {
+      LiveTag *lt = &g_array_index (live, LiveTag, k);
+      GArray *vals = g_array_new (FALSE, FALSE, sizeof (guint32));
+      if (lt->value_count != 0) {
+        guint total = lt->value_count * lt->num_values;
+        for (guint x = 0; x < total; x++) {
+          FwMobiVarLen vl = read_var_len (rec, rec_len, pos);
+          guint32 v = vl.value;
+          g_array_append_val (vals, v);
+          pos += vl.length;
+        }
+      } else {
+        gsize count = 0;
+        while (count < lt->value_bytes) {
+          FwMobiVarLen vl = read_var_len (rec, rec_len, pos);
+          guint32 v = vl.value;
+          g_array_append_val (vals, v);
+          pos += vl.length;
+          count += vl.length;
+        }
+      }
+      g_hash_table_insert (e->tag_map,
+                           GUINT_TO_POINTER ((guint) lt->tag),
+                           vals);
+    }
+    g_array_free (live, TRUE);
+
+    g_ptr_array_add (entries_out, e);
+  }
+}
+
+/* Walk INDX(indx_index) — primary record + all numRecords secondary
+ * records. Returns an array of IndxEntry. NULL on error. */
+static GPtrArray *
+parse_indx (const guchar *data, gsize raw_len,
+            const gsize *roff, guint16 record_count,
+            guint32 indx_index)
+{
+  if (indx_index == 0 || indx_index >= record_count) return NULL;
+  gsize off = roff[indx_index];
+  gsize len = roff[indx_index + 1] - off;
+  if (off + len > raw_len) return NULL;
+  if (len < 60 || memcmp (data + off, "INDX", 4) != 0) return NULL;
+
+  /* INDX header: length at 4, idxt at 20 (unused for primary),
+   * numRecords at 24. The TAGX block follows the primary header. */
+  guint32 hdr_length  = read_be32 (data + off + 4);
+  guint32 num_records = read_be32 (data + off + 24);
+  /* num_cncx at 0x34 — not used here (TOC-only). */
+
+  if (hdr_length + 12 > len) return NULL;
+
+  /* TAGX section starts at indx.length, has its own header
+   * (magic 'TAGX', length at 4, num_control_bytes at 8). */
+  const guchar *tagx_buf = data + off + hdr_length;
+  gsize tagx_len = len - hdr_length;
+  if (tagx_len < 12 || memcmp (tagx_buf, "TAGX", 4) != 0) return NULL;
+  guint32 tagx_block_len = read_be32 (tagx_buf + 4);
+  guint32 num_ctrl_bytes = read_be32 (tagx_buf + 8);
+  if (tagx_block_len < 12 || tagx_block_len > tagx_len) return NULL;
+
+  guint32 num_tagx = (tagx_block_len - 12) / 4;
+  g_autofree IndxTagx *tagx_table = g_new0 (IndxTagx, num_tagx);
+  for (guint32 i = 0; i < num_tagx; i++) {
+    const guchar *e = tagx_buf + 12 + i * 4;
+    tagx_table[i].tag        = e[0];
+    tagx_table[i].num_values = e[1];
+    tagx_table[i].mask       = e[2];
+    tagx_table[i].end        = e[3];
+  }
+
+  GPtrArray *entries = g_ptr_array_new_with_free_func (indx_entry_free);
+
+  /* Walk the secondary INDX records (indx_index+1 .. indx_index+num_records). */
+  for (guint32 r = 1; r <= num_records; r++) {
+    guint32 ri = indx_index + r;
+    if (ri >= record_count) break;
+    gsize roff_r = roff[ri];
+    gsize rlen_r = roff[ri + 1] - roff_r;
+    if (roff_r + rlen_r > raw_len) break;
+    parse_indx_record_body (data + roff_r, rlen_r,
+                             tagx_table, num_tagx,
+                             num_ctrl_bytes,
+                             entries);
+  }
+  return entries;
+}
+
+/* ── KF8 skel + frag splice ─────────────────────────────────────
+ *
+ * Foliate's KF8.init builds:
+ *   skelTable[i] = { numFrag: tagMap[1][0], offset: tagMap[6][0],
+ *                    length: tagMap[6][1] }
+ *   fragTable[i] = { insertOffset: parseInt(name),
+ *                    index: tagMap[4][0],
+ *                    offset: tagMap[6][0], length: tagMap[6][1] }
+ *
+ * Sections: each skel takes the next `numFrag` entries from
+ * fragTable (in order). For each section: skeleton bytes from the
+ * concatenated text body at [skel.offset, +skel.length), with each
+ * frag's bytes spliced in at (frag.insertOffset - skel.offset +
+ * inserted_so_far).
+ *
+ * Output: a single concatenated buffer = sum of all spliced
+ * sections, which is the "real" KF8 HTML body.
+ */
+
+static guint32
+indx_tag_value (const IndxEntry *e, guint tag, guint index)
+{
+  if (!e || !e->tag_map) return 0;
+  GArray *vals = g_hash_table_lookup (e->tag_map, GUINT_TO_POINTER (tag));
+  if (!vals || vals->len <= index) return 0;
+  return g_array_index (vals, guint32, index);
+}
+
+static GString *
+splice_kf8_sections (const char *body, gsize body_len,
+                     GPtrArray  *skel_entries,
+                     GPtrArray  *frag_entries)
+{
+  GString *out = g_string_sized_new (body_len + 1024);
+  if (!skel_entries || !frag_entries) return out;
+
+  guint frag_cursor = 0;
+
+  for (guint s = 0; s < skel_entries->len; s++) {
+    IndxEntry *skel = skel_entries->pdata[s];
+    guint32 num_frag    = indx_tag_value (skel, 1, 0);
+    guint32 skel_offset = indx_tag_value (skel, 6, 0);
+    guint32 skel_length = indx_tag_value (skel, 6, 1);
+
+    if ((gsize) skel_offset + skel_length > body_len) break;
+
+    /* Build the section into a temp GString. */
+    g_autoptr (GString) sec = g_string_sized_new (skel_length + 256);
+    g_string_append_len (sec, body + skel_offset, skel_length);
+
+    gsize inserted = 0;
+    for (guint k = 0; k < num_frag && frag_cursor < frag_entries->len;
+         k++, frag_cursor++) {
+      IndxEntry *frag = frag_entries->pdata[frag_cursor];
+      gint64  insert_offset = g_ascii_strtoll (frag->name, NULL, 10);
+      guint32 frag_offset   = indx_tag_value (frag, 6, 0);
+      guint32 frag_length   = indx_tag_value (frag, 6, 1);
+
+      if ((gsize) frag_offset + frag_length > body_len) continue;
+
+      /* Where in `sec` does this fragment splice in? */
+      gint64 splice_at = insert_offset - (gint64) skel_offset
+                          + (gint64) inserted;
+      if (splice_at < 0) splice_at = 0;
+      if ((gsize) splice_at > sec->len) splice_at = sec->len;
+
+      g_string_insert_len (sec, splice_at,
+                           body + frag_offset, frag_length);
+      inserted += frag_length;
+    }
+
+    g_string_append_len (out, sec->str, sec->len);
+  }
+  return out;
+}
+
 /* ── Top-level open ───────────────────────────────────────────── */
 
 FwMobiParsed *
@@ -300,26 +607,96 @@ fw_mobi_parse (const char *path, GError **error)
   guint32 text_enc     = read_be32 (data + r0 + 28);  /* encoding */
   guint32 file_version = read_be32 (data + r0 + 36);  /* version */
 
-  /* foliate detects KF8 by `mobi.version >= 8`. Many KF7 files
-   * carry version=0xFFFFFFFF ("unset"), which would falsely trip
-   * this; treat that sentinel as "unknown — assume KF7". */
+  /* KF8 detection. Foliate's two-step check:
+   *
+   *   1. If `mobi.version >= 8`, this is a pure KF8 (AZW3) file.
+   *   2. Otherwise check EXTH-121 (boundary) — non-0xFFFFFFFF
+   *      indicates a combo MOBI/KF8 file; the KF8 part starts at
+   *      that record. We re-base `r0` to the boundary record and
+   *      re-read the MOBI header from there.
+   *
+   * version=0xFFFFFFFF means "unset" — treat as KF7 (some Calibre
+   * MOBIs use this). */
   gboolean is_kf8 = (file_version >= 8 && file_version != 0xFFFFFFFF);
-  if (is_kf8) {
-    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                 "mobi: KF8/AZW3 container — Phase 5 follow-up");
-    return NULL;
+  guint32 kf8_boundary = 0xFFFFFFFF;
+
+  /* Pre-read EXTH 121 if available so we can detect combo files. */
+  guint32 exth_flag_pre = (r0 + 132 <= r0_end) ? read_be32 (data + r0 + 128) : 0;
+  if (!is_kf8 && (exth_flag_pre & 0x40)) {
+    gsize ex = r0 + mobi_hdr_len + 16;
+    if (ex + 12 <= r0_end && memcmp (data + ex, "EXTH", 4) == 0) {
+      guint32 cnt = read_be32 (data + ex + 8);
+      gsize p = ex + 12;
+      for (guint32 i = 0; i < cnt && p + 8 <= r0_end; i++) {
+        guint32 code = read_be32 (data + p);
+        guint32 ln   = read_be32 (data + p + 4);
+        if (ln < 8 || p + ln > r0_end) break;
+        if (code == 121 && ln == 12) {
+          kf8_boundary = read_be32 (data + p + 8);
+          break;
+        }
+        p += ln;
+      }
+    }
   }
-  (void) mobi_type;  /* informational */
+
+  /* `kf8_start` tracks the record index that maps to "record 0" in
+   * KF8 logical addressing. 0 for pure AZW3 (no boundary); equals
+   * the boundary for combo MOBI/KF8 files. All KF8 internal record
+   * references (skel, frag, resourceStart) are added to this. */
+  guint32 kf8_start = 0;
+
+  /* Re-base to the KF8 boundary record if it's a combo file. */
+  if (kf8_boundary != 0xFFFFFFFF && kf8_boundary < record_count) {
+    kf8_start = kf8_boundary;
+    r0     = roff[kf8_boundary];
+    r0_end = roff[kf8_boundary + 1];
+    if (r0 + 16 + 4 > r0_end ||
+        memcmp (data + r0 + 16, "MOBI", 4) != 0) {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "mobi: KF8 boundary record has no MOBI header");
+      return NULL;
+    }
+    /* Re-read PalmDoc + MobiHeader fields from the new record 0. */
+    compression  = read_be16 (data + r0 + 0x00);
+    text_records = read_be16 (data + r0 + 0x08);
+    encryption   = read_be16 (data + r0 + 0x0C);
+    if (encryption != 0) {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "mobi: encrypted (DRM) — not supported");
+      return NULL;
+    }
+    if (compression == 17480) {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                   "mobi: HuffDic compression — not yet supported");
+      return NULL;
+    }
+    mobi_hdr_len = read_be32 (data + r0 + 20);
+    mobi_type    = read_be32 (data + r0 + 24);
+    text_enc     = read_be32 (data + r0 + 28);
+    file_version = read_be32 (data + r0 + 36);
+    is_kf8 = TRUE;
+  }
+  (void) mobi_type;
 
   /* trailingFlags: foliate [240, 4]. */
   guint32 trailing_flags = 0;
   if (r0 + 244 <= r0_end)
     trailing_flags = read_be32 (data + r0 + 240);
 
-  /* resourceStart: foliate [108, 4]. The first PDB record at this
-   * index is the start of the image / font / media records. */
-  guint32 resource_start = (r0 + 112 <= r0_end)
-                             ? read_be32 (data + r0 + 108) : 0xffffffff;
+  /* resourceStart: foliate [108, 4]. KF8-relative; add kf8_start to
+   * get an absolute file record index. */
+  guint32 resource_start_rel = (r0 + 112 <= r0_end)
+                                 ? read_be32 (data + r0 + 108) : 0xffffffff;
+  guint32 resource_start = (resource_start_rel != 0xffffffff)
+                             ? kf8_start + resource_start_rel : 0xffffffff;
+
+  /* KF8 SKEL / FRAG indexes (foliate KF8_HEADER offsets 252 / 248).
+   * Both are KF8-relative record indices. */
+  guint32 kf8_frag = (is_kf8 && r0 + 252 <= r0_end)
+                      ? read_be32 (data + r0 + 248) : 0xffffffff;
+  guint32 kf8_skel = (is_kf8 && r0 + 256 <= r0_end)
+                      ? read_be32 (data + r0 + 252) : 0xffffffff;
 
   /* EXTH (gated by exthFlag, bit 0x40). foliate exthFlag offset = 128. */
   char *meta_title = NULL, *meta_author = NULL;
@@ -363,8 +740,10 @@ fw_mobi_parse (const char *path, GError **error)
 
   GString *body = g_string_sized_new (text_records * 4096);
   for (guint16 i = 1; i <= text_records; i++) {
-    gsize off = roff[i];
-    gsize len = roff[i + 1] - off;
+    guint16 abs_i = (guint16) (kf8_start + i);
+    if (abs_i >= record_count) break;
+    gsize off = roff[abs_i];
+    gsize len = roff[abs_i + 1] - off;
     if (off + len > raw_len) break;
 
     gsize stripped = strip_trailing_entries (data + off, len, trailing_flags);
@@ -374,6 +753,33 @@ fw_mobi_parse (const char *path, GError **error)
     } else { /* compression == 2 */
       palmdoc_decompress (data + off, stripped, body);
     }
+  }
+
+  /* KF8 SKEL + FRAG splice. The decompressed `body` is a packed
+   * stream of skeleton bytes + fragment bytes; we need to splice
+   * fragments INTO their skeleton sections at the recorded
+   * insertOffsets to produce real HTML. Foliate's KF8.init walks
+   * the SKEL and FRAG INDX tables to discover the splice plan;
+   * its loadSection performs each splice. We do both inline. */
+  if (is_kf8 &&
+      kf8_skel != 0xFFFFFFFF && kf8_skel + kf8_start < record_count &&
+      kf8_frag != 0xFFFFFFFF && kf8_frag + kf8_start < record_count) {
+    GPtrArray *skel = parse_indx (data, raw_len, roff, record_count,
+                                   kf8_start + kf8_skel);
+    GPtrArray *frag = parse_indx (data, raw_len, roff, record_count,
+                                   kf8_start + kf8_frag);
+    if (skel && frag) {
+      g_autoptr (GString) spliced = splice_kf8_sections (
+        body->str, body->len, skel, frag);
+      /* Replace the body with the spliced result. */
+      g_string_free (body, TRUE);
+      body = g_string_new (NULL);
+      g_string_append_len (body, spliced->str, spliced->len);
+    } else {
+      g_warning ("mobi: KF8 INDX parse failed, falling back to raw body");
+    }
+    if (skel) g_ptr_array_free (skel, TRUE);
+    if (frag) g_ptr_array_free (frag, TRUE);
   }
 
   /* Convert encoding to UTF-8. */
