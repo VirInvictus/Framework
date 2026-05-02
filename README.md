@@ -7,7 +7,6 @@
 <p align="center">
   <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-libadwaita-4a86cf" alt="GTK4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
-  <a href="https://ko-fi.com/vrnvctss"><img src="https://img.shields.io/badge/support-Ko--fi-ff5f5f?logo=kofi" alt="Ko-fi"></a>
 </p>
 
 This is very much a work-in-progress and is not feature-complete. I'm a computer science student playing with AI on this one, so it's not a big priority, but it currently renders perfectly fine.
@@ -311,5 +310,8 @@ When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Fractal, Komi
 
 ## Support
 
-Support me by donating bitcoin (even a coffee would help):  
+If Framework's useful to you and you'd like to chip in:
+
+```
 bc1qkge6zr45tzqfwfmvma2ylumt6mg7wlwmhr05yv
+```
