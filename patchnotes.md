@@ -2,6 +2,50 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.56.0 (2026-05-02)
+
+*EPUB rewrite — chapter XHTML walker switched from GMarkupParser to libxml2; EPUB 3 nav.xhtml TOC fallback added.* Same approach as the MOBI port (v0.55.0): foliate parses EPUB chapters via DOMParser; libxml2's `htmlReadMemory` gives us equivalent tolerance for malformed XHTML in C.
+
+### libxml2 chapter walker
+
+`parse_xhtml_chapter` rewritten. The old `XhtmlCtx` + GMarkupParser callback chain is replaced with `EpubWalkCtx` + an `htmlReadMemory(...HTML_PARSE_RECOVER | NOERROR | NOWARNING | NONET | NOBLANKS)` parse + a preorder tree walker. Per-block accumulator tracks an `open_inlines` `GPtrArray` so when an inline span (an `<a>` wrapping multiple `<p>`s, common in real EPUBs) crosses a block boundary, `flush` auto-closes the open Pango spans and the next block's `start` re-emits them — same shape as the MOBI walker. Inline-close handlers guard `if (cc->accum_active)` so close-tags don't leak into the next block's buffer.
+
+CHAPTER markers are still pushed lazily on the first content block of each spine entry, anchored to the chapter's resolved zip path so NCX `<content src="chapter.html">` lookups resolve. Per-element `id` attributes still feed the anchor map for mid-chapter navigation. `<img src>` paths still resolve against the chapter's directory.
+
+### EPUB 3 nav.xhtml TOC fallback
+
+Foliate's `parseNav` walks the EPUB 3 navigation document (manifest item with `properties="nav"`). Some pure-EPUB-3 books only carry a nav doc, no NCX — those previously had empty sidebars.
+
+OPF parser tracks `<item properties="nav">` and stores its id in `OpfCtx::nav_id`. After NCX parsing, if `self->toc` is still empty and we have a `nav_id`, the new `parse_nav_xhtml` runs:
+
+1. `htmlReadMemory` to load the nav doc (it's XHTML; libxml2 handles it).
+2. Recursive search for the `<nav epub:type="toc">` element (with both `type` and `epub:type` attribute spellings accepted).
+3. Walk every `<a href>` inside, extracting label (text content) + href.
+4. Resolve href against the nav doc's directory (`resolve_zip_path`) so the resulting anchor matches the chapter paths the spine walk emitted.
+5. Push as `FwReflowTocItem` into `self->toc`.
+
+Same downstream UX as NCX-derived TOC — sidebar populates, clicks scroll to the right page.
+
+### Verified
+
+| File | NCX | nav.xhtml | Sidebar |
+|---|---|---|---|
+| The Verdant Passage (Denning) | yes | — | populated |
+| The Fall (Cahill) | yes | — | populated |
+| 20th Century Ghosts (Hill) | yes | — | populated |
+| Red Rising (Brown) | yes | — | populated |
+| The Ego and His Own (Stirner) | yes | — | populated |
+
+ASan + UBSan clean on *Verdant Passage*. AZW3 / KF7 / TXT / FB2 regression checks all pass. All 5 stress tests pass in isolation (one transient zoom-storm threshold blip in the full sequence — system memory pressure, not a real regression).
+
+### What stays for a future EPUB slice
+
+- **Comprehensive `dc:` + `meta` metadata extraction** — foliate's `getMetadata` walks far more fields (subject, isbn, contributor, rights, etc.). Current OPF parser captures the canonical set (title / author / language / publisher / date); broader extraction is mostly cosmetic for the doc-properties dialog.
+- **OPF parser switched to libxml2** — currently uses GMarkupParser, which is fine on well-formed OPF. Switch only matters if an EPUB has malformed OPF, which is rare. Deferred.
+- **Encrypted-EPUB detection** — graceful error message instead of opening to garbled content. Tracked.
+
+---
+
 ## v0.55.0 (2026-05-02)
 
 *Phase 13.1 Phase 5 — KF8 / AZW3 native reflow support.* Brandon's three Calibre-generated `.azw3` books now open through the same paginated, font-preference-aware, position-persistent reflow stack as KF7 MOBIs. Foliate-derived from `.foliate-js/mobi.js`'s `KF8` class.

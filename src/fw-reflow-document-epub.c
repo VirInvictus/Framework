@@ -25,6 +25,8 @@
 #include <archive.h>
 #include <archive_entry.h>
 #include <string.h>
+#include <libxml/HTMLparser.h>
+#include <libxml/tree.h>
 
 /* ── Type definition ──────────────────────────────────────────────── */
 
@@ -213,6 +215,9 @@ typedef struct {
   /* NCX id (from spine toc="..."). */
   char       *toc_id;
 
+  /* EPUB 3 nav.xhtml id (from manifest item with properties="nav"). */
+  char       *nav_id;
+
   /* Metadata accumulation */
   gboolean    in_metadata;
   GString    *meta_text;
@@ -250,17 +255,24 @@ opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
   }
 
   if (g_str_equal (name, "item")) {
-    const char *id = NULL, *href = NULL, *mt = NULL;
+    const char *id = NULL, *href = NULL, *mt = NULL, *props = NULL;
     for (int i = 0; attr_names[i]; i++) {
-      if (g_str_equal (attr_names[i], "id"))         id   = attr_values[i];
-      else if (g_str_equal (attr_names[i], "href"))  href = attr_values[i];
+      if (g_str_equal (attr_names[i], "id"))         id    = attr_values[i];
+      else if (g_str_equal (attr_names[i], "href"))  href  = attr_values[i];
       else if (g_str_equal (attr_names[i], "media-type")) mt = attr_values[i];
+      else if (g_str_equal (attr_names[i], "properties")) props = attr_values[i];
     }
     if (id && href) {
       g_hash_table_insert (oc->manifest_href, g_strdup (id),
                            resolve_zip_path (oc->opf_dir, href));
       if (mt)
         g_hash_table_insert (oc->manifest_type, g_strdup (id), g_strdup (mt));
+      /* EPUB 3: an item with properties containing "nav" is the
+       * navigation document. There can be only one per spec. */
+      if (props && !oc->nav_id) {
+        if (g_strstr_len (props, -1, "nav"))
+          oc->nav_id = g_strdup (id);
+      }
     }
     return;
   }
@@ -598,6 +610,285 @@ xhtml_text (GMarkupParseContext *ctx G_GNUC_UNUSED,
   }
 }
 
+/* ── libxml2 chapter walker ────────────────────────────────────────
+ *
+ * Replaces the GMarkupParser walker above (still kept around as
+ * `xhtml_*` helpers used by the legacy code path that's now
+ * effectively dead — they're called by no one, but I'm not deleting
+ * them in this slice to keep the diff focused on the parser swap).
+ *
+ * libxml2's `htmlReadMemory` with HTML_PARSE_RECOVER + NOERROR +
+ * NOWARNING tolerates the malformations real-world EPUBs ship with
+ * — orphan close tags, unclosed elements, unquoted attributes,
+ * `<a>` wrapping multiple `<p>`s. Same approach as the MOBI port.
+ */
+
+typedef struct {
+  GListStore  *blocks;
+  GHashTable  *anchors;
+  const char  *chapter_path;
+  gboolean     in_body;
+  gboolean     accum_active;
+  FwBlockKind  accum_kind;
+  int          accum_level;
+  GString     *accum;
+  char        *pending_anchor;
+  gboolean     chapter_marker_pushed;
+  /* Inline-tag stack — handles `<a>` wrapping multiple `<p>`s
+   * etc., same shape as the MOBI walker. */
+  GPtrArray   *open_inlines;
+} EpubWalkCtx;
+
+static const char *
+epub_pango_for_inline (const char *lname)
+{
+  if (g_str_equal (lname, "em") || g_str_equal (lname, "i"))      return "i";
+  if (g_str_equal (lname, "strong") || g_str_equal (lname, "b"))  return "b";
+  if (g_str_equal (lname, "code") || g_str_equal (lname, "tt") ||
+      g_str_equal (lname, "kbd")  || g_str_equal (lname, "samp")) return "tt";
+  if (g_str_equal (lname, "sub"))                                  return "sub";
+  if (g_str_equal (lname, "sup"))                                  return "sup";
+  if (g_str_equal (lname, "s") || g_str_equal (lname, "strike") ||
+      g_str_equal (lname, "del"))                                  return "s";
+  if (g_str_equal (lname, "u") || g_str_equal (lname, "ins") ||
+      g_str_equal (lname, "a"))                                    return "u";
+  return NULL;
+}
+
+static void
+ewalk_flush (EpubWalkCtx *cc)
+{
+  if (!cc->accum_active) return;
+  cc->accum_active = FALSE;
+
+  if (cc->open_inlines) {
+    for (gint i = (gint) cc->open_inlines->len - 1; i >= 0; i--)
+      g_string_append_printf (cc->accum, "</%s>",
+                              (const char *) cc->open_inlines->pdata[i]);
+  }
+
+  while (cc->accum->len > 0 &&
+         g_ascii_isspace (cc->accum->str[cc->accum->len - 1]))
+    g_string_truncate (cc->accum, cc->accum->len - 1);
+
+  if (cc->accum->len > 0) {
+    /* Push CHAPTER marker before the first content block of this
+     * spine entry — anchored to the chapter path so NCX
+     * `<content src="chapter.html">` lookups land on it. */
+    if (!cc->chapter_marker_pushed) {
+      FwBlock *chap = fw_block_new (FW_BLOCK_CHAPTER, 0, NULL, NULL,
+                                    cc->chapter_path, 0);
+      g_list_store_append (cc->blocks, chap);
+      if (cc->chapter_path) {
+        guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
+        g_hash_table_insert (cc->anchors, g_strdup (cc->chapter_path),
+                             GUINT_TO_POINTER (pos + 1));
+      }
+      g_object_unref (chap);
+      cc->chapter_marker_pushed = TRUE;
+    }
+
+    FwBlock *b = fw_block_new (cc->accum_kind, cc->accum_level,
+                               cc->accum->str, NULL,
+                               cc->pending_anchor, 0);
+    g_list_store_append (cc->blocks, b);
+    if (cc->pending_anchor) {
+      guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
+      g_autofree char *key =
+        cc->chapter_path
+          ? g_strdup_printf ("%s#%s", cc->chapter_path, cc->pending_anchor)
+          : g_strdup (cc->pending_anchor);
+      g_hash_table_insert (cc->anchors, g_steal_pointer (&key),
+                           GUINT_TO_POINTER (pos + 1));
+    }
+    g_object_unref (b);
+  }
+  g_string_truncate (cc->accum, 0);
+  g_clear_pointer (&cc->pending_anchor, g_free);
+  cc->accum_level = 0;
+}
+
+static void
+ewalk_re_emit_inlines (EpubWalkCtx *cc)
+{
+  if (!cc->open_inlines) return;
+  for (guint i = 0; i < cc->open_inlines->len; i++)
+    g_string_append_printf (cc->accum, "<%s>",
+                            (const char *) cc->open_inlines->pdata[i]);
+}
+
+static void
+ewalk_start (EpubWalkCtx *cc, FwBlockKind kind, int level, xmlNode *element)
+{
+  ewalk_flush (cc);
+  cc->accum_active = TRUE;
+  cc->accum_kind   = kind;
+  cc->accum_level  = level;
+  for (xmlAttr *a = element->properties; a; a = a->next) {
+    if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
+      const char *val = (const char *)a->children->content;
+      if (val && *val) {
+        g_clear_pointer (&cc->pending_anchor, g_free);
+        cc->pending_anchor = g_strdup (val);
+      }
+      break;
+    }
+  }
+  ewalk_re_emit_inlines (cc);
+}
+
+static void
+ewalk_text_escaped (GString *out, const char *text)
+{
+  if (!text) return;
+  for (const char *p = text; *p; p++) {
+    char c = *p;
+    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    if (c == ' ' && out->len > 0 && out->str[out->len - 1] == ' ') continue;
+    if      (c == '<') g_string_append (out, "&lt;");
+    else if (c == '>') g_string_append (out, "&gt;");
+    else if (c == '&') g_string_append (out, "&amp;");
+    else               g_string_append_c (out, c);
+  }
+}
+
+static void ewalk_node (EpubWalkCtx *cc, xmlNode *node);
+
+static void
+ewalk_handle_element (EpubWalkCtx *cc, xmlNode *n)
+{
+  const char *name = (const char *)n->name;
+  g_autofree char *lname = g_ascii_strdown (name, -1);
+
+  int hl = heading_level (lname);
+  if (hl > 0) {
+    ewalk_start (cc, FW_BLOCK_HEADING, hl, n);
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "p")) {
+    ewalk_start (cc, FW_BLOCK_PARAGRAPH, 0, n);
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "blockquote")) {
+    ewalk_start (cc, FW_BLOCK_BLOCKQUOTE, 0, n);
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "pre")) {
+    ewalk_start (cc, FW_BLOCK_CODE, 0, n);
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "li")) {
+    ewalk_start (cc, FW_BLOCK_PARAGRAPH, 0, n);
+    g_string_append (cc->accum, "•  ");
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "hr")) {
+    ewalk_flush (cc);
+    FwBlock *hr = fw_block_new (FW_BLOCK_HR, 0, NULL, NULL, NULL, 0);
+    g_list_store_append (cc->blocks, hr);
+    g_object_unref (hr);
+    return;
+  }
+  if (g_str_equal (lname, "br")) {
+    if (cc->accum_active) g_string_append_c (cc->accum, '\n');
+    return;
+  }
+  if (g_str_equal (lname, "img")) {
+    ewalk_flush (cc);
+    const char *src = NULL;
+    for (xmlAttr *a = n->properties; a; a = a->next) {
+      if (g_ascii_strcasecmp ((const char *)a->name, "src") == 0 && a->children) {
+        src = (const char *)a->children->content;
+        break;
+      }
+    }
+    if (src && *src) {
+      g_autofree char *resolved = NULL;
+      if (cc->chapter_path) {
+        g_autofree char *chap_dir = dirname_zip (cc->chapter_path);
+        resolved = resolve_zip_path (chap_dir, src);
+      }
+      FwBlock *img = fw_block_new (FW_BLOCK_IMAGE, 0, NULL,
+                                    resolved ? resolved : src, NULL, 0);
+      g_list_store_append (cc->blocks, img);
+      g_object_unref (img);
+    }
+    return;
+  }
+
+  /* Inline tag inside an active accumulator. Track on stack so we
+   * can balance across block-level boundaries (an `<a>` wrapping
+   * multiple `<p>`s, common in real EPUBs). */
+  if (cc->accum_active) {
+    const char *pname = epub_pango_for_inline (lname);
+    if (pname) {
+      g_string_append_printf (cc->accum, "<%s>", pname);
+      g_ptr_array_add (cc->open_inlines, (gpointer) pname);
+      ewalk_node (cc, n->children);
+      if (cc->open_inlines->len > 0 &&
+          cc->open_inlines->pdata[cc->open_inlines->len - 1] == pname) {
+        g_ptr_array_remove_index (cc->open_inlines,
+                                   cc->open_inlines->len - 1);
+        if (cc->accum_active)
+          g_string_append_printf (cc->accum, "</%s>", pname);
+      }
+    } else {
+      ewalk_node (cc, n->children);
+    }
+    return;
+  }
+
+  /* Container we don't recognise — recurse so deeper block elements
+   * still get reached. */
+  ewalk_node (cc, n->children);
+}
+
+static void
+ewalk_node (EpubWalkCtx *cc, xmlNode *node)
+{
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE) {
+      const char *name = (const char *)n->name;
+      g_autofree char *lname = g_ascii_strdown (name, -1);
+
+      if (g_str_equal (lname, "body")) {
+        gboolean was = cc->in_body;
+        cc->in_body = TRUE;
+        ewalk_node (cc, n->children);
+        cc->in_body = was;
+        continue;
+      }
+      if (g_str_equal (lname, "head") || g_str_equal (lname, "style") ||
+          g_str_equal (lname, "script") || g_str_equal (lname, "title")) {
+        continue;
+      }
+      if (!cc->in_body) {
+        if (g_str_equal (lname, "html")) {
+          ewalk_node (cc, n->children);
+          continue;
+        }
+        cc->in_body = TRUE;
+        ewalk_handle_element (cc, n);
+        cc->in_body = FALSE;
+        continue;
+      }
+      ewalk_handle_element (cc, n);
+    } else if (n->type == XML_TEXT_NODE && cc->accum_active) {
+      ewalk_text_escaped (cc->accum, (const char *)n->content);
+    }
+  }
+}
+
 static void
 parse_xhtml_chapter (FwReflowDocumentEpub *self,
                      const char           *chapter_path,
@@ -606,36 +897,31 @@ parse_xhtml_chapter (FwReflowDocumentEpub *self,
   gsize len = 0;
   const char *data = g_bytes_get_data (bytes, &len);
 
-  XhtmlCtx cc = {
+  htmlDocPtr xdoc = htmlReadMemory (
+    data, (int) len,
+    NULL, "UTF-8",
+    HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
+    HTML_PARSE_NONET    | HTML_PARSE_NOBLANKS);
+  if (!xdoc) {
+    g_warning ("epub: htmlReadMemory failed for '%s'", chapter_path);
+    return;
+  }
+
+  EpubWalkCtx cc = {
     .blocks       = self->blocks,
     .anchors      = self->anchors,
     .chapter_path = chapter_path,
     .accum        = g_string_new (NULL),
+    .open_inlines = g_ptr_array_new (),
   };
 
-  static const GMarkupParser p = {
-    .start_element = xhtml_start,
-    .end_element   = xhtml_end,
-    .text          = xhtml_text,
-  };
+  ewalk_node (&cc, xmlDocGetRootElement (xdoc));
+  ewalk_flush (&cc);
 
-  g_autoptr (GError) e = NULL;
-  GMarkupParseContext *gpc =
-    g_markup_parse_context_new (&p, G_MARKUP_TREAT_CDATA_AS_TEXT, &cc, NULL);
-
-  gboolean ok =
-    g_markup_parse_context_parse (gpc, data, len, &e) &&
-    g_markup_parse_context_end_parse (gpc, &e);
-
-  if (ok)
-    xhtml_flush_accum (&cc);
-  else
-    g_warning ("epub: skipping chapter '%s' (parse error: %s)",
-               chapter_path, e ? e->message : "(unknown)");
-
-  g_markup_parse_context_free (gpc);
   g_string_free (cc.accum, TRUE);
   g_clear_pointer (&cc.pending_anchor, g_free);
+  g_ptr_array_free (cc.open_inlines, TRUE);
+  xmlFreeDoc (xdoc);
 }
 
 /* ── NCX TOC parser (EPUB 2 / 3 fallback) ─────────────────────────── */
@@ -754,6 +1040,139 @@ parse_ncx (FwReflowDocumentEpub *self, const char *ncx_path, GBytes *bytes)
   g_clear_pointer (&nc.cur_src, g_free);
 }
 
+/* ── EPUB 3 nav.xhtml TOC parser ───────────────────────────────
+ *
+ * Foliate's `parseNav` walks a `<nav epub:type="toc">` element
+ * inside the navigation document, extracting `<a href text>` pairs
+ * from its `<ol>` tree. The href targets are URI-relative to the
+ * nav doc's directory; we resolve them through `resolve_zip_path`
+ * to match the CHAPTER anchors emitted by the spine walk.
+ *
+ * Parsed into the same `self->toc` GListStore the NCX walker uses,
+ * so the sidebar UX is identical regardless of which TOC source
+ * the EPUB carries.
+ */
+
+static gboolean
+nav_node_is_toc_nav (xmlNode *n)
+{
+  if (n->type != XML_ELEMENT_NODE) return FALSE;
+  if (g_ascii_strcasecmp ((const char *)n->name, "nav") != 0) return FALSE;
+  for (xmlAttr *a = n->properties; a; a = a->next) {
+    if ((g_ascii_strcasecmp ((const char *)a->name, "type") == 0 ||
+         g_ascii_strcasecmp ((const char *)a->name, "epub:type") == 0)
+        && a->children) {
+      const char *v = (const char *)a->children->content;
+      if (v && g_strstr_len (v, -1, "toc"))
+        return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static char *
+xml_node_text_recursive (xmlNode *n)
+{
+  GString *out = g_string_new (NULL);
+  for (xmlNode *c = n; c; c = c->next) {
+    if (c->type == XML_TEXT_NODE && c->content) {
+      g_string_append (out, (const char *)c->content);
+    } else if (c->type == XML_ELEMENT_NODE) {
+      g_autofree char *inner = xml_node_text_recursive (c->children);
+      if (inner) g_string_append (out, inner);
+    }
+  }
+  /* Squash internal whitespace to single space. */
+  GString *sq = g_string_new (NULL);
+  gboolean prev_ws = TRUE;
+  for (gsize i = 0; i < out->len; i++) {
+    char ch = out->str[i];
+    if (g_ascii_isspace (ch)) {
+      if (!prev_ws) g_string_append_c (sq, ' ');
+      prev_ws = TRUE;
+    } else {
+      g_string_append_c (sq, ch);
+      prev_ws = FALSE;
+    }
+  }
+  while (sq->len > 0 && g_ascii_isspace (sq->str[sq->len - 1]))
+    g_string_truncate (sq, sq->len - 1);
+  g_string_free (out, TRUE);
+  return g_string_free (sq, FALSE);
+}
+
+static void
+nav_walk_toc_a_links (FwReflowDocumentEpub *self, xmlNode *node,
+                      const char *nav_dir)
+{
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) continue;
+    if (g_ascii_strcasecmp ((const char *)n->name, "a") == 0) {
+      const char *href = NULL;
+      for (xmlAttr *a = n->properties; a; a = a->next) {
+        if (g_ascii_strcasecmp ((const char *)a->name, "href") == 0
+            && a->children) {
+          href = (const char *)a->children->content;
+          break;
+        }
+      }
+      if (href) {
+        const char *frag = strchr (href, '#');
+        g_autofree char *base =
+          frag ? g_strndup (href, frag - href) : g_strdup (href);
+        g_autofree char *resolved = resolve_zip_path (nav_dir, base);
+        g_autofree char *anchor = frag
+          ? g_strconcat (resolved, frag, NULL)
+          : g_strdup (resolved);
+
+        g_autofree char *label = xml_node_text_recursive (n->children);
+        if (label && *label && anchor && *anchor) {
+          FwReflowTocItem *item = fw_reflow_toc_item_new (label, anchor);
+          g_list_store_append (self->toc, item);
+          g_object_unref (item);
+        }
+      }
+      continue;  /* don't recurse into <a> children — already extracted text */
+    }
+    nav_walk_toc_a_links (self, n->children, nav_dir);
+  }
+}
+
+static void
+nav_walk_for_toc_nav (FwReflowDocumentEpub *self, xmlNode *node,
+                      const char *nav_dir)
+{
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE && nav_node_is_toc_nav (n)) {
+      nav_walk_toc_a_links (self, n->children, nav_dir);
+      return;
+    }
+    if (n->children)
+      nav_walk_for_toc_nav (self, n->children, nav_dir);
+  }
+}
+
+static void
+parse_nav_xhtml (FwReflowDocumentEpub *self,
+                 const char           *nav_path,
+                 GBytes               *bytes)
+{
+  gsize len = 0;
+  const char *data = g_bytes_get_data (bytes, &len);
+
+  htmlDocPtr xdoc = htmlReadMemory (
+    data, (int) len,
+    NULL, "UTF-8",
+    HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
+    HTML_PARSE_NONET    | HTML_PARSE_NOBLANKS);
+  if (!xdoc) return;
+
+  g_autofree char *nav_dir = dirname_zip (nav_path);
+  nav_walk_for_toc_nav (self, xmlDocGetRootElement (xdoc), nav_dir);
+
+  xmlFreeDoc (xdoc);
+}
+
 /* ── Top-level open() ─────────────────────────────────────────────── */
 
 static gboolean
@@ -807,6 +1226,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_hash_table_destroy (oc.manifest_type);
       g_ptr_array_free (oc.spine, TRUE);
       g_free (oc.toc_id);
+      g_free (oc.nav_id);
       return FALSE;
     }
   }
@@ -827,13 +1247,24 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
     parse_xhtml_chapter (self, href, cb);
   }
 
-  /* TOC: prefer NCX (EPUB 2 / EPUB 3 fallback). */
+  /* TOC: prefer NCX when present (EPUB 2 + most EPUB 3 books still
+   * ship one for back-compat). Fall back to EPUB 3 nav.xhtml when
+   * NCX is absent or empty. Some pure-EPUB-3 books only carry a
+   * nav doc — `parseNav` is the canonical path foliate takes. */
   if (oc.toc_id) {
     const char *ncx_href = g_hash_table_lookup (oc.manifest_href, oc.toc_id);
     if (ncx_href) {
       GBytes *nb = g_hash_table_lookup (self->zip, ncx_href);
       if (nb)
         parse_ncx (self, ncx_href, nb);
+    }
+  }
+  if (g_list_model_get_n_items (G_LIST_MODEL (self->toc)) == 0 && oc.nav_id) {
+    const char *nav_href = g_hash_table_lookup (oc.manifest_href, oc.nav_id);
+    if (nav_href) {
+      GBytes *nb = g_hash_table_lookup (self->zip, nav_href);
+      if (nb)
+        parse_nav_xhtml (self, nav_href, nb);
     }
   }
 
@@ -878,6 +1309,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   g_hash_table_destroy (oc.manifest_type);
   g_ptr_array_free (oc.spine, TRUE);
   g_free (oc.toc_id);
+  g_free (oc.nav_id);
 
   return TRUE;
 }
