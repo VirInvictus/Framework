@@ -2,6 +2,64 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.48.0 (2026-05-02)
+
+*True paginated single-page-at-a-time reading for reflow documents.* The previous "scroll by viewport height" model is gone — pages are now discrete, content-aligned units. Right Arrow / Page Down jump exactly to the next page; the content above moves out of view entirely; no half-paragraphs hanging off the bottom.
+
+### How pagination works
+
+`FwReflowView` now wraps the document's block model in a `GtkSliceListModel` whose offset and size are controlled per page. The listview only ever sees the blocks belonging to the active page — recycled rows are still possible but the model bound to the listview is always exactly one page tall.
+
+Page boundaries are computed by walking every block once and Pango-measuring its height at the current viewport width. The walk accumulates measured heights and breaks before any block whose addition would exceed viewport height. **Block-level only**: no block is ever split mid-paragraph. The page table (`FwPageRange[]` of `{first, count}` ranges) lives on the view; the current page is an index into it.
+
+```
+Page 0:  [block 0..7]   ←  fits inside viewport
+Page 1:  [block 8..15]  ←  next set of blocks that fits
+Page 2:  [block 16..23]
+...
+```
+
+When the viewport size changes (window resize, sidebar toggle, font preset change), the size_allocate vfunc trips a queued idle that recomputes pagination. The current page is preserved by *content* — we remember which block the page started on, then look up which page contains that block in the new layout. So resizing while reading doesn't snap you to page 0.
+
+### Measurement
+
+`measure_block_height` builds a temporary widget mirroring what the factory's setup+bind would produce (a `GtkLabel` with the right CSS class, or a `GtkPicture` with the right paintable for `IMAGE` blocks), then calls `gtk_widget_measure (widget, VERTICAL, content_width, ...)` to get the natural height. The display-wide CSS provider applies its rules during measurement, so font-size + line-height + per-class margins all factor in. The widget is never parented; it's reffed and unreffed inline. Effectively zero allocation churn — temp widgets are short-lived stack-style.
+
+### Navigation
+
+`fw_reflow_view_scroll_by_page(direction)` rewritten:
+
+- `+1` → step `current_page` forward (clamped to last)
+- `-1` → step `current_page` backward (clamped to 0)
+- `0` → first page
+- `G_MAXINT` → last page
+
+All four are wired the same as before: Right/Left arrows, header arrow buttons, `next-page` / `prev-page` actions.
+
+### "Page X / Y" in the header
+
+New `FwReflowView::page-changed (uint current, uint total)` signal fires whenever pagination recomputes or the user turns a page. The window subscribes and updates a `reflow_page_label` ("3 / 247") packed into the same header slot the page entry occupies — only one is visible at a time. Toggle reflects which mode is open.
+
+### New public APIs
+
+- `fw_reflow_view_get_current_page` (0-based)
+- `fw_reflow_view_get_total_pages`
+- `fw_reflow_view_scroll_to_anchor` now lands on the right *page* (was: scrolled the listview directly, which was meaningless once the slice model windowed the content)
+
+### Verified
+
+- *Verdant Passage* EPUB — pagination produces ~250 pages at default font/window size; arrow keys turn one page at a time; window resize re-paginates and preserves position; font preset changes (Compact / Dyslexic) re-paginate; `g_idle_add` ensures the rebuild happens after layout settles, so size-allocate-driven reflows don't jitter.
+- ASan + UBSan clean on the open-resize-page-resize-page sequence.
+- All 5 stress tests still pass.
+
+### Known limitations / next slices
+
+- **Block-level pagination only** — a single block taller than the viewport (an oversized image, an enormous paragraph) gets its own page that internally scrolls if needed. True line-level pagination (Foliate's CSS-columns model) needs a Pango-layout split path, deferred.
+- **Two-column / facing-pages mode** — also a candidate for the next slice; the architecture supports it (a "page" could become two columns rendered side-by-side).
+- **Anchor → page lookup** — works, but if an anchor lands on a block-boundary that re-paginates differently, the resolved page could shift by one. Matches Foliate's behavior.
+
+---
+
 ## v0.47.0 (2026-05-02)
 
 *Reading rendering overhaul — three OFL fonts ship with the application, and the "huge whitespace" between paragraphs is gone.* The previous default looked nothing like a finished reading experience; v0.47.0 fixes both root causes.

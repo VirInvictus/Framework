@@ -53,6 +53,7 @@ struct _FwWindow {
   FwReflowView         *reflow_view;
   FwReflowSidebar      *reflow_sidebar;
   GtkScrolledWindow    *sidebar_scroll; /* host for the active sidebar widget */
+  GtkLabel             *reflow_page_label;  /* "Page X / Y" — header chrome */
   FwSearch             *search;
   GtkSearchBar         *search_bar;
   GtkSearchEntry       *search_entry;
@@ -116,6 +117,10 @@ static void on_kinetic_setting_changed     (GSettings *settings,
 static void on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar,
                                                 const char      *anchor,
                                                 gpointer         user_data);
+static void on_reflow_page_changed         (FwReflowView *view,
+                                            guint         current,
+                                            guint         total,
+                                            gpointer      user_data);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -1448,6 +1453,13 @@ fw_window_constructed (GObject *object)
   gtk_window_set_default_size (GTK_WINDOW (self), 900, 700);
   gtk_window_set_title (GTK_WINDOW (self), "Framework");
 
+  /* Header chrome that the reflow path manipulates needs to exist
+   * before adw_header_bar_pack_end references it. */
+  self->reflow_page_label = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_set_size_request (GTK_WIDGET (self->reflow_page_label), 90, -1);
+  gtk_widget_add_css_class    (GTK_WIDGET (self->reflow_page_label), "dim-label");
+  gtk_widget_set_visible      (GTK_WIDGET (self->reflow_page_label), FALSE);
+
   /* ── Header bar ── */
   self->header_bar = ADW_HEADER_BAR (adw_header_bar_new ());
 
@@ -1560,6 +1572,12 @@ fw_window_constructed (GObject *object)
                     G_CALLBACK (page_entry_activated), self);
   adw_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->page_entry));
+  /* Reflow page label sits in the same slot — only one visible at a
+   * time. pack_end stacks right-to-left so this lands just left of
+   * the page entry, but with both invisible-by-default the visual
+   * position is determined by which one we make visible. */
+  adw_header_bar_pack_end (self->header_bar,
+                            GTK_WIDGET (self->reflow_page_label));
 
   /* ── Content area ── */
   self->view = fw_view_new ();
@@ -1654,9 +1672,11 @@ fw_window_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "pill");
   adw_status_page_set_child (empty, GTK_WIDGET (empty_btn));
 
-  /* Reflow view — Phase 13.1 path for .txt and (later) EPUB/MOBI/FB2.
+  /* Reflow view — Phase 13.1 path for .txt / .fb2 / .epub.
    * Hosted in the same content_stack as a peer to "document". */
   self->reflow_view = fw_reflow_view_new ();
+  g_signal_connect (self->reflow_view, "page-changed",
+                    G_CALLBACK (on_reflow_page_changed), self);
 
   /* Stack flips between the empty state and the rendered document. */
   self->content_stack = GTK_STACK (gtk_stack_new ());
@@ -1896,6 +1916,21 @@ on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar G_GNUC_UNUSED,
 }
 
 static void
+on_reflow_page_changed (FwReflowView *view G_GNUC_UNUSED,
+                        guint         current,
+                        guint         total,
+                        gpointer      user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->reflow_page_label)
+    return;
+  g_autofree char *txt = total > 0
+    ? g_strdup_printf ("%u / %u", current + 1, total)
+    : g_strdup ("…");
+  gtk_label_set_text (self->reflow_page_label, txt);
+}
+
+static void
 on_kinetic_setting_changed (GSettings *settings, const char *key,
                             gpointer user_data)
 {
@@ -2053,6 +2088,8 @@ fw_window_open_reflow (FwWindow *self, const char *path)
    * vertical (scroll) to horizontal (page-turn) glyphs. */
   if (self->page_entry)
     gtk_widget_set_visible (GTK_WIDGET (self->page_entry), FALSE);
+  if (self->reflow_page_label)
+    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label), TRUE);
   if (self->zoom_entry) {
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),    FALSE);
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button),  FALSE);
@@ -2143,6 +2180,8 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* Restore the fixed-layout header chrome. */
   if (self->page_entry)
     gtk_widget_set_visible (GTK_WIDGET (self->page_entry), TRUE);
+  if (self->reflow_page_label)
+    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label), FALSE);
   if (self->zoom_entry) {
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),     TRUE);
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button), TRUE);

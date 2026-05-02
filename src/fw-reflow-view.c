@@ -16,19 +16,51 @@
 #define READING_COLUMN_MAX_WIDTH 720   /* px — caps comfortable line length */
 #define READING_COLUMN_MARGIN     24
 
+/* ── Pagination ────────────────────────────────────────────────────
+ * Each page is a contiguous range of whole blocks that fit within
+ * viewport height. Blocks are never split mid-paragraph (block-level
+ * pagination only). On viewport resize the page table is rebuilt by
+ * walking every block and Pango-measuring its height at the current
+ * column width; the current_page index is preserved by content
+ * (we remember which block the page started on, then look up its
+ * new page index after the rebuild).
+ */
+typedef struct {
+  guint first;   /* first block index */
+  guint count;   /* number of blocks on this page */
+} FwPageRange;
+
 struct _FwReflowView {
-  GtkWidget          parent_instance;
+  GtkWidget           parent_instance;
 
-  FwReflowDocument  *document;     /* owned */
+  FwReflowDocument   *document;     /* owned */
 
-  GtkScrolledWindow *scroll;       /* fills our area */
-  GtkListView       *list;
+  GtkScrolledWindow  *scroll;       /* fills our area */
+  GtkListView        *list;
   GtkSingleSelection *selection;
+  GtkSliceListModel  *page_slice;   /* windows the doc's block model
+                                     * to the current page */
 
-  GtkCssProvider    *css;
-  GSettings         *settings;
-  gulong             settings_handler;
+  GtkCssProvider     *css;
+  GSettings          *settings;
+  gulong              settings_handler;
+
+  /* Pagination state */
+  GListModel         *all_blocks;   /* unowned (held by document) */
+  GArray             *pages;        /* FwPageRange[] */
+  guint               current_page;
+
+  /* Repagination triggers */
+  int                 last_alloc_w;
+  int                 last_alloc_h;
+  guint               repaginate_idle;
 };
+
+enum {
+  SIG_PAGE_CHANGED,
+  N_SIGNALS,
+};
+static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (FwReflowView, fw_reflow_view, GTK_TYPE_WIDGET)
 
@@ -368,6 +400,213 @@ ensure_css (FwReflowView *self)
     G_CALLBACK (on_reading_setting_changed), self);
 }
 
+/* ── Pagination internals ─────────────────────────────────────────── */
+
+/* Build a measurement-only widget mirroring what the factory produces
+ * for a given block. The widget is not parented (caller sinks it after
+ * measure). CSS classes are set so the display-wide CSS provider's
+ * font/size/line-height rules apply during gtk_widget_measure. */
+static GtkWidget *
+make_measure_widget_for (FwReflowView *self, FwBlock *block)
+{
+  if (fw_block_get_kind (block) == FW_BLOCK_IMAGE) {
+    GtkPicture *pic = GTK_PICTURE (gtk_picture_new ());
+    gtk_picture_set_can_shrink  (pic, TRUE);
+    gtk_picture_set_content_fit (pic, GTK_CONTENT_FIT_CONTAIN);
+    gtk_widget_set_halign       (GTK_WIDGET (pic), GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class    (GTK_WIDGET (pic), "reflow-image");
+
+    const char *id = fw_block_get_image_id (block);
+    GdkTexture *tex = (id && self->document)
+                       ? fw_reflow_document_get_image (self->document, id)
+                       : NULL;
+    if (tex)
+      gtk_picture_set_paintable (pic, GDK_PAINTABLE (tex));
+    return GTK_WIDGET (pic);
+  }
+
+  GtkLabel *label = GTK_LABEL (gtk_label_new (NULL));
+  gtk_label_set_wrap     (label, TRUE);
+  gtk_label_set_wrap_mode (label, PANGO_WRAP_WORD_CHAR);
+  gtk_label_set_xalign   (label, 0.0);
+  gtk_label_set_yalign   (label, 0.0);
+  gtk_widget_set_halign  (GTK_WIDGET (label), GTK_ALIGN_FILL);
+
+  /* Match the bind handler's class assignment — measurement must
+   * include the CSS-driven margins / line-height. */
+  switch (fw_block_get_kind (block)) {
+    case FW_BLOCK_HEADING: {
+      gtk_widget_add_css_class (GTK_WIDGET (label), "reflow-heading");
+      g_autofree char *cls = g_strdup_printf ("reflow-h%d",
+                                              CLAMP (fw_block_get_level (block), 1, 6));
+      gtk_widget_add_css_class (GTK_WIDGET (label), cls);
+      gtk_label_set_use_markup (label, TRUE);
+      gtk_label_set_markup     (label, fw_block_get_text (block) ?: "");
+      break;
+    }
+    case FW_BLOCK_CODE:
+      gtk_widget_add_css_class (GTK_WIDGET (label), "reflow-code");
+      gtk_label_set_text (label, fw_block_get_text (block) ?: "");
+      break;
+    case FW_BLOCK_BLOCKQUOTE:
+      gtk_widget_add_css_class (GTK_WIDGET (label), "reflow-blockquote");
+      gtk_label_set_use_markup (label, TRUE);
+      gtk_label_set_markup     (label, fw_block_get_text (block) ?: "");
+      break;
+    case FW_BLOCK_HR:
+      gtk_label_set_text (label, "———");
+      break;
+    case FW_BLOCK_CHAPTER:
+      gtk_widget_add_css_class (GTK_WIDGET (label), "reflow-chapter");
+      gtk_label_set_text (label, fw_block_get_text (block) ?: "");
+      break;
+    default:
+      gtk_widget_add_css_class (GTK_WIDGET (label), "reflow-paragraph");
+      gtk_label_set_use_markup (label, TRUE);
+      gtk_label_set_markup     (label, fw_block_get_text (block) ?: "");
+      break;
+  }
+  return GTK_WIDGET (label);
+}
+
+static int
+measure_block_height (FwReflowView *self, FwBlock *block, int width)
+{
+  GtkWidget *m = make_measure_widget_for (self, block);
+  /* Sink the floating ref so we own it. */
+  g_object_ref_sink (m);
+
+  int min_h = 0, nat_h = 0;
+  gtk_widget_measure (m, GTK_ORIENTATION_VERTICAL, width,
+                      &min_h, &nat_h, NULL, NULL);
+
+  g_object_unref (m);
+  return nat_h;
+}
+
+static void
+emit_page_changed (FwReflowView *self)
+{
+  g_signal_emit (self, signals[SIG_PAGE_CHANGED], 0,
+                 self->current_page,
+                 (guint) (self->pages ? self->pages->len : 0));
+}
+
+static void
+apply_current_page (FwReflowView *self)
+{
+  if (!self->page_slice) return;
+
+  if (!self->pages || self->pages->len == 0) {
+    gtk_slice_list_model_set_offset (self->page_slice, 0);
+    gtk_slice_list_model_set_size   (self->page_slice, 0);
+    emit_page_changed (self);
+    return;
+  }
+
+  if (self->current_page >= self->pages->len)
+    self->current_page = self->pages->len - 1;
+
+  FwPageRange r = g_array_index (self->pages, FwPageRange, self->current_page);
+  gtk_slice_list_model_set_offset (self->page_slice, r.first);
+  gtk_slice_list_model_set_size   (self->page_slice, r.count);
+
+  /* Reset scroll to top of the page (in case content overflows the
+   * viewport — rare but possible for a single very tall block). */
+  if (self->scroll) {
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
+    if (vadj) gtk_adjustment_set_value (vadj, 0);
+  }
+
+  emit_page_changed (self);
+}
+
+static void
+recompute_pagination (FwReflowView *self)
+{
+  if (!self->pages) return;
+
+  int vw = gtk_widget_get_width  (GTK_WIDGET (self->scroll));
+  int vh = gtk_widget_get_height (GTK_WIDGET (self->scroll));
+
+  /* Allocation not yet settled — bail. The size_allocate hook will
+   * fire again with real dimensions. */
+  if (vw < 200 || vh < 200) return;
+
+  int content_w = vw - 2 * READING_COLUMN_MARGIN;
+  if (content_w < 100) content_w = vw;
+  int page_h = vh - 24;   /* small breathing room */
+  if (page_h < 200) page_h = vh;
+
+  /* Remember which block the current page starts on so we can land
+   * back at approximately the same content after re-pagination. */
+  guint anchor_block = 0;
+  if (self->pages->len > 0 && self->current_page < self->pages->len) {
+    anchor_block =
+      g_array_index (self->pages, FwPageRange, self->current_page).first;
+  }
+
+  g_array_set_size (self->pages, 0);
+
+  guint n = self->all_blocks ? g_list_model_get_n_items (self->all_blocks) : 0;
+  if (n == 0) {
+    self->current_page = 0;
+    apply_current_page (self);
+    return;
+  }
+
+  guint page_start = 0;
+  int   page_acc   = 0;
+
+  for (guint i = 0; i < n; i++) {
+    g_autoptr (FwBlock) b = g_list_model_get_item (self->all_blocks, i);
+    int h = measure_block_height (self, b, content_w);
+    if (h <= 0) h = 1;
+
+    if (i > page_start && page_acc + h > page_h) {
+      FwPageRange r = { .first = page_start, .count = i - page_start };
+      g_array_append_val (self->pages, r);
+      page_start = i;
+      page_acc   = h;
+    } else {
+      page_acc += h;
+    }
+  }
+  if (page_start < n) {
+    FwPageRange r = { .first = page_start, .count = n - page_start };
+    g_array_append_val (self->pages, r);
+  }
+
+  /* Land on the page containing the anchor block. */
+  guint new_page = 0;
+  for (guint p = 0; p < self->pages->len; p++) {
+    FwPageRange r = g_array_index (self->pages, FwPageRange, p);
+    if (anchor_block >= r.first && anchor_block < r.first + r.count) {
+      new_page = p;
+      break;
+    }
+  }
+  self->current_page = new_page;
+
+  apply_current_page (self);
+}
+
+static gboolean
+repaginate_idle_cb (gpointer user_data)
+{
+  FwReflowView *self = FW_REFLOW_VIEW (user_data);
+  self->repaginate_idle = 0;
+  recompute_pagination (self);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+queue_repaginate (FwReflowView *self)
+{
+  if (self->repaginate_idle) return;
+  self->repaginate_idle = g_idle_add (repaginate_idle_cb, self);
+}
+
 /* ── Public API ───────────────────────────────────────────────────── */
 
 void
@@ -379,11 +618,21 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
     return;
 
   g_set_object (&self->document, doc);
+  self->all_blocks = doc ? fw_reflow_document_get_block_model (doc) : NULL;
+  self->current_page = 0;
 
-  GListModel *blocks = doc ? fw_reflow_document_get_block_model (doc) : NULL;
-  if (self->selection) {
-    gtk_single_selection_set_model (self->selection, blocks);
+  if (self->page_slice) {
+    /* Set the slice's underlying model to all_blocks. The slice
+     * windows it via offset/size, controlled by apply_current_page. */
+    gtk_slice_list_model_set_model (self->page_slice, self->all_blocks);
+    gtk_slice_list_model_set_offset (self->page_slice, 0);
+    gtk_slice_list_model_set_size   (self->page_slice, 0);
   }
+
+  if (self->pages)
+    g_array_set_size (self->pages, 0);
+
+  queue_repaginate (self);
 }
 
 void
@@ -396,50 +645,83 @@ fw_reflow_view_scroll_to_anchor (FwReflowView *self, const char *anchor)
   guint pos1 = fw_reflow_document_find_block_by_anchor (self->document, anchor);
   if (pos1 == 0)   /* 1-based — 0 = not found */
     return;
-  guint pos = pos1 - 1;
+  guint block = pos1 - 1;
 
-  if (self->list)
-    gtk_list_view_scroll_to (self->list, pos,
-                             GTK_LIST_SCROLL_FOCUS, NULL);
+  /* Find the page containing this block. */
+  if (!self->pages) return;
+  for (guint p = 0; p < self->pages->len; p++) {
+    FwPageRange r = g_array_index (self->pages, FwPageRange, p);
+    if (block >= r.first && block < r.first + r.count) {
+      self->current_page = p;
+      apply_current_page (self);
+      return;
+    }
+  }
 }
 
 void
 fw_reflow_view_scroll_by_page (FwReflowView *self, int direction)
 {
   g_return_if_fail (FW_IS_REFLOW_VIEW (self));
-  if (!self->scroll)
+  if (!self->pages || self->pages->len == 0)
     return;
 
-  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (self->scroll);
-  if (!vadj)
+  guint last = self->pages->len - 1;
+  guint next = self->current_page;
+
+  if (direction == 0)             next = 0;
+  else if (direction == G_MAXINT) next = last;
+  else if (direction > 0)         next = MIN (self->current_page + 1, last);
+  else if (direction < 0)         next = (self->current_page > 0)
+                                          ? self->current_page - 1 : 0;
+
+  if (next == self->current_page)
     return;
+  self->current_page = next;
+  apply_current_page (self);
+}
 
-  double upper = gtk_adjustment_get_upper (vadj);
-  double lower = gtk_adjustment_get_lower (vadj);
-  double page  = gtk_adjustment_get_page_size (vadj);
-  double cur   = gtk_adjustment_get_value (vadj);
+guint
+fw_reflow_view_get_current_page (FwReflowView *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_VIEW (self), 0);
+  return self->current_page;
+}
 
-  /* A small overlap keeps a line of context across the page turn — the
-   * common ergonomic for paginated readers (matches Foliate). */
-  double step = page > 60 ? page - 40 : page;
-
-  double next;
-  if (direction == 0)             next = lower;
-  else if (direction == G_MAXINT) next = upper - page;
-  else                            next = cur + (double) direction * step;
-
-  if (next < lower)         next = lower;
-  if (next > upper - page)  next = upper - page;
-
-  gtk_adjustment_set_value (vadj, next);
+guint
+fw_reflow_view_get_total_pages (FwReflowView *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_VIEW (self), 0);
+  return self->pages ? self->pages->len : 0;
 }
 
 /* ── GObject lifecycle ────────────────────────────────────────────── */
 
 static void
+fw_reflow_view_size_allocate (GtkWidget *widget, int width, int height,
+                              int baseline)
+{
+  FwReflowView *self = FW_REFLOW_VIEW (widget);
+
+  GTK_WIDGET_CLASS (fw_reflow_view_parent_class)
+    ->size_allocate (widget, width, height, baseline);
+
+  if (width != self->last_alloc_w || height != self->last_alloc_h) {
+    self->last_alloc_w = width;
+    self->last_alloc_h = height;
+    queue_repaginate (self);
+  }
+}
+
+static void
 fw_reflow_view_dispose (GObject *object)
 {
   FwReflowView *self = FW_REFLOW_VIEW (object);
+
+  if (self->repaginate_idle) {
+    g_source_remove (self->repaginate_idle);
+    self->repaginate_idle = 0;
+  }
 
   GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self));
   while (child) {
@@ -455,6 +737,10 @@ fw_reflow_view_dispose (GObject *object)
   g_clear_object (&self->settings);
   g_clear_object (&self->document);
   g_clear_object (&self->css);
+  g_clear_object (&self->selection);
+  g_clear_object (&self->page_slice);
+  self->all_blocks = NULL;
+  g_clear_pointer (&self->pages, g_array_unref);
 
   G_OBJECT_CLASS (fw_reflow_view_parent_class)->dispose (object);
 }
@@ -462,9 +748,20 @@ fw_reflow_view_dispose (GObject *object)
 static void
 fw_reflow_view_class_init (FwReflowViewClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = fw_reflow_view_dispose;
-  gtk_widget_class_set_layout_manager_type (GTK_WIDGET_CLASS (klass),
-                                            GTK_TYPE_BIN_LAYOUT);
+  GObjectClass   *o_class = G_OBJECT_CLASS (klass);
+  GtkWidgetClass *w_class = GTK_WIDGET_CLASS (klass);
+
+  o_class->dispose       = fw_reflow_view_dispose;
+  w_class->size_allocate = fw_reflow_view_size_allocate;
+
+  gtk_widget_class_set_layout_manager_type (w_class, GTK_TYPE_BIN_LAYOUT);
+
+  signals[SIG_PAGE_CHANGED] =
+    g_signal_new ("page-changed",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL,
+                  G_TYPE_NONE, 2, G_TYPE_UINT, G_TYPE_UINT);
 }
 
 static void
@@ -472,11 +769,19 @@ fw_reflow_view_init (FwReflowView *self)
 {
   ensure_css (self);
 
-  /* Empty model bound now so the listview has structure even before
-   * a document arrives. */
+  self->pages         = g_array_new (FALSE, FALSE, sizeof (FwPageRange));
+  self->current_page  = 0;
+  self->last_alloc_w  = 0;
+  self->last_alloc_h  = 0;
+
+  /* Slice wraps an initially-empty model. set_document swaps in the
+   * doc's block model; apply_current_page sets offset/size each page. */
   GListStore *empty = g_list_store_new (FW_TYPE_BLOCK);
+  self->page_slice = gtk_slice_list_model_new (G_LIST_MODEL (empty), 0, 0);
+  /* gtk_slice_list_model_new takes ownership of `empty`. */
+
   self->selection = GTK_SINGLE_SELECTION (
-    gtk_single_selection_new (G_LIST_MODEL (empty)));
+    gtk_single_selection_new (G_LIST_MODEL (g_object_ref (self->page_slice))));
   gtk_single_selection_set_can_unselect (self->selection, TRUE);
   gtk_single_selection_set_autoselect    (self->selection, FALSE);
 
