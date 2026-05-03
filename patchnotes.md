@@ -2,6 +2,36 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.61.0 (2026-05-02)
+
+*Reflow typography polish — reading-app feel for EPUB / MOBI / AZW3 / FB2 / TXT.*
+
+The native reflow stack rendered correct text but looked barebones — left-ragged paragraphs, all headings the same weight-bold left-aligned size, no chapter-title presence. v0.61 brings it closer to Foliate / Apple Books / Kindle visual rhythm.
+
+### Justified body text
+
+Paragraphs and blockquotes are now justified (`GTK_JUSTIFY_FILL`) by default. Pango handles the inter-word stretching across wrapped lines, so paragraphs read as typeset blocks instead of left-ragged columns. Code blocks stay left-aligned (justification would corrupt intra-line spacing in monospace runs); headings get per-level alignment (see below).
+
+Set in `make_text_label` at factory setup; the bind handler resets per-block when an override applies.
+
+### Centered chapter titles (h1)
+
+Heading level 1 now centers — both label justification (`GTK_JUSTIFY_CENTER`, `xalign 0.5`) and CSS sizing — and gets generous breathing room above and below (`margin-top: 2em`, `margin-bottom: 1.2em`), matching Foliate's `body > section > .title { margin: 3em 0 }` typography. Chapter titles read as titles, not as bigger paragraphs.
+
+H2 keeps left alignment but gets bumped margins (`margin-top: 1.4em`) for sub-section presence. H3–H6 keep modest spacing — they're inline structural cues, not page-break-grade.
+
+### Block delineation
+
+Bumped paragraph `margin-bottom` from 0.4em → 0.5em, headings to 0.5em, blockquote/code to 0.6em top + bottom. Reflow pages now feel paginated rather than scroll-blob.
+
+### Verified
+
+- Builds clean.
+- EPUB / MOBI / AZW3 / FB2 / TXT corpus renders with new typography — content unchanged, presentation more polished.
+- ASan + UBSan clean.
+
+---
+
 ## v0.60.0 (2026-05-02)
 
 *EPUB metadata expansion + DRM-encrypted graceful detection.* Two related EPUB-side improvements bundled in one slice.

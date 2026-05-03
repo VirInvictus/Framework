@@ -101,6 +101,10 @@ make_text_label (void)
   gtk_label_set_wrap_mode (label, PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (label, 0.0);
   gtk_label_set_yalign (label, 0.0);
+  /* Justified body text — typeset-book look. Bind resets per-block:
+   * headings center (h1) or left-align, code stays left, the rest
+   * inherits this fill. */
+  gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
   gtk_label_set_selectable (label, TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (label), TRUE);
   gtk_widget_set_halign (GTK_WIDGET (label), GTK_ALIGN_FILL);
@@ -188,18 +192,32 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
   gtk_widget_remove_css_class (text_w, "reflow-blockquote");
   gtk_widget_remove_css_class (text_w, "reflow-chapter");
 
+  /* Default per-bind alignment. Headings/code override below. */
+  gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
+  gtk_label_set_xalign (label, 0.0);
+
   switch (fw_block_get_kind (block)) {
     case FW_BLOCK_HEADING: {
       gtk_widget_add_css_class (text_w, "reflow-heading");
-      g_autofree char *cls = g_strdup_printf ("reflow-h%d",
-                                              CLAMP (fw_block_get_level (block), 1, 6));
+      int lvl = CLAMP (fw_block_get_level (block), 1, 6);
+      g_autofree char *cls = g_strdup_printf ("reflow-h%d", lvl);
       gtk_widget_add_css_class (text_w, cls);
+      /* H1 centers — chapter-title typography. Other heading levels
+       * keep left alignment to read like sub-headings. */
+      if (lvl == 1) {
+        gtk_label_set_justify (label, GTK_JUSTIFY_CENTER);
+        gtk_label_set_xalign (label, 0.5);
+      } else {
+        gtk_label_set_justify (label, GTK_JUSTIFY_LEFT);
+      }
       gtk_label_set_use_markup (label, TRUE);
       gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
       break;
     }
     case FW_BLOCK_CODE:
       gtk_widget_add_css_class (text_w, "reflow-code");
+      /* Code shouldn't be justified — preserves intra-line spacing. */
+      gtk_label_set_justify (label, GTK_JUSTIFY_LEFT);
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, fw_block_get_text (block) ?: "");
       break;
@@ -348,16 +366,29 @@ build_reflow_css (FwReflowView *self)
     "  font-size: %.1fpt;"
     "  line-height: %.2f;"
     "  margin-top: 0;"
-    "  margin-bottom: 0.4em;"
+    "  margin-bottom: 0.5em;"
     "}"
     ".reflow-heading {"
     "  font-weight: bold;"
-    "  line-height: 1.15;"
+    "  line-height: 1.2;"
     "  margin-top: 1.0em;"
-    "  margin-bottom: 0.4em;"
+    "  margin-bottom: 0.5em;"
     "}"
-    ".reflow-h1 { font-size: %.1fpt; }"
-    ".reflow-h2 { font-size: %.1fpt; }"
+    /* Chapter-title (h1) gets generous breathing room and bigger
+     * font — foliate's `body > section > .title { margin: 3em 0 }`
+     * idiom. Centering is handled programmatically via
+     * gtk_label_set_justify since GTK CSS doesn't propagate
+     * text-align onto Pango layouts. */
+    ".reflow-h1 {"
+    "  font-size: %.1fpt;"
+    "  margin-top: 2.0em;"
+    "  margin-bottom: 1.2em;"
+    "}"
+    ".reflow-h2 {"
+    "  font-size: %.1fpt;"
+    "  margin-top: 1.4em;"
+    "  margin-bottom: 0.6em;"
+    "}"
     ".reflow-h3 { font-size: %.1fpt; }"
     ".reflow-h4 { font-size: %.1fpt; }"
     ".reflow-h5 { font-size: %.1fpt; }"
@@ -365,10 +396,14 @@ build_reflow_css (FwReflowView *self)
     ".reflow-code {"
     "  font-size: %.1fpt;"
     "  line-height: %.2f;"
+    "  margin-top: 0.6em;"
+    "  margin-bottom: 0.6em;"
     "}"
     ".reflow-blockquote {"
     "  font-size: %.1fpt;"
     "  line-height: %.2f;"
+    "  margin-top: 0.6em;"
+    "  margin-bottom: 0.6em;"
     "}",
     size, line_height,
     h1, h2, h3, h4, size, size,
