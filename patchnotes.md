@@ -2,6 +2,37 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.59.0 (2026-05-02)
+
+*MOBI / KF7 TOC sidebar.* The reflow sidebar now populates with chapter entries for KF7 MOBIs, resolved through MOBI's `filepos` byte-offset link mechanism. Foliate-derived from `MOBI6.getGuide` + the `<a filepos>` walk in its `init`.
+
+### filepos pre-scan + synthetic anchors
+
+`mobi_collect_filepos` scans the decompressed body for every `filepos="N"` value via a manual state machine (no regex). Unique values land in a sorted `GArray<guint32>`. `mobi_inject_filepos_markers` builds a modified body with `<span id="filepos_N"></span>` markers spliced in at each byte offset (in ascending order, so earlier insertions don't shift later ones). The modified body goes to `htmlReadMemory`. The walker's new `register_inline_id` captures every element's `id` attribute — block-level or nested — and registers it in the anchors hash pointing at the next-to-be-pushed block index. Synthetic markers thus become resolvable via `find_block_by_anchor("filepos_N")`.
+
+### Two-pass TOC extraction
+
+After body walk, `mobi_walk_guide` runs:
+
+1. **`<reference type="toc" filepos="N" title="X">`** — typical `<guide>` chapter list. Skips `type="cover"` / `type="copyright-page"` (those are navigational markers, not chapter entries).
+2. **Fallback: `<a filepos>` everywhere** — fires when the guide produced ≤ 1 entry (i.e. just the cover) AND the doc actually carries filepos refs. Some KF7 books encode their TOC purely as in-body links; without this fallback those would have empty sidebars.
+
+TOC anchors are `filepos_N` strings; clicking a sidebar entry calls `fw_reflow_view_scroll_to_anchor("filepos_N")` → `fw_reflow_document_find_block_by_anchor` returns the block index → page-jump.
+
+### Verified
+
+- *The Broken God* (Ryder-Hanrahan, KF7) — 115 filepos markers in source, fallback path now surfaces all in-body chapter links.
+- *Fall of Kings* (Gemmell, KF7) — no filepos refs in source (book has no internal nav structure); empty TOC, as expected.
+- *Datapoint* (Wood, AZW3) — KF8 doesn't use filepos; empty TOC. AZW3 TOC needs KF8-specific extraction (NCX or kf8.guide record), tracked separately.
+- ASan + UBSan clean. Stress tests pass.
+
+### Deferred
+
+- **AZW3 / KF8 TOC** — needs INDX-based NCX extraction (foliate uses `kf8.indx` or `kf8.guide`). Different mechanism from KF7's filepos. Real follow-up; not just an extension of this slice.
+- **Hierarchical TOC** — foliate builds nested levels by reading `<a>` indent in the TOC section; we emit a flat list. Cosmetic; tracked.
+
+---
+
 ## v0.58.0 (2026-05-02)
 
 *Cover pages now fill the viewport.* Reflow documents (MOBI / AZW3 / EPUB / FB2) where the format identifies a cover image now render that cover as a full-page first page, not a thumbnail capped at 600 px.

@@ -627,12 +627,38 @@ append_text_escaped (GString *out, const char *text)
 
 static void walk_xml_node (WalkCtx *cc, xmlNode *node);
 
+/* Register an `id` attribute on any element (block or nested) as
+ * an anchor pointing at the next-to-be-pushed block index. After
+ * the synthetic `<span id="filepos_N">` markers from the
+ * pre-scan land mid-paragraph, this is how `filepos:N` resolves
+ * in TOC navigation. */
+static void
+register_inline_id (WalkCtx *cc, xmlNode *n)
+{
+  for (xmlAttr *a = n->properties; a; a = a->next) {
+    if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
+      const char *val = (const char *)a->children->content;
+      if (val && *val) {
+        guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks));
+        /* +1 because anchors are stored 1-based (0 = "not found"). */
+        g_hash_table_insert (cc->anchors, g_strdup (val),
+                             GUINT_TO_POINTER (pos + 1));
+      }
+      return;
+    }
+  }
+}
+
 static void
 handle_element (WalkCtx *cc, xmlNode *n)
 {
   const char *name = (const char *)n->name;
   /* Make a lowercase copy for case-insensitive matching. */
   g_autofree char *lname = g_ascii_strdown (name, -1);
+
+  /* Capture id attributes on every element so synthetic
+   * `<span id="filepos_N">` markers land in the anchor map. */
+  register_inline_id (cc, n);
 
   /* MOBI break / section markers — push directly. */
   if (g_str_equal (lname, "mbp:pagebreak") ||
@@ -800,6 +826,226 @@ walk_xml_node (WalkCtx *cc, xmlNode *node)
   }
 }
 
+/* ── filepos anchors + guide TOC ─────────────────────────────────
+ *
+ * MOBI uses byte offsets ("filepos") to point at link targets in
+ * the original decompressed body. Foliate handles this by:
+ *
+ *   1. Scanning the body for every `filepos="N"` value
+ *   2. Inserting a synthetic `<a id="filepos${N}"></a>` at each
+ *      byte offset N
+ *   3. After parse, the DOM has anchors at every filepos target
+ *
+ * We do the same — except we use `<span>` for the marker since
+ * `<a>` would become a Pango `<u>` span in our walker. The walker
+ * captures every element id (via register_inline_id) so the
+ * synthetic markers land in the anchors hash with key `filepos_N`.
+ *
+ * `<reference type="toc" filepos="N" title="X">` elements (typically
+ * inside `<guide>`) become TOC entries with anchor `filepos_N`.
+ */
+
+static int
+cmp_uint (gconstpointer a, gconstpointer b)
+{
+  guint32 av = *(const guint32 *) a, bv = *(const guint32 *) b;
+  return (av > bv) - (av < bv);
+}
+
+/* Scan `body` for unique filepos numeric values. */
+static GArray *
+mobi_collect_filepos (const char *body, gsize len)
+{
+  GArray *out = g_array_new (FALSE, FALSE, sizeof (guint32));
+  GHashTable *seen = g_hash_table_new (g_direct_hash, g_direct_equal);
+
+  const char *end = body + len;
+  const char *p = body;
+  const char *needle = "filepos=";
+  gsize nlen = 8;
+
+  while (p + nlen <= end) {
+    p = g_strstr_len (p, end - p, needle);
+    if (!p) break;
+    p += nlen;
+    char q = 0;
+    if (p < end && (*p == '"' || *p == '\'')) { q = *p; p++; }
+    (void) q;
+
+    guint32 val = 0;
+    const char *digits = p;
+    while (p < end && *p >= '0' && *p <= '9') {
+      if (val > UINT32_MAX / 10) { p = end; break; }
+      val = val * 10 + (guint32)(*p - '0');
+      p++;
+    }
+    if (p > digits) {
+      gpointer key = GUINT_TO_POINTER (val);
+      if (!g_hash_table_contains (seen, key)) {
+        g_hash_table_add (seen, key);
+        g_array_append_val (out, val);
+      }
+    }
+  }
+  g_hash_table_destroy (seen);
+  g_array_sort (out, cmp_uint);
+  return out;
+}
+
+/* Build a new body by inserting `<span id="filepos_N"></span>`
+ * markers at each filepos byte offset (in ascending order, so
+ * earlier insertions don't shift later positions). */
+static char *
+mobi_inject_filepos_markers (const char *body, gsize body_len,
+                              GArray *positions, gsize *out_len)
+{
+  if (!positions || positions->len == 0) {
+    *out_len = body_len;
+    return g_memdup2 (body, body_len + 1);
+  }
+
+  GString *out = g_string_sized_new (body_len + positions->len * 32);
+  gsize cursor = 0;
+  for (guint i = 0; i < positions->len; i++) {
+    guint32 pos = g_array_index (positions, guint32, i);
+    if (pos > body_len) pos = body_len;
+    if (pos > cursor)
+      g_string_append_len (out, body + cursor, pos - cursor);
+    g_string_append_printf (out, "<span id=\"filepos_%u\"></span>", pos);
+    cursor = pos;
+  }
+  if (cursor < body_len)
+    g_string_append_len (out, body + cursor, body_len - cursor);
+  *out_len = out->len;
+  return g_string_free (out, FALSE);
+}
+
+/* Concatenate descendant text content of a node, normalised to
+ * single-space whitespace and trimmed. Used for TOC labels. */
+static char *
+mobi_node_text (xmlNode *node)
+{
+  GString *out = g_string_new (NULL);
+  for (xmlNode *c = node; c; c = c->next) {
+    if (c->type == XML_TEXT_NODE && c->content)
+      g_string_append (out, (const char *)c->content);
+    else if (c->type == XML_ELEMENT_NODE) {
+      g_autofree char *inner = mobi_node_text (c->children);
+      if (inner) g_string_append (out, inner);
+    }
+  }
+  /* Squash whitespace runs to single space. */
+  GString *sq = g_string_new (NULL);
+  gboolean prev_ws = TRUE;
+  for (gsize i = 0; i < out->len; i++) {
+    char ch = out->str[i];
+    if (g_ascii_isspace (ch)) {
+      if (!prev_ws) g_string_append_c (sq, ' ');
+      prev_ws = TRUE;
+    } else {
+      g_string_append_c (sq, ch);
+      prev_ws = FALSE;
+    }
+  }
+  while (sq->len > 0 && g_ascii_isspace (sq->str[sq->len - 1]))
+    g_string_truncate (sq, sq->len - 1);
+  g_string_free (out, TRUE);
+  return g_string_free (sq, FALSE);
+}
+
+/* Walk for `<reference type="toc" filepos="N" title=X>` — typical
+ * `<guide>` chapter list. Returns count emitted. */
+static guint
+mobi_walk_references (FwReflowDocumentMobi *self, xmlNode *node)
+{
+  guint count = 0;
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) {
+      if (n->children) count += mobi_walk_references (self, n->children);
+      continue;
+    }
+    if (g_ascii_strcasecmp ((const char *)n->name, "reference") == 0) {
+      const char *title = NULL, *filepos = NULL, *type = NULL;
+      for (xmlAttr *a = n->properties; a; a = a->next) {
+        if (!a->children) continue;
+        const char *aname = (const char *)a->name;
+        const char *aval  = (const char *)a->children->content;
+        if (g_ascii_strcasecmp (aname, "title") == 0)        title   = aval;
+        else if (g_ascii_strcasecmp (aname, "filepos") == 0) filepos = aval;
+        else if (g_ascii_strcasecmp (aname, "type") == 0)    type    = aval;
+      }
+      /* Skip cover/copyright references — they're navigational
+       * markers, not chapter entries. Only emit when we have a
+       * non-cover type (or no type at all). */
+      if (type && (g_ascii_strcasecmp (type, "cover") == 0 ||
+                   g_ascii_strcasecmp (type, "copyright-page") == 0)) {
+        if (n->children) count += mobi_walk_references (self, n->children);
+        continue;
+      }
+      if (title && filepos && *title && *filepos) {
+        g_autofree char *anchor = g_strdup_printf ("filepos_%s", filepos);
+        FwReflowTocItem *item = fw_reflow_toc_item_new (title, anchor);
+        g_list_store_append (self->toc, item);
+        g_object_unref (item);
+        count++;
+      }
+    }
+    if (n->children) count += mobi_walk_references (self, n->children);
+  }
+  return count;
+}
+
+/* Fallback: walk `<a filepos="N">link text</a>` elements anywhere
+ * in the doc. Used when the `<guide>` is empty or missing. Some
+ * MOBIs encode their TOC purely as in-body links. */
+static guint
+mobi_walk_a_filepos (FwReflowDocumentMobi *self, xmlNode *node)
+{
+  guint count = 0;
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) {
+      if (n->children) count += mobi_walk_a_filepos (self, n->children);
+      continue;
+    }
+    if (g_ascii_strcasecmp ((const char *)n->name, "a") == 0) {
+      const char *filepos = NULL;
+      for (xmlAttr *a = n->properties; a; a = a->next) {
+        if (a->children &&
+            g_ascii_strcasecmp ((const char *)a->name, "filepos") == 0) {
+          filepos = (const char *)a->children->content;
+          break;
+        }
+      }
+      if (filepos && *filepos) {
+        g_autofree char *label = mobi_node_text (n->children);
+        if (label && *label) {
+          g_autofree char *anchor = g_strdup_printf ("filepos_%s", filepos);
+          FwReflowTocItem *item = fw_reflow_toc_item_new (label, anchor);
+          g_list_store_append (self->toc, item);
+          g_object_unref (item);
+          count++;
+        }
+      }
+    }
+    if (n->children) count += mobi_walk_a_filepos (self, n->children);
+  }
+  return count;
+}
+
+static void
+mobi_walk_guide (FwReflowDocumentMobi *self, xmlNode *root, gboolean has_filepos)
+{
+  guint refs = mobi_walk_references (self, root);
+  /* If `<guide>` produced just a stub (one or zero entries — typical
+   * when only a "cover" reference is present) and the doc carries
+   * in-body filepos markers, fall back to walking `<a filepos>` so
+   * the chapter list still surfaces. */
+  if (refs <= 1 && has_filepos) {
+    g_list_store_remove_all (self->toc);   /* drop the stub */
+    mobi_walk_a_filepos (self, root);
+  }
+}
+
 /* ── Open path ────────────────────────────────────────────────── */
 
 static gboolean
@@ -851,11 +1097,18 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     return TRUE;
   }
 
+  /* Pre-scan body for filepos values, inject synthetic anchor
+   * markers so libxml2's tree carries them as id-bearing nodes. */
+  g_autoptr (GArray) filepos = mobi_collect_filepos (m->body, m->body_len);
+  gsize body_len2 = 0;
+  g_autofree char *body2 = mobi_inject_filepos_markers (
+    m->body, m->body_len, filepos, &body_len2);
+
   /* libxml2 HTML mode — tolerant of malformed markup. The flags
    * RECOVER (continue on error) + NOERROR / NOWARNING (don't print
    * to stderr) match Foliate's DOMParser semantics. */
   htmlDocPtr xdoc = htmlReadMemory (
-    m->body, (int) m->body_len,
+    body2, (int) body_len2,
     NULL, "UTF-8",
     HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
     HTML_PARSE_NONET    | HTML_PARSE_NOBLANKS);
@@ -878,6 +1131,14 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   g_string_free (cc.accum, TRUE);
   g_clear_pointer (&cc.pending_anchor, g_free);
   g_ptr_array_free (cc.open_inlines, TRUE);
+
+  /* Guide TOC — walk the doc for `<reference>` elements anywhere
+   * (typically inside `<guide>`). After body walk so anchors are
+   * registered first; the TOC entries point at filepos_N anchors
+   * which now resolve via fw_reflow_document_find_block_by_anchor. */
+  mobi_walk_guide (self, xmlDocGetRootElement (xdoc),
+                   filepos && filepos->len > 0);
+
   xmlFreeDoc (xdoc);
 
   fw_mobi_parsed_free (m);
