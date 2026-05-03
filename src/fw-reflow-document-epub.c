@@ -299,13 +299,22 @@ opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
       oc->cover_id = g_strdup (meta_content);
   }
 
-  /* Metadata scalars: dc:title, dc:creator, dc:language, etc. */
+  /* Metadata scalars. Foliate captures the full Dublin Core set
+   * plus EPUB 3 refines (language alternatives, contributor roles
+   * via MARC relators, etc.). We capture the canonical text-content
+   * subset; the exhaustive structured form is out of scope. */
   if (oc->in_metadata) {
-    if (g_str_equal (name, "dc:title")    || g_str_equal (name, "title") ||
-        g_str_equal (name, "dc:creator")  || g_str_equal (name, "creator") ||
-        g_str_equal (name, "dc:language") || g_str_equal (name, "language") ||
-        g_str_equal (name, "dc:publisher")|| g_str_equal (name, "publisher") ||
-        g_str_equal (name, "dc:date")     || g_str_equal (name, "date")) {
+    if (g_str_equal (name, "dc:title")       || g_str_equal (name, "title") ||
+        g_str_equal (name, "dc:creator")     || g_str_equal (name, "creator") ||
+        g_str_equal (name, "dc:contributor") || g_str_equal (name, "contributor") ||
+        g_str_equal (name, "dc:publisher")   || g_str_equal (name, "publisher") ||
+        g_str_equal (name, "dc:date")        || g_str_equal (name, "date") ||
+        g_str_equal (name, "dc:language")    || g_str_equal (name, "language") ||
+        g_str_equal (name, "dc:identifier")  || g_str_equal (name, "identifier") ||
+        g_str_equal (name, "dc:description") || g_str_equal (name, "description") ||
+        g_str_equal (name, "dc:subject")     || g_str_equal (name, "subject") ||
+        g_str_equal (name, "dc:rights")      || g_str_equal (name, "rights") ||
+        g_str_equal (name, "dc:source")      || g_str_equal (name, "source")) {
       if (!oc->meta_text) oc->meta_text = g_string_new (NULL);
       g_string_truncate (oc->meta_text, 0);
       oc->meta_key = name;
@@ -329,21 +338,42 @@ opf_end (GMarkupParseContext *ctx G_GNUC_UNUSED,
            g_ascii_isspace (oc->meta_text->str[oc->meta_text->len - 1]))
       g_string_truncate (oc->meta_text, oc->meta_text->len - 1);
 
-    /* Map dc:title → title, dc:creator → author, etc. */
+    /* Map each dc:foo → canonical key. */
     const char *canonical = oc->meta_key;
-    if      (g_str_has_suffix (oc->meta_key, "title"))     canonical = "title";
-    else if (g_str_has_suffix (oc->meta_key, "creator"))   canonical = "author";
+    if      (g_str_has_suffix (oc->meta_key, "title"))       canonical = "title";
+    else if (g_str_has_suffix (oc->meta_key, "creator"))     canonical = "author";
+    else if (g_str_has_suffix (oc->meta_key, "contributor")) canonical = "contributor";
     else if (g_str_has_suffix (oc->meta_key, "language") ||
-             g_str_has_suffix (oc->meta_key, "lang"))      canonical = "lang";
-    else if (g_str_has_suffix (oc->meta_key, "publisher")) canonical = "publisher";
-    else if (g_str_has_suffix (oc->meta_key, "date"))      canonical = "date";
+             g_str_has_suffix (oc->meta_key, "lang"))        canonical = "lang";
+    else if (g_str_has_suffix (oc->meta_key, "publisher"))   canonical = "publisher";
+    else if (g_str_has_suffix (oc->meta_key, "date"))        canonical = "date";
+    else if (g_str_has_suffix (oc->meta_key, "identifier"))  canonical = "identifier";
+    else if (g_str_has_suffix (oc->meta_key, "description")) canonical = "description";
+    else if (g_str_has_suffix (oc->meta_key, "subject"))     canonical = "subject";
+    else if (g_str_has_suffix (oc->meta_key, "rights"))      canonical = "rights";
+    else if (g_str_has_suffix (oc->meta_key, "source"))      canonical = "source";
 
-    /* First-write-wins: many EPUBs declare dc:creator multiple times. */
-    if (oc->meta_text->len > 0 &&
-        !g_hash_table_contains (oc->out_metadata, canonical))
-      g_hash_table_insert (oc->out_metadata,
-                           g_strdup (canonical),
-                           g_strdup (oc->meta_text->str));
+    /* First-write-wins for most fields; subjects accumulate
+     * comma-separated since real EPUBs typically declare several. */
+    if (oc->meta_text->len > 0) {
+      if (g_str_equal (canonical, "subject")) {
+        const char *prev = g_hash_table_lookup (oc->out_metadata, canonical);
+        if (prev && *prev) {
+          g_autofree char *combined =
+            g_strdup_printf ("%s, %s", prev, oc->meta_text->str);
+          g_hash_table_insert (oc->out_metadata,
+                               g_strdup (canonical), g_steal_pointer (&combined));
+        } else {
+          g_hash_table_insert (oc->out_metadata,
+                               g_strdup (canonical),
+                               g_strdup (oc->meta_text->str));
+        }
+      } else if (!g_hash_table_contains (oc->out_metadata, canonical)) {
+        g_hash_table_insert (oc->out_metadata,
+                             g_strdup (canonical),
+                             g_strdup (oc->meta_text->str));
+      }
+    }
 
     g_string_truncate (oc->meta_text, 0);
     oc->meta_key = NULL;
@@ -1204,6 +1234,29 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
 
   if (!read_zip_entries (self, path, error))
     return FALSE;
+
+  /* DRM detection — META-INF/encryption.xml indicates the EPUB is
+   * encrypted (Adobe ADEPT, Apple FairPlay, etc.). Foliate's stack
+   * surfaces a clear error rather than opening to garbled content.
+   * Framework opens the doc successfully but the only visible block
+   * is a clear explanation; user knows what's up at a glance. */
+  if (g_hash_table_contains (self->zip, "META-INF/encryption.xml")) {
+    g_hash_table_insert (self->metadata, g_strdup ("title"),
+                         g_strdup ("DRM-protected EPUB"));
+    g_hash_table_insert (self->metadata, g_strdup ("format"),
+                         g_strdup ("EPUB (encrypted)"));
+    static const char *drm_text =
+      "<b>This book is DRM-protected.</b>\n\n"
+      "Framework does not support DRM-encrypted EPUBs. "
+      "Convert via Calibre's DeDRM plugin, or open with a "
+      "DRM-aware reader.";
+    FwBlock *msg = fw_block_new (FW_BLOCK_PARAGRAPH, 0, drm_text,
+                                  NULL, NULL, 0);
+    g_list_store_append (self->blocks, msg);
+    g_object_unref (msg);
+    self->path = g_strdup (path);
+    return TRUE;
+  }
 
   /* Container → OPF path */
   g_autofree char *opf_path = find_opf_path (self, error);

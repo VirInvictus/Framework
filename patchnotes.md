@@ -2,6 +2,50 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.60.0 (2026-05-02)
+
+*EPUB metadata expansion + DRM-encrypted graceful detection.* Two related EPUB-side improvements bundled in one slice.
+
+### Comprehensive `dc:` extraction
+
+OPF parser now captures the full canonical Dublin Core text-content set:
+
+| dc:* tag | Canonical metadata key |
+|---|---|
+| `dc:title` | `title` |
+| `dc:creator` | `author` |
+| `dc:contributor` | `contributor` |
+| `dc:publisher` | `publisher` |
+| `dc:date` | `date` |
+| `dc:language` | `lang` |
+| `dc:identifier` | `identifier` (UUID, ISBN, ASIN — first wins) |
+| `dc:description` | `description` |
+| `dc:subject` | `subject` (multiple are joined with `, `) |
+| `dc:rights` | `rights` |
+| `dc:source` | `source` |
+
+(Foliate's `getMetadata` is much more sophisticated — it handles language alternatives, MARC relator codes for contributor roles, EPUB 3 `meta refines`, scheme attributes. Our port captures the canonical text-content subset; the structured form is out of scope until the doc-properties dialog needs it.)
+
+`subject` accumulates with `", "` joins (real EPUBs typically declare several); other fields keep first-write-wins semantics matching the existing convention.
+
+### DRM-encrypted graceful
+
+EPUBs with `META-INF/encryption.xml` (Adobe ADEPT, Apple FairPlay, etc.) previously fell through to MuPDF, which would either fail or render garbled content. Now `epub_open` detects the file at the top of the open path and opens the document successfully with a single explanatory paragraph as visible content:
+
+> **This book is DRM-protected.**
+>
+> Framework does not support DRM-encrypted EPUBs. Convert via Calibre's DeDRM plugin, or open with a DRM-aware reader.
+
+The metadata title becomes `"DRM-protected EPUB"` and format is `"EPUB (encrypted)"`. User sees the message immediately on open; no alert dialog, no garbled chapters, no MuPDF fall-through.
+
+### Verified
+
+- Existing 5 EPUB corpus opens unchanged (no DRM in test set).
+- ASan + UBSan clean.
+- All 5 stress tests pass in isolation.
+
+---
+
 ## v0.59.0 (2026-05-02)
 
 *MOBI / KF7 TOC sidebar.* The reflow sidebar now populates with chapter entries for KF7 MOBIs, resolved through MOBI's `filepos` byte-offset link mechanism. Foliate-derived from `MOBI6.getGuide` + the `<a filepos>` walk in its `init`.
