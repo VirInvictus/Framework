@@ -54,6 +54,237 @@ count_unset_end (guint32 x)
   return c;
 }
 
+/* ── HuffDic decompressor (compression code 17480) ────────────────
+ *
+ * Port of foliate-js's huffcdic (.foliate-js/mobi.js). Used by older
+ * Mobipocket files (modern Calibre output ships PalmDOC). The HUFF
+ * record carries two Huffman tables; CDIC records carry the
+ * dictionary entries that codes resolve to. Some dictionary entries
+ * are themselves HuffDic-encoded — handle by recursively expanding
+ * and caching back into the dictionary slot.
+ */
+
+typedef struct {
+  guint8  terminate;
+  guint8  code_length;
+  guint32 value;
+} HdT1;
+
+typedef struct {
+  guint32 mincode;
+  guint32 value;
+} HdT2;
+
+typedef struct {
+  guint8  *data;
+  gsize    len;
+  gboolean decompressed;
+} HdEntry;
+
+typedef struct {
+  HdT1     table1[256];
+  HdT2     table2[33];   /* 1-indexed; slot 0 unused */
+  HdEntry *dict;
+  guint32  num_entries;
+} HuffCdic;
+
+static guint32
+hd_read32_bits (const guchar *data, gsize len, gsize bit_pos)
+{
+  gsize start_byte = bit_pos >> 3;
+  gsize end        = bit_pos + 32;
+  gsize end_byte   = end >> 3;
+  guint64 bits = 0;
+  for (gsize i = start_byte; i <= end_byte; i++) {
+    guint8 b = (i < len) ? data[i] : 0;
+    bits = (bits << 8) | b;
+  }
+  guint shift = 8u - (guint) (end & 7u);
+  return (guint32) ((bits >> shift) & 0xFFFFFFFFu);
+}
+
+static void
+huffcdic_free (HuffCdic *hd)
+{
+  if (!hd) return;
+  if (hd->dict) {
+    for (guint32 i = 0; i < hd->num_entries; i++)
+      g_free (hd->dict[i].data);
+    g_free (hd->dict);
+  }
+  g_free (hd);
+}
+
+static HuffCdic *
+huffcdic_build (const guchar *raw, gsize raw_len,
+                const gsize *roff, guint16 record_count,
+                guint32 huff_idx, guint32 num_records,
+                GError **error)
+{
+  if (huff_idx == 0 || huff_idx >= record_count || num_records < 2) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: invalid huffcdic range (idx=%u num=%u)",
+                 huff_idx, num_records);
+    return NULL;
+  }
+  gsize hr_off = roff[huff_idx];
+  gsize hr_len = roff[huff_idx + 1] - hr_off;
+  if (hr_off + hr_len > raw_len || hr_len < 16 ||
+      memcmp (raw + hr_off, "HUFF", 4) != 0) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: bad HUFF magic");
+    return NULL;
+  }
+  guint32 off1 = read_be32 (raw + hr_off + 8);
+  guint32 off2 = read_be32 (raw + hr_off + 12);
+  if ((gsize) off1 + 256u * 4u > hr_len ||
+      (gsize) off2 + 32u  * 8u > hr_len) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: HUFF tables out of range");
+    return NULL;
+  }
+
+  HuffCdic *hd = g_new0 (HuffCdic, 1);
+  for (int i = 0; i < 256; i++) {
+    guint32 x = read_be32 (raw + hr_off + off1 + i * 4);
+    hd->table1[i].terminate   = (x & 0x80u) ? 1 : 0;
+    hd->table1[i].code_length = x & 0x1Fu;
+    hd->table1[i].value       = x >> 8;
+  }
+  for (int i = 0; i < 32; i++) {
+    hd->table2[i + 1].mincode = read_be32 (raw + hr_off + off2 + i * 8);
+    hd->table2[i + 1].value   = read_be32 (raw + hr_off + off2 + i * 8 + 4);
+  }
+
+  guint32 first_cdic = huff_idx + 1;
+  if (first_cdic >= record_count) {
+    huffcdic_free (hd);
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: no CDIC records present");
+    return NULL;
+  }
+  gsize c0_off = roff[first_cdic];
+  gsize c0_len = roff[first_cdic + 1] - c0_off;
+  if (c0_len < 16 || memcmp (raw + c0_off, "CDIC", 4) != 0) {
+    huffcdic_free (hd);
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: bad CDIC magic");
+    return NULL;
+  }
+  guint32 cdic_total_entries = read_be32 (raw + c0_off + 8);
+  if (cdic_total_entries == 0 || cdic_total_entries > (1u << 24)) {
+    huffcdic_free (hd);
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "mobi: CDIC numEntries=%u out of range",
+                 cdic_total_entries);
+    return NULL;
+  }
+  hd->dict        = g_new0 (HdEntry, cdic_total_entries);
+  hd->num_entries = cdic_total_entries;
+
+  guint32 written = 0;
+  for (guint32 ci = 0; ci < num_records - 1; ci++) {
+    guint32 r_idx = first_cdic + ci;
+    if (r_idx >= record_count) break;
+    gsize r_off = roff[r_idx];
+    gsize r_len = roff[r_idx + 1] - r_off;
+    if (r_len < 16 || memcmp (raw + r_off, "CDIC", 4) != 0) {
+      huffcdic_free (hd);
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "mobi: CDIC %u bad magic", ci);
+      return NULL;
+    }
+    guint32 hdr_len  = read_be32 (raw + r_off + 4);
+    guint32 code_len = read_be32 (raw + r_off + 12);
+    if (hdr_len > r_len || code_len > 24) {
+      huffcdic_free (hd);
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "mobi: CDIC %u corrupt header", ci);
+      return NULL;
+    }
+    guint32 cap    = 1u << code_len;
+    guint32 remain = cdic_total_entries - written;
+    guint32 n      = (cap < remain) ? cap : remain;
+
+    const guchar *buf = raw + r_off + hdr_len;
+    gsize         bsz = r_len - hdr_len;
+    for (guint32 i = 0; i < n; i++) {
+      if ((gsize) i * 2 + 2 > bsz) goto cdic_corrupt;
+      guint16 ent_off = read_be16 (buf + i * 2);
+      if ((gsize) ent_off + 2 > bsz) goto cdic_corrupt;
+      guint16 x = read_be16 (buf + ent_off);
+      gsize length = x & 0x7FFFu;
+      gboolean already = (x & 0x8000u) != 0;
+      if ((gsize) ent_off + 2 + length > bsz) goto cdic_corrupt;
+      hd->dict[written].len  = length;
+      hd->dict[written].data = g_memdup2 (buf + ent_off + 2, length);
+      hd->dict[written].decompressed = already;
+      written++;
+    }
+  }
+  /* Entries past `written` stay NULL — dict lookups in that range
+   * fail the bound check in huffcdic_decompress, treated as
+   * truncated input. */
+  return hd;
+
+cdic_corrupt:
+  huffcdic_free (hd);
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+               "mobi: CDIC entry truncated");
+  return NULL;
+}
+
+static gboolean
+huffcdic_decompress (HuffCdic *hd, const guchar *in, gsize in_len,
+                     GString *out, int recurse_depth)
+{
+  if (recurse_depth > 16)
+    return FALSE;
+  gsize bit_len = in_len * 8;
+  for (gsize i = 0; i < bit_len; ) {
+    guint32 bits = hd_read32_bits (in, in_len, i);
+    HdT1 t1 = hd->table1[bits >> 24];
+    guint32 code_length = t1.code_length;
+    guint32 value       = t1.value;
+    if (!t1.terminate) {
+      while (code_length > 0 && code_length <= 32) {
+        guint shift = 32u - code_length;
+        guint32 leading = (code_length == 32) ? bits : (bits >> shift);
+        if (leading >= hd->table2[code_length].mincode) break;
+        code_length++;
+      }
+      if (code_length == 0 || code_length > 32) return FALSE;
+      value = hd->table2[code_length].value;
+    }
+    if (code_length == 0) return FALSE;
+    if (i + code_length > bit_len) break;
+    i += code_length;
+
+    guint shift = 32u - code_length;
+    guint32 leading = (code_length == 32) ? bits : (bits >> shift);
+    guint32 code = value - leading;
+    if (code >= hd->num_entries) return FALSE;
+
+    HdEntry *ent = &hd->dict[code];
+    if (!ent->data) return FALSE;
+    if (!ent->decompressed) {
+      GString *exp = g_string_sized_new (ent->len * 2);
+      if (!huffcdic_decompress (hd, ent->data, ent->len, exp,
+                                recurse_depth + 1)) {
+        g_string_free (exp, TRUE);
+        return FALSE;
+      }
+      gsize new_len = exp->len;
+      g_free (ent->data);
+      ent->data = (guint8 *) g_string_free (exp, FALSE);
+      ent->len  = new_len;
+      ent->decompressed = TRUE;
+    }
+    g_string_append_len (out, (const char *) ent->data, ent->len);
+  }
+  return TRUE;
+}
+
 /* ── PalmDOC LZ77 decompressor — port of decompressPalmDOC ─────
  *
  * foliate-js JavaScript:
@@ -575,12 +806,7 @@ fw_mobi_parse (const char *path, GError **error)
                  "mobi: encrypted (DRM) — not supported");
     return NULL;
   }
-  if (compression == 17480) {
-    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                 "mobi: HuffDic compression — not yet supported");
-    return NULL;
-  }
-  if (compression != 1 && compression != 2) {
+  if (compression != 1 && compression != 2 && compression != 17480) {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                  "mobi: unknown compression %u", compression);
     return NULL;
@@ -666,9 +892,9 @@ fw_mobi_parse (const char *path, GError **error)
                    "mobi: encrypted (DRM) — not supported");
       return NULL;
     }
-    if (compression == 17480) {
+    if (compression != 1 && compression != 2 && compression != 17480) {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                   "mobi: HuffDic compression — not yet supported");
+                   "mobi: unknown compression %u (KF8)", compression);
       return NULL;
     }
     mobi_hdr_len = read_be32 (data + r0 + 20);
@@ -683,6 +909,25 @@ fw_mobi_parse (const char *path, GError **error)
   guint32 trailing_flags = 0;
   if (r0 + 244 <= r0_end)
     trailing_flags = read_be32 (data + r0 + 240);
+
+  /* HuffDic table refs: foliate MOBI_HEADER huffcdic [112,4],
+   * numHuffcdic [116,4]. KF8-relative — add kf8_start for absolute
+   * record indices. Built only if compression == 17480. */
+  HuffCdic *huff = NULL;
+  if (compression == 17480) {
+    guint32 huff_rel    = (r0 + 116 <= r0_end) ? read_be32 (data + r0 + 112) : 0;
+    guint32 num_huffcdic = (r0 + 120 <= r0_end) ? read_be32 (data + r0 + 116) : 0;
+    if (huff_rel == 0 || num_huffcdic == 0) {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "mobi: HuffDic compression but huffcdic refs missing");
+      return NULL;
+    }
+    guint32 huff_abs = kf8_start + huff_rel;
+    huff = huffcdic_build (data, raw_len, roff, record_count,
+                           huff_abs, num_huffcdic, error);
+    if (!huff)
+      return NULL;
+  }
 
   /* resourceStart: foliate [108, 4]. KF8-relative; add kf8_start to
    * get an absolute file record index. */
@@ -750,10 +995,22 @@ fw_mobi_parse (const char *path, GError **error)
 
     if (compression == 1) {
       g_string_append_len (body, (const char *) data + off, stripped);
-    } else { /* compression == 2 */
+    } else if (compression == 2) {
       palmdoc_decompress (data + off, stripped, body);
+    } else { /* compression == 17480 — HuffDic */
+      if (!huffcdic_decompress (huff, data + off, stripped, body, 0)) {
+        huffcdic_free (huff);
+        g_string_free (body, TRUE);
+        g_free (meta_title); g_free (meta_author);
+        g_free (meta_publisher); g_free (meta_language);
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "mobi: HuffDic decompression failed at record %u", i);
+        return NULL;
+      }
     }
   }
+  huffcdic_free (huff);
+  huff = NULL;
 
   /* KF8 SKEL + FRAG splice. The decompressed `body` is a packed
    * stream of skeleton bytes + fragment bytes; we need to splice

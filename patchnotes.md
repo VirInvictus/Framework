@@ -2,6 +2,36 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.62.0 (2026-05-02)
+
+*HuffDic-compressed MOBI support (compression code 17480).*
+
+The MOBI parser previously rejected HuffDic-compressed files with `mobi: HuffDic compression — not yet supported`. This is the compression scheme used by older Mobipocket files (modern Calibre output ships PalmDOC/lz77, compression code 2). v0.62 ports foliate-js's `huffcdic` decoder to C and wires it into the existing decompression dispatch.
+
+### Implementation
+
+`src/fw-mobi-parser.c` gains:
+
+* **`HuffCdic` state** holding the two Huffman tables (`table1[256]` indexed by leading byte, `table2[33]` by code length) and the dictionary built from CDIC records.
+* **`huffcdic_build`** — reads the HUFF record (magic `HUFF`, 32-bit table offsets at +8 and +12), populates both tables, then walks `numHuffcdic - 1` CDIC records (magic `CDIC`, length / numEntries / codeLength fields) to construct the dictionary. Each entry's `decompressed` flag (`x & 0x8000` of the per-entry size word) gets preserved for later recursive expansion.
+* **`huffcdic_decompress`** — reads 32 bits from the input bitstream, looks up the leading byte in `table1`; on terminate, advances by `code_length` and emits the dictionary entry; otherwise walks `table2` upward in code length until the leading bits clear `mincode`. Dictionary entries that are themselves HuffDic-compressed (the recursive case) get expanded on first hit and cached back into the dictionary slot. Recursion depth capped at 16 to fail fast on pathological loops.
+* **`hd_read32_bits`** — bit-aligned 32-bit BE read using a `guint64` accumulator across up to 5 source bytes, matching foliate's `read32Bits`.
+
+The text-decompression loop in the parser dispatches on `compression`: `1` (raw), `2` (PalmDOC, existing path), or `17480` (HuffDic, new path). Both KF7 and KF8 (combo / pure AZW3) compression-rejection guards are replaced — they now accept HuffDic and only reject genuinely unknown codes.
+
+`huffcdic` and `numHuffcdic` MOBI-header fields (offsets 112 and 116, KF8-relative) are read after the optional KF8 boundary re-base, so combo-mode files work the same as KF7-only.
+
+### Verified
+
+* All 11 existing MOBI/AZW3 corpus files still open unchanged. The HuffDic codepath is gated on `compression == 17480` and untouched for PalmDOC inputs.
+* ASan + UBSan clean across MOBI corpus sample.
+
+### Caveat
+
+Brandon's tree contains zero HuffDic-compressed files (modern Calibre output is universally PalmDOC). The implementation is a faithful port of foliate-js's reference algorithm and matches the published Mobipocket / KF7 spec, but end-to-end smoke-testing against a real HuffDic file is pending. If a HuffDic MOBI fails to open, the decoder error reports which record failed.
+
+---
+
 ## v0.61.0 (2026-05-02)
 
 *Reflow typography polish — reading-app feel for EPUB / MOBI / AZW3 / FB2 / TXT.*
