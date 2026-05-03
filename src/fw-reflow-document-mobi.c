@@ -465,6 +465,7 @@ typedef struct {
   gboolean     accum_active;
   FwBlockKind  accum_kind;
   int          accum_level;
+  guint        accum_flags;     /* extra FW_BLOCK_FLAG_* bits */
   GString     *accum;
   char        *pending_anchor;
 
@@ -474,6 +475,11 @@ typedef struct {
    * multiple `<p>`s, common in real HTML), we can auto-close on
    * flush and re-open on the next block. */
   GPtrArray   *open_inlines;
+
+  /* Ordered-list nesting. Each element is the next number to emit
+   * (1+) for an `<ol>`; 0 = `<ul>` (unordered). Top-of-stack is the
+   * innermost list. */
+  GArray      *ol_stack;
 } WalkCtx;
 
 static int
@@ -555,7 +561,7 @@ flush_accum (WalkCtx *cc)
   if (cc->accum->len > 0) {
     FwBlock *b = fw_block_new (cc->accum_kind, cc->accum_level,
                                cc->accum->str, NULL,
-                               cc->pending_anchor, 0);
+                               cc->pending_anchor, cc->accum_flags);
     g_list_store_append (cc->blocks, b);
     if (cc->pending_anchor) {
       guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
@@ -567,6 +573,7 @@ flush_accum (WalkCtx *cc)
   g_string_truncate (cc->accum, 0);
   g_clear_pointer (&cc->pending_anchor, g_free);
   cc->accum_level = 0;
+  cc->accum_flags = 0;
 }
 
 static void
@@ -715,9 +722,31 @@ handle_element (WalkCtx *cc, xmlNode *n)
     flush_accum (cc);
     return;
   }
+  if (g_str_equal (lname, "ul") || g_str_equal (lname, "ol")) {
+    int slot = g_str_equal (lname, "ol") ? 1 : 0;
+    g_array_append_val (cc->ol_stack, slot);
+    walk_xml_node (cc, n->children);
+    g_array_set_size (cc->ol_stack, cc->ol_stack->len - 1);
+    return;
+  }
   if (g_str_equal (lname, "li")) {
+    int level = 0;
+    if (cc->ol_stack && cc->ol_stack->len > 0) {
+      int *top = &g_array_index (cc->ol_stack, int, cc->ol_stack->len - 1);
+      if (*top > 0) { level = *top; (*top)++; }
+    }
+    start_accum (cc, FW_BLOCK_LIST_ITEM, level, n);
+    walk_xml_node (cc, n->children);
+    flush_accum (cc);
+    return;
+  }
+  if (g_str_equal (lname, "figure")) {
+    walk_xml_node (cc, n->children);
+    return;
+  }
+  if (g_str_equal (lname, "figcaption")) {
     start_accum (cc, FW_BLOCK_PARAGRAPH, 0, n);
-    g_string_append (cc->accum, "•  ");
+    cc->accum_flags |= FW_BLOCK_FLAG_CAPTION;
     walk_xml_node (cc, n->children);
     flush_accum (cc);
     return;
@@ -1125,12 +1154,14 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     .anchors       = self->anchors,
     .accum         = g_string_new (NULL),
     .open_inlines  = g_ptr_array_new (),  /* refs are static strings */
+    .ol_stack      = g_array_new (FALSE, FALSE, sizeof (int)),
   };
   walk_xml_node (&cc, xmlDocGetRootElement (xdoc));
   flush_accum (&cc);
   g_string_free (cc.accum, TRUE);
   g_clear_pointer (&cc.pending_anchor, g_free);
   g_ptr_array_free (cc.open_inlines, TRUE);
+  g_array_free (cc.ol_stack, TRUE);
 
   /* Guide TOC — walk the doc for `<reference>` elements anywhere
    * (typically inside `<guide>`). After body walk so anchors are

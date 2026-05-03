@@ -683,12 +683,17 @@ typedef struct {
   gboolean     accum_active;
   FwBlockKind  accum_kind;
   int          accum_level;
+  guint        accum_flags;     /* extra FW_BLOCK_FLAG_* bits for this block */
   GString     *accum;
   char        *pending_anchor;
   gboolean     chapter_marker_pushed;
   /* Inline-tag stack — handles `<a>` wrapping multiple `<p>`s
    * etc., same shape as the MOBI walker. */
   GPtrArray   *open_inlines;
+  /* Ordered-list nesting. Each element is the next number to emit
+   * for an `<ol>`; 0 = `<ul>` (unordered). Top-of-stack is the
+   * innermost list. */
+  GArray      *ol_stack;
 } EpubWalkCtx;
 
 static const char *
@@ -742,7 +747,7 @@ ewalk_flush (EpubWalkCtx *cc)
 
     FwBlock *b = fw_block_new (cc->accum_kind, cc->accum_level,
                                cc->accum->str, NULL,
-                               cc->pending_anchor, 0);
+                               cc->pending_anchor, cc->accum_flags);
     g_list_store_append (cc->blocks, b);
     if (cc->pending_anchor) {
       guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
@@ -758,6 +763,7 @@ ewalk_flush (EpubWalkCtx *cc)
   g_string_truncate (cc->accum, 0);
   g_clear_pointer (&cc->pending_anchor, g_free);
   cc->accum_level = 0;
+  cc->accum_flags = 0;
 }
 
 static void
@@ -837,9 +843,35 @@ ewalk_handle_element (EpubWalkCtx *cc, xmlNode *n)
     ewalk_flush (cc);
     return;
   }
+  if (g_str_equal (lname, "ul") || g_str_equal (lname, "ol")) {
+    /* Push a counter (1+) for `<ol>` or sentinel 0 for `<ul>`. The
+     * `<li>` handler reads + increments the top of stack. */
+    int slot = g_str_equal (lname, "ol") ? 1 : 0;
+    g_array_append_val (cc->ol_stack, slot);
+    ewalk_node (cc, n->children);
+    g_array_set_size (cc->ol_stack, cc->ol_stack->len - 1);
+    return;
+  }
   if (g_str_equal (lname, "li")) {
+    int level = 0;  /* 0 = bullet, N>0 = "N." */
+    if (cc->ol_stack && cc->ol_stack->len > 0) {
+      int *top = &g_array_index (cc->ol_stack, int, cc->ol_stack->len - 1);
+      if (*top > 0) { level = *top; (*top)++; }
+    }
+    ewalk_start (cc, FW_BLOCK_LIST_ITEM, level, n);
+    ewalk_node (cc, n->children);
+    ewalk_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "figure")) {
+    /* Container — recurse so the inner img + figcaption emit as
+     * separate blocks. */
+    ewalk_node (cc, n->children);
+    return;
+  }
+  if (g_str_equal (lname, "figcaption")) {
     ewalk_start (cc, FW_BLOCK_PARAGRAPH, 0, n);
-    g_string_append (cc->accum, "•  ");
+    cc->accum_flags |= FW_BLOCK_FLAG_CAPTION;
     ewalk_node (cc, n->children);
     ewalk_flush (cc);
     return;
@@ -965,6 +997,7 @@ parse_xhtml_chapter (FwReflowDocumentEpub *self,
     .chapter_path = chapter_path,
     .accum        = g_string_new (NULL),
     .open_inlines = g_ptr_array_new (),
+    .ol_stack     = g_array_new (FALSE, FALSE, sizeof (int)),
   };
 
   ewalk_node (&cc, xmlDocGetRootElement (xdoc));
@@ -973,6 +1006,7 @@ parse_xhtml_chapter (FwReflowDocumentEpub *self,
   g_string_free (cc.accum, TRUE);
   g_clear_pointer (&cc.pending_anchor, g_free);
   g_ptr_array_free (cc.open_inlines, TRUE);
+  g_array_free (cc.ol_stack, TRUE);
   xmlFreeDoc (xdoc);
 }
 

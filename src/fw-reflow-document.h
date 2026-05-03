@@ -29,8 +29,10 @@ typedef enum {
 } FwBlockKind;
 
 /* FwBlock flags — packed into the `flags` GUINT. */
-#define FW_BLOCK_FLAG_COVER   (1u << 0)  /* IMAGE: render full-page */
-#define FW_BLOCK_FLAG_INDENT  (1u << 1)  /* PARAGRAPH: first-line indent */
+#define FW_BLOCK_FLAG_COVER    (1u << 0) /* IMAGE: render full-page */
+#define FW_BLOCK_FLAG_INDENT   (1u << 1) /* PARAGRAPH: first-line indent */
+#define FW_BLOCK_FLAG_CAPTION  (1u << 2) /* PARAGRAPH: rendered as figcaption */
+#define FW_BLOCK_FLAG_DROPCAP  (1u << 3) /* PARAGRAPH: chapter-leading raised cap */
 
 /* ── FwBlock — GObject for use in GListModel ──────────────────────── */
 

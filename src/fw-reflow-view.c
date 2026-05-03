@@ -191,6 +191,13 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
   gtk_widget_remove_css_class (text_w, "reflow-code");
   gtk_widget_remove_css_class (text_w, "reflow-blockquote");
   gtk_widget_remove_css_class (text_w, "reflow-chapter");
+  gtk_widget_remove_css_class (text_w, "reflow-caption");
+  gtk_widget_remove_css_class (text_w, "reflow-hr");
+  for (int hl = 1; hl <= 6; hl++) {
+    char buf[16];
+    g_snprintf (buf, sizeof buf, "reflow-h%d", hl);
+    gtk_widget_remove_css_class (text_w, buf);
+  }
 
   /* Default per-bind alignment. Headings/code override below. */
   gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
@@ -241,12 +248,17 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
       gtk_label_set_text (label, fw_block_get_text (block) ?: "");
       break;
     case FW_BLOCK_LIST_ITEM: {
-      /* Bullet prefix — list-item rendering. Pango markup-safe. */
+      /* Bullet (level==0) or "N." (level>0) prefix. Pango
+       * markup-safe — prefix is plain text inserted before body. */
       gtk_label_set_use_markup (label, TRUE);
       const char *body = fw_block_get_text (block) ?: "";
-      g_autofree char *with_bullet =
-        g_strconcat ("\xe2\x80\xa2\xc2\xa0", body, NULL); /* "• " */
-      gtk_label_set_markup (label, with_bullet);
+      int lvl = fw_block_get_level (block);
+      g_autofree char *with_prefix = NULL;
+      if (lvl > 0)
+        with_prefix = g_strdup_printf ("%d.\xc2\xa0%s", lvl, body);
+      else
+        with_prefix = g_strconcat ("\xe2\x80\xa2\xc2\xa0", body, NULL);
+      gtk_label_set_markup (label, with_prefix);
       break;
     }
     case FW_BLOCK_LIST:
@@ -255,8 +267,41 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
     default: {
       gtk_label_set_use_markup (label, TRUE);
       const char *body = fw_block_get_text (block) ?: "";
-      if (fw_block_get_kind (block) == FW_BLOCK_PARAGRAPH &&
-          (fw_block_get_flags (block) & FW_BLOCK_FLAG_INDENT)) {
+      guint flags = fw_block_get_flags (block);
+      gboolean is_para = fw_block_get_kind (block) == FW_BLOCK_PARAGRAPH;
+      /* Caption — figcaption text. Italic, smaller, centered (CSS
+       * class .reflow-caption). Indent / dropcap don't apply. */
+      if (is_para && (flags & FW_BLOCK_FLAG_CAPTION)) {
+        gtk_widget_add_css_class (text_w, "reflow-caption");
+        gtk_label_set_justify (label, GTK_JUSTIFY_CENTER);
+        gtk_label_set_xalign (label, 0.5);
+        gtk_label_set_markup (label, body);
+        break;
+      }
+      /* Dropcap — chapter-leading paragraph: enlarge the first
+       * grapheme via Pango span. Indent doesn't apply (this IS the
+       * first paragraph after a heading / chapter marker). */
+      if (is_para && (flags & FW_BLOCK_FLAG_DROPCAP)) {
+        const char *p = body;
+        while (*p == '<') {
+          const char *gt = strchr (p, '>');
+          if (!gt) { p = body; break; }
+          p = gt + 1;
+        }
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        if (*p && *p != '&') {
+          const char *next = g_utf8_next_char (p);
+          g_autofree char *out = g_strdup_printf (
+            "%.*s<span size=\"200%%\" weight=\"bold\">%.*s</span>%s",
+            (int) (p - body), body,
+            (int) (next - p), p,
+            next);
+          gtk_label_set_markup (label, out);
+          break;
+        }
+        /* Edge case (entity start, empty body) — fallthrough. */
+      }
+      if (is_para && (flags & FW_BLOCK_FLAG_INDENT)) {
         /* Em-quad first-line indent (U+2003). Pango justification
          * stretches inter-word gaps but leaves the leading em-quad
          * intact, so it reads as a print-style first-line indent. */
@@ -335,6 +380,14 @@ static const char REFLOW_STATIC_CSS[] =
   "    margin-bottom: 1.0em;"
   "    margin-left: 30%;"
   "    margin-right: 30%;"
+  "}"
+  /* Figure caption: smaller italic, centered, slightly muted —
+   * print-typography idiom for figcaption text under an image. */
+  ".reflow-caption {"
+  "    font-style: italic;"
+  "    opacity: 0.75;"
+  "    margin-top: 0.2em;"
+  "    margin-bottom: 0.8em;"
   "}";
 
 static char *
@@ -440,11 +493,16 @@ build_reflow_css (FwReflowView *self)
     "  line-height: %.2f;"
     "  margin-top: 0.6em;"
     "  margin-bottom: 0.6em;"
+    "}"
+    ".reflow-caption {"
+    "  font-size: %.1fpt;"
+    "  line-height: %.2f;"
     "}",
     size, line_height,
     h1, h2, h3, h4, size, size,
     size - 1, line_height,
-    size, line_height);
+    size, line_height,
+    size - 2, line_height);
 
   return g_string_free (css, FALSE);
 }
@@ -846,27 +904,56 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
   self->all_blocks = doc ? fw_reflow_document_get_block_model (doc) : NULL;
   self->current_page = 0;
 
-  /* One-pass first-line-indent annotation. A paragraph gets the
-   * INDENT flag iff the previous block is also a paragraph (or list
-   * item / blockquote). Print-typography idiom: chapter-leading
-   * paragraphs and paragraphs-after-headings stay flush left.
-   * Foliate's `:not(p) + p, p:first-child { text-indent: 0 }`
-   * captured at model-load time so the bind handler is O(1). */
+  /* One-pass typography annotation. Computed at model-load so the
+   * bind handler is O(1):
+   *
+   *   FW_BLOCK_FLAG_INDENT  — paragraph following another paragraph
+   *                           (or list-item / blockquote). Foliate's
+   *                           `:not(p) + p, p:first-child { text-
+   *                           indent: 0 }` idiom — chapter-leading
+   *                           paragraphs stay flush left.
+   *
+   *   FW_BLOCK_FLAG_DROPCAP — first paragraph in the document, or
+   *                           first paragraph after a CHAPTER /
+   *                           HEADING. Bind handler wraps the first
+   *                           grapheme in a Pango span at 200% size
+   *                           for a raised cap. Captions / list
+   *                           items don't qualify.
+   *
+   * Captions (FW_BLOCK_FLAG_CAPTION) are walker-emitted; the indent
+   * pass treats them as non-paragraph for follower decisions so a
+   * paragraph after a figcaption can still get the dropcap if it
+   * starts a chapter. */
   if (self->all_blocks) {
     guint n = g_list_model_get_n_items (self->all_blocks);
     FwBlockKind prev_kind = (FwBlockKind) -1;
+    gboolean prev_was_caption = FALSE;
+    gboolean expect_dropcap = TRUE;
     for (guint i = 0; i < n; i++) {
       g_autoptr (FwBlock) b = g_list_model_get_item (self->all_blocks, i);
       if (!b) continue;
       FwBlockKind k = fw_block_get_kind (b);
-      if (k == FW_BLOCK_PARAGRAPH &&
-          (prev_kind == FW_BLOCK_PARAGRAPH ||
-           prev_kind == FW_BLOCK_LIST_ITEM ||
-           prev_kind == FW_BLOCK_BLOCKQUOTE)) {
-        fw_block_set_flags (b,
-                            fw_block_get_flags (b) | FW_BLOCK_FLAG_INDENT);
+      guint cur_flags = fw_block_get_flags (b);
+      gboolean is_caption = (k == FW_BLOCK_PARAGRAPH) &&
+                            (cur_flags & FW_BLOCK_FLAG_CAPTION);
+
+      if (k == FW_BLOCK_CHAPTER || k == FW_BLOCK_HEADING) {
+        expect_dropcap = TRUE;
+      } else if (k == FW_BLOCK_PARAGRAPH && !is_caption) {
+        /* Foliate's CSS: `:not(p) + p, p:first-child { text-indent:
+         * 0 }` — only consecutive `<p>` elements get indent. After
+         * a list item or blockquote (or anything else), a fresh
+         * paragraph starts flush. */
+        if (!prev_was_caption && prev_kind == FW_BLOCK_PARAGRAPH) {
+          fw_block_set_flags (b, cur_flags | FW_BLOCK_FLAG_INDENT);
+        }
+        if (expect_dropcap) {
+          fw_block_set_flags (b, fw_block_get_flags (b) | FW_BLOCK_FLAG_DROPCAP);
+          expect_dropcap = FALSE;
+        }
       }
       prev_kind = k;
+      prev_was_caption = is_caption;
     }
   }
 

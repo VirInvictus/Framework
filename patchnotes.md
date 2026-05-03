@@ -2,6 +2,45 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.64.0 (2026-05-02)
+
+*Reflow typography pass 3: ordered lists, figure captions, raised caps. Widow/orphan tuning skipped — out of practical reach in pure Pango.*
+
+### Ordered list numbering
+
+EPUB and MOBI walkers now distinguish `<ol>` from `<ul>`. Each list-open pushes a counter (1+ for `<ol>`, sentinel 0 for `<ul>`) onto a per-walker `ol_stack`; each `<li>` reads the top, increments if ordered, and emits a `FW_BLOCK_LIST_ITEM` with the number stored in the block's `level` field. Unordered items keep `level == 0`.
+
+The view's bind handler renders accordingly: `level == 0` → bullet (U+2022 + NBSP), `level > 0` → `"N." ` (digit + period + NBSP). Nesting works because the stack is per-list.
+
+This also moves the bullet glyph out of the walker's accumulator (where it used to be a literal `"•  "` prefix on every `<li>`-as-paragraph) and into the bind handler. Cleaner kind separation; FwBlockKind LIST_ITEM is no longer dead code on the EPUB / MOBI paths.
+
+### Figure captions
+
+EPUB and MOBI walkers handle `<figure>` (recurse-only) and `<figcaption>` (emit a paragraph with the new `FW_BLOCK_FLAG_CAPTION` flag). The bind handler renders captions in italic, smaller (size − 2pt), centered with the new `.reflow-caption` CSS class. Captions don't get first-line indent or dropcaps; the indent-pass treats them as non-paragraph for follower decisions.
+
+### Raised cap on chapter-leading paragraphs
+
+The first paragraph of each chapter (i.e. the first paragraph in the document, or the first paragraph after a `CHAPTER` marker / heading) gets `FW_BLOCK_FLAG_DROPCAP`. Bind handler walks past any leading inline markup tags and whitespace, finds the first grapheme, wraps it in `<span size="200%" weight="bold">…</span>`. Pango lifts the cap; the rest of the paragraph flows around it (true CSS-float-style drop caps aren't possible in pure Pango — this is a "raised cap" which is the recognized fallback).
+
+Edge cases: if the first character is an `&entity;` reference, we bail to plain rendering rather than try to wrap a partial entity.
+
+The flag is set in the same one-pass annotation in `fw_reflow_view_set_document` that computes `FW_BLOCK_FLAG_INDENT`. Captions / list items don't qualify.
+
+### Indent rule tightened
+
+Now matches foliate exactly: a paragraph gets `FW_BLOCK_FLAG_INDENT` iff the *immediately previous* block is a `PARAGRAPH` (not caption). After a `LIST_ITEM`, `BLOCKQUOTE`, heading, image, or chapter-marker, the next paragraph starts flush. This is foliate's `:not(p) + p, p:first-child { text-indent: 0 }` rule literally translated.
+
+### Widow/orphan tuning — skipped
+
+CSS `widows: 2; orphans: 2` doesn't have a Pango / GtkLabel equivalent. Pango layouts don't expose "minimum lines on a page" controls, and GtkLabel's wrap mode (`PANGO_WRAP_WORD_CHAR`) handles its own break decisions. Real widow/orphan control would require a custom paginator that re-flows blocks across pages with a min-line constraint, which is an engine-grade rewrite. Deferred.
+
+### Verified
+
+* Build clean.
+* 1 EPUB + 1 MOBI sample (random `shuf -n 1`) open cleanly with the new typography.
+
+---
+
 ## v0.63.0 (2026-05-02)
 
 *Reflow typography depth pass: first-line indent, list bullets, real horizontal rules.*
