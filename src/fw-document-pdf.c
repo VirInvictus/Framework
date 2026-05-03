@@ -93,6 +93,11 @@ build_transform (double zoom, int rotation)
   return m;
 }
 
+/* Forward decls needed by pdf_close (which runs before the search /
+ * stext-cache section below it textually). */
+typedef struct _StextEntry StextEntry;
+static void stext_entry_drop_with_ctx (FwDocumentPdf *self, StextEntry *e);
+
 /* Render a page directly into a cairo ARGB32 surface with zero pixel copying.
  *
  * MuPDF's BGR colorspace + alpha=1 produces 32-bit pixels in B,G,R,A byte
@@ -140,8 +145,10 @@ render_page_direct (fz_context *ctx, fz_page *page,
     fz_translate (-transformed.x0, -transformed.y0));
 
   fz_irect pix_bbox = { .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
-  volatile fz_pixmap *pix = NULL;
-  volatile fz_device *dev = NULL;
+  volatile fz_pixmap  *pix    = NULL;
+  volatile fz_device  *dev    = NULL;
+  volatile gboolean    failed = FALSE;
+  volatile const char *err    = NULL;
 
   fz_try (ctx) {
     /* Build a pixmap wrapping the cairo surface buffer. BGR + alpha=1 gives
@@ -165,7 +172,14 @@ render_page_direct (fz_context *ctx, fz_page *page,
     fz_drop_pixmap (ctx, (fz_pixmap *) pix);
   }
   fz_catch (ctx) {
-    g_warning ("MuPDF: render failed: %s", fz_caught_message (ctx));
+    /* Don't `return` from inside fz_catch — that walks past the
+     * setjmp restore in mupdf's exception machinery on some builds.
+     * Set a flag, exit the block, and bail below. */
+    failed = TRUE;
+    err    = fz_caught_message (ctx);
+  }
+  if (failed) {
+    g_warning ("MuPDF: render failed: %s", err ? (const char *) err : "(unknown)");
     cairo_surface_destroy (surface);
     return NULL;
   }
@@ -307,9 +321,18 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
       fz_catch (self->render[i].ctx) {
         g_warning ("MuPDF: render instance %d failed to open: %s",
                    i, fz_caught_message (self->render[i].ctx));
+        /* Drop the document FIRST if open succeeded but layout threw —
+         * dropping a context with a live document attached is undefined
+         * in mupdf. Wrap in its own fz_try since fz_drop_document can
+         * itself throw on broken state. */
+        if (self->render[i].doc) {
+          fz_try (self->render[i].ctx)
+            fz_drop_document (self->render[i].ctx, self->render[i].doc);
+          fz_catch (self->render[i].ctx) { /* swallow */ }
+          self->render[i].doc = NULL;
+        }
         fz_drop_context (self->render[i].ctx);
         self->render[i].ctx = NULL;
-        self->render[i].doc = NULL;
       }
     }
     g_mutex_init (&self->render[i].lock);
@@ -360,14 +383,16 @@ pdf_close (FwDocument *doc)
   FW_TRACE_PDF ("close: '%s'", self->path ? self->path : "(null)");
 
   /* Drop cached structured-text pages first — they're owned by
-   * self->ctx, which is dropped further down. After this loop the
-   * hash table is empty but still allocated; finalize unrefs it. */
+   * self->ctx, which is dropped further down. Each value is a
+   * StextEntry wrapper holding the fz_stext_page + LRU timestamp;
+   * stext_entry_drop_with_ctx frees both. After this loop the hash
+   * table is empty but still allocated; finalize unrefs it. */
   if (self->stext_cache && self->ctx) {
     GHashTableIter iter;
     gpointer key, value;
     g_hash_table_iter_init (&iter, self->stext_cache);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
-      fz_drop_stext_page (self->ctx, (fz_stext_page *) value);
+      stext_entry_drop_with_ctx (self, (StextEntry *) value);
     }
     g_hash_table_remove_all (self->stext_cache);
   }
@@ -545,21 +570,87 @@ pdf_get_toc (FwDocument *doc)
 
 /* ── Search ───────────────────────────────────────────────────────── */
 
+/* StextEntry — wrapper around an fz_stext_page* carrying a last-access
+ * timestamp. Used as the value type in self->stext_cache so we can
+ * evict the oldest N entries when the cache exceeds its bound.
+ * Forward-declared above so pdf_close (textually earlier) can drop
+ * its entries. */
+struct _StextEntry {
+  fz_stext_page *stext;
+  gint64         last_access_us;
+};
+
+#define STEXT_CACHE_CAP_DEFAULT 512   /* page entries */
+
+static guint
+stext_cache_cap (void)
+{
+  static guint cached = 0;
+  if (cached) return cached;
+  const char *env = g_getenv ("FW_STEXT_CACHE_CAP");
+  if (env && *env) {
+    int v = atoi (env);
+    if (v > 0) { cached = (guint) v; return cached; }
+  }
+  cached = STEXT_CACHE_CAP_DEFAULT;
+  return cached;
+}
+
+static void
+stext_entry_drop_with_ctx (FwDocumentPdf *self, StextEntry *e)
+{
+  if (!e) return;
+  if (e->stext && self->ctx)
+    fz_drop_stext_page (self->ctx, e->stext);
+  g_free (e);
+}
+
+/* Evict the oldest entries until count <= cap. Caller holds self->lock.
+ * O(N) per eviction round; eviction fires once per `cap`-many fresh
+ * inserts, so amortized cost is O(1) per insert. */
+static void
+stext_cache_evict_excess (FwDocumentPdf *self)
+{
+  guint cap = stext_cache_cap ();
+  while (g_hash_table_size (self->stext_cache) > cap) {
+    GHashTableIter iter;
+    gpointer key, value;
+    gint64 oldest_us = G_MAXINT64;
+    gpointer oldest_key = NULL;
+    g_hash_table_iter_init (&iter, self->stext_cache);
+    while (g_hash_table_iter_next (&iter, &key, &value)) {
+      StextEntry *e = value;
+      if (e->last_access_us < oldest_us) {
+        oldest_us  = e->last_access_us;
+        oldest_key = key;
+      }
+    }
+    if (!oldest_key) break;
+    StextEntry *victim = g_hash_table_lookup (self->stext_cache, oldest_key);
+    g_hash_table_steal (self->stext_cache, oldest_key);
+    stext_entry_drop_with_ctx (self, victim);
+  }
+}
+
 /* Return the cached fz_stext_page for `page`, building it if absent.
  * Caller must hold self->lock. Returns NULL on extraction failure
  * (corrupt page, OOM, etc.). The cached entry is owned by self->ctx
- * and stays alive for the document's lifetime — read access from any
- * code path that already holds self->lock is safe.
+ * and lives until evicted by stext_cache_evict_excess or the document
+ * closes. Read access from any code path that already holds self->lock
+ * is safe.
  *
  * MuPDF's fz_stext_page is immutable after construction. We exploit
  * that to share a single cached copy across selection, search, and
- * (eventually) word/line click selection. */
+ * word/line click selection. */
 static fz_stext_page *
 pdf_get_or_extract_stext (FwDocumentPdf *self, int page)
 {
-  fz_stext_page *cached = g_hash_table_lookup (self->stext_cache,
-                                                GINT_TO_POINTER (page));
-  if (cached) return cached;
+  StextEntry *cached = g_hash_table_lookup (self->stext_cache,
+                                             GINT_TO_POINTER (page));
+  if (cached) {
+    cached->last_access_us = g_get_monotonic_time ();
+    return cached->stext;
+  }
 
   volatile fz_page *pg = NULL;
   volatile fz_stext_page *stext = NULL;
@@ -580,9 +671,13 @@ pdf_get_or_extract_stext (FwDocumentPdf *self, int page)
     }
   }
 
-  if (stext)
-    g_hash_table_insert (self->stext_cache, GINT_TO_POINTER (page),
-                         (fz_stext_page *) stext);
+  if (stext) {
+    StextEntry *e = g_new (StextEntry, 1);
+    e->stext          = (fz_stext_page *) stext;
+    e->last_access_us = g_get_monotonic_time ();
+    g_hash_table_insert (self->stext_cache, GINT_TO_POINTER (page), e);
+    stext_cache_evict_excess (self);
+  }
 
   return (fz_stext_page *) stext;
 }

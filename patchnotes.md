@@ -2,6 +2,38 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.65.0 (2026-05-02)
+
+*Audit-pass cleanup. Three parallel reviewers walked the codebase looking for portfolio-blockers; this slice fixes everything they flagged at HIGH and MEDIUM severity. No new features.*
+
+### HIGH — load-bearing bugs
+
+* **`fz_catch` returning NULL in the PDF render hot path** (`src/fw-document-pdf.c:170`). `render_page_direct`'s catch block did `cairo_surface_destroy(); return NULL;` — but `return` from inside `fz_catch` walks past mupdf's setjmp restore, which on some glibc/mupdf builds corrupts the per-context exception stack. Replaced with a `volatile gboolean failed` flag; bail happens after the block exits cleanly. The same project's own `CLAUDE.md` flags this rule as load-bearing — closing the gap.
+* **README opener.** Removed the *"I'm a computer science student playing with AI on this one, so it's not a big priority"* paragraph; it preceded a 24K-character technical README and undercut everything below it.
+* **Dead code in reflow walkers (~600 LOC).** EPUB had an unused `xhtml_*` GMarkupParser walker quartet (`xhtml_inline_open` / `_close` / `_flush_accum` / `_start_block` / `_start` / `_end` / `_text` plus the `XhtmlCtx` struct, ~155 lines) left from the v0.56 libxml2 swap. MOBI had three siblings (`is_void_html`, `inline_open_tag`, `inline_close_tag`, ~50 lines) plus a 391-line `#if 0`-guarded balancer block. All deleted; the `#if 0` block is removed wholesale (history is preserved in git, not in the source tree). At `-Dwarning_level=3` the tree now compiles without `-Wunused-function` on Framework sources.
+
+### MEDIUM — real bugs
+
+* **PDF render-instance leak on layout failure** (`fw-document-pdf.c:298–313`). If `fz_open_document` succeeded but `fz_layout_document` threw, the catch path called `fz_drop_context` while `self->render[i].doc` was still attached — undefined in mupdf. Now drops the document first (under its own nested fz_try/catch), then the context.
+* **Unbounded stext-page cache** (`fw-document-pdf.c`). `stext_cache` had no eviction; a 1500-page novel + page-by-page search accumulated ~1500 stext_pages with no bound. New `StextEntry` wrapper carries a `last_access_us` timestamp; `stext_cache_evict_excess` LRU-evicts back to the cap (default 512 pages, override `FW_STEXT_CACHE_CAP`). Wrapper is forward-declared so `pdf_close` (textually earlier) can drop entries.
+* **`fw_cache_invalidate_*` dead public APIs** (`fw-cache.c`). Both `fw_cache_invalidate_all` and `fw_cache_invalidate_page` had no callers in src/ or tests/; both contained shapes (use-after-free if revived during an active render) that would silently bite future code wiring them in. Deleted from header + impl.
+* **DjVu cancel race** (`fw-document-djvu.c`). The `cancel_flag` reset-to-FALSE pattern had a microsecond-window race where a setter call between the entry-check and the entry-reset would be silently lost. Replaced with a monotonic `cancel_gen` generation counter — workers capture at start and bail when any later checkpoint sees a different gen. No reset, no lost cancel.
+* **DjVu search cancel beat.** `djvu_search` had no per-page cancel check; combined with the search join below, the most likely UI-hang surface under stress. Added one entry-time generation capture and a post-decode check.
+* **`fw-search` main-thread join** (`fw-search.c:193`). `stop_worker_locked` set the `cancel` flag and **joined** the worker — blocking the main loop until the worker bailed. On a slow DjVu first page that was hundreds of milliseconds of UI lockup. Replaced with `g_thread_unref` (detach) + per-worker generation check; the worker observes the bumped `self->generation` on its next iteration and exits on its own. Each WorkerCtx holds strong refs to self + document, so detached workers can outlive any caller-side change without UAF. The `cancel` field is gone.
+* **MOBI silent CP1252 failure** (`fw-mobi-parser.c`). When `g_convert(WINDOWS-1252 → UTF-8)` failed, the body was silently replaced with an empty string and the user saw an "empty document." Added `g_warning` so the cause is visible in the journal.
+* **Reflow heuristic counted markup bytes** (`fw-reflow-view.c`). `heuristic_block_height` measured row width by `strlen` of the markup-bearing string, so heavily-styled paragraphs over-counted width and produced too-short pages. New `visible_text_byte_count` skips `<...>` tags and `&...;` entities.
+* **Hardcoded test corpus root** (`tests/stress/meson.build`). Now resolves `corpus_root` from `$FW_TEST_CORPUS_ROOT` at meson-configure time, falling back to `/home/bdkl/docs/Calibre Library` when unset so the project's own dev workflow keeps working. Anyone else cloning the repo can point it elsewhere.
+* **README duplicate sections.** Two "What Framework is not" sections (lines 61 + 188) and two Building-equivalents (lines 48 + 150) merged.
+
+### Verified
+
+* All 5 stress tests pass: `stress-scrub`, `stress-zoom-storm`, `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`.
+* ASan + UBSan clean on a random PDF sample.
+* PDF / DjVu / EPUB random-`shuf -n 1` smoke tests all open cleanly.
+* `meson compile -C builddir` clean; `-Dwarning_level=3` produces no `-Wunused-function` warnings on Framework sources.
+
+---
+
 ## v0.64.0 (2026-05-02)
 
 *Reflow typography pass 3: ordered lists, figure captions, raised caps. Widow/orphan tuning skipped — out of practical reach in pure Pango.*

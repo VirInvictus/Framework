@@ -57,9 +57,17 @@ bench_cache_hit_rate = executable(
 )
 
 # Register as a meson test. RSS cap of 800 MB by default; override with
-# FW_STRESS_RSS_CAP_MB. Skipped automatically in CI environments without a
-# corpus path — pass FW_TEST_CORPUS_ROOT or call the binary directly.
-corpus_root = '/home/bdkl/docs/Calibre Library'
+# FW_STRESS_RSS_CAP_MB. Corpus path resolves from $FW_TEST_CORPUS_ROOT
+# at meson configure time when set; otherwise falls back to Brandon's
+# local Calibre library so the project's own dev workflow keeps
+# working. Anyone else cloning the repo should set
+# FW_TEST_CORPUS_ROOT to a directory containing the canonical samples
+# (or invoke the test binaries directly with a path argument).
+corpus_root = run_command(
+  'sh', '-c',
+  'echo "${FW_TEST_CORPUS_ROOT:-/home/bdkl/docs/Calibre Library}"',
+  check: true,
+).stdout().strip()
 sample_pdf  = corpus_root / 'Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf'
 
 test('stress-scrub-effective-java',

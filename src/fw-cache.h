@@ -21,10 +21,6 @@ void             fw_cache_start         (FwCache         *self,
                                          double           zoom,
                                          int              rotation);
 
-void             fw_cache_invalidate_all (FwCache        *self);
-void             fw_cache_invalidate_page (FwCache       *self,
-                                           int            page);
-
 void             fw_cache_set_priority  (FwCache         *self,
                                          const int       *visible_pages,
                                          int              n_visible);

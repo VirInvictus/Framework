@@ -24,17 +24,20 @@ struct _FwSearch {
   GArray       *hits;           /* FwSearchHit[] across all pages */
   int           current;        /* index into hits, or -1 */
 
-  /* Worker state — read/written only from the main thread except where
-   * noted. The worker thread reads `query`, `start_page`, and `cancel`;
-   * everything else is main-thread only. */
+  /* Worker state — read/written only from the main thread. The worker
+   * thread reads `query`, `start_page`, and `generation` (atomic).
+   * Cancellation works by bumping `generation`; the worker compares
+   * its captured generation against the live one and bails when they
+   * differ. */
   GThread      *worker;
   char         *query;          /* owned, set before worker starts */
   int           start_page;
-  volatile gint cancel;         /* atomic flag, set on main, polled on worker */
   guint         finish_idle_id; /* main-loop id for the finalize idle */
 
-  /* Generation counter — incremented on every find()/clear() so any
-   * still-pending idle messages from the previous scan are dropped. */
+  /* Generation counter — incremented on every find()/clear()/
+   * set_document() so any still-pending idle messages from the
+   * previous scan are dropped, AND any still-running worker thread
+   * recognizes itself as superseded and bails. */
   guint         generation;
 };
 
@@ -151,9 +154,17 @@ search_worker (gpointer data)
                   ctx->query, start, total, ctx->generation);
 
   /* Scan from start_page → end, then wrap from 0 → start_page. Matches
-   * near where the reader is reading appear first. */
+   * near where the reader is reading appear first.
+   *
+   * Cancellation: each iteration compares `ctx->generation` (captured
+   * at worker start) against the live `self->generation`. A new
+   * find() / clear() / set_document() bumps the live counter, so this
+   * worker recognizes itself as superseded and bails. Replaces the
+   * earlier `cancel` flag + main-thread g_thread_join pattern, which
+   * had the side effect of stalling the UI on a slow DjVu first
+   * page. */
   for (int i = 0; i < total; i++) {
-    if (g_atomic_int_get (&self->cancel))
+    if (g_atomic_int_get ((const gint *) &self->generation) != (gint) ctx->generation)
       break;
 
     int page = (start + i) % total;
@@ -167,7 +178,7 @@ search_worker (gpointer data)
   }
 
 out:
-  if (!g_atomic_int_get (&self->cancel))
+  if (g_atomic_int_get ((const gint *) &self->generation) == (gint) ctx->generation)
     post_finished (self, ctx->generation);
 
   g_free (ctx->query);
@@ -188,12 +199,16 @@ fw_search_new (void)
 static void
 stop_worker_locked (FwSearch *self)
 {
+  /* Detach (don't join) — worker observes the bumped generation on its
+   * next iteration and exits on its own. Joining the worker on the
+   * main thread would stall the UI for one full page-search worth of
+   * work, which on a slow DjVu first page is hundreds of milliseconds.
+   * Each WorkerCtx holds strong refs to self + document, so the
+   * worker can outlive any caller-side change without UAF. */
   if (self->worker) {
-    g_atomic_int_set (&self->cancel, 1);
-    g_thread_join (self->worker);    /* blocks main; worker bails on cancel */
+    g_thread_unref (self->worker);
     self->worker = NULL;
   }
-  g_atomic_int_set (&self->cancel, 0);
 }
 
 void

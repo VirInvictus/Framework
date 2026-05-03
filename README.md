@@ -9,8 +9,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
 </p>
 
-This is very much a work-in-progress and is not feature-complete. I'm a computer science student playing with AI on this one, so it's not a big priority, but it currently renders perfectly fine.
-
 ---
 
 # Framework
@@ -44,23 +42,6 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 <p align="center">
   <img src="https://github.com/user-attachments/assets/4f2a77a5-76f1-4d56-8238-a3190bb1be2e" alt="Framework Screenshot" style="max-width: 100%; border-radius: 8px;">
 </p>
-
-## Development & Build
-
-### Requirements
-- `gtk4` (4.16+), `libadwaita` (1.7+)
-- `mupdf` (1.24+), `djvulibre` (3.5.28+)
-- `meson` (1.4+)
-
-### Build Pipeline
-```bash
-meson setup builddir
-meson compile -C builddir
-```
-
-## What Framework is not
-
-Framework is strictly a **viewer**. It is not an editor (no annotations), not a library manager, and not an image viewer. It focuses on doing one thing exceptionally well: opening and displaying documents.
 
 ## Keyboard shortcuts
 

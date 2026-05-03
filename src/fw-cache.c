@@ -696,47 +696,6 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
 }
 
 void
-fw_cache_invalidate_all (FwCache *self)
-{
-  g_return_if_fail (FW_IS_CACHE (self));
-
-  g_mutex_lock (&self->lock);
-  guint old_surfaces = g_hash_table_size (self->pages);
-  guint old_parsed   = g_hash_table_size (self->parsed);
-  self->render_gen++;
-  self->cancel_gen++;
-  g_hash_table_remove_all (self->pages);
-  self->total_cached_bytes = 0;
-
-  /* Free all parsed page handles */
-  if (self->document) {
-    GHashTableIter iter;
-    gpointer key, value;
-    g_hash_table_iter_init (&iter, self->parsed);
-    while (g_hash_table_iter_next (&iter, &key, &value))
-      parsed_entry_free_with_doc (value, self->document);
-    g_hash_table_remove_all (self->parsed);
-  }
-
-  FW_TRACE_MEM ("invalidate_all: freed %u surfaces, %u parsed handles",
-                old_surfaces, old_parsed);
-  g_mutex_unlock (&self->lock);
-}
-
-void
-fw_cache_invalidate_page (FwCache *self, int page)
-{
-  g_return_if_fail (FW_IS_CACHE (self));
-
-  g_mutex_lock (&self->lock);
-  CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (page));
-  if (entry)
-    self->total_cached_bytes -= entry->size_bytes + entry->prev_slots_bytes;
-  g_hash_table_remove (self->pages, GINT_TO_POINTER (page));
-  g_mutex_unlock (&self->lock);
-}
-
-void
 fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
 {
   g_return_if_fail (FW_IS_CACHE (self));

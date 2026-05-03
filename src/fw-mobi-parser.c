@@ -1048,8 +1048,13 @@ fw_mobi_parse (const char *path, GError **error)
                            NULL, &utf8_len, &e);
     g_string_free (body, TRUE);
     if (!utf8_body) {
-      /* Fallback — keep the raw bytes; the caller's HTML walker
-       * will likely reject them, but better than failing the open. */
+      /* Fallback — keep the raw bytes; the caller's HTML walker will
+       * likely reject them, but better than failing the open. Warn so
+       * a caller debugging an "empty document" knows the conversion
+       * was the cause. */
+      g_warning ("mobi: WINDOWS-1252 → UTF-8 conversion failed (%s); "
+                 "document body lost",
+                 e ? e->message : "unknown error");
       utf8_body = g_strdup ("");
       utf8_len = 0;
     }

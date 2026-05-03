@@ -625,6 +625,33 @@ make_measure_widget_for (FwReflowView *self, FwBlock *block)
  * (pages may end up a paragraph short or long), but the user sees
  * content immediately, and the worst case is a blank line at the
  * page boundary — same as Foliate's column-based pagination. */
+/* Count visible-character bytes in a Pango-markup string, skipping
+ * tags (`<...>`) and entities (`&...;`). The heuristic uses byte count
+ * as a proxy for column width; markup-decorated text would otherwise
+ * over-count and produce too-short pages. Approximate (a multi-byte
+ * UTF-8 grapheme counts as N bytes), but consistent across blocks,
+ * which is what the heuristic needs. */
+static int
+visible_text_byte_count (const char *t)
+{
+  if (!t) return 0;
+  int n = 0;
+  for (const char *p = t; *p; p++) {
+    if (*p == '<') {
+      const char *gt = strchr (p, '>');
+      if (!gt) break;
+      p = gt;
+      continue;
+    }
+    if (*p == '&') {
+      const char *sc = strchr (p, ';');
+      if (sc && sc - p < 8) { n++; p = sc; continue; }
+    }
+    n++;
+  }
+  return n;
+}
+
 static int
 heuristic_block_height (FwReflowView *self, FwBlock *block, int width)
 {
@@ -671,7 +698,7 @@ heuristic_block_height (FwReflowView *self, FwBlock *block, int width)
       }
       double h_line = font_px * scale * 1.2;
       const char *t = fw_block_get_text (block);
-      int n = t ? (int) strlen (t) : 0;
+      int n = visible_text_byte_count (t);
       int cpl = (int) ((double) chars_per_line / scale);
       int lines = n > 0 ? (n / cpl) + 1 : 1;
       /* CSS .reflow-heading: margin-top 1.0em + margin-bottom 0.4em. */
@@ -679,7 +706,7 @@ heuristic_block_height (FwReflowView *self, FwBlock *block, int width)
     }
     default: {
       const char *t = fw_block_get_text (block);
-      int n = t ? (int) strlen (t) : 0;
+      int n = visible_text_byte_count (t);
       int lines = n > 0 ? (n / chars_per_line) + 1 : 1;
       /* CSS .reflow-paragraph: margin-bottom 0.4em. */
       return (int) (lines * line_px + font_px * 0.4);

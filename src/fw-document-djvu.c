@@ -20,7 +20,13 @@ struct _FwDocumentDjvu {
   char              *path;
   int                page_count;
   GMutex             render_lock;  /* DjVuLibre is not thread-safe */
-  volatile gboolean  cancel_flag;  /* checked by render to bail out early */
+  /* Cancel uses a monotonic generation counter, not a flag. Workers
+   * capture cancel_gen at entry and bail at any later checkpoint
+   * where the value differs. Avoids the "TRUE-set-then-FALSE-reset"
+   * race in the previous flag-based design. djvu_cancel_render
+   * increments; only the increment is racy, and increments compose
+   * cleanly. */
+  volatile gint      cancel_gen;
   ddjvu_format_t    *render_fmt;   /* cached RGBMASK32 format for cairo ARGB32 */
 
   /* Page sizes cached at open time (in points, 72 DPI) */
@@ -280,18 +286,17 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   cairo_surface_t *surface = NULL;
 
   FW_TRACE_DJVU ("render_page start: page=%d zoom=%.2f rot=%d", page, zoom, rotation);
+  /* Capture the cancel generation BEFORE acquiring the lock — if a
+   * concurrent cancel happens between this read and our work, the
+   * checkpoint reads will see a different gen and bail. */
+  gint start_gen = g_atomic_int_get (&self->cancel_gen);
   g_mutex_lock (&self->render_lock);
 
-  /* Check cancel flag before starting expensive decode.
-   * Always clear the flag so the next render attempt can proceed —
-   * without this, the flag stays stuck TRUE forever. */
-  if (g_atomic_int_get (&self->cancel_flag)) {
-    g_atomic_int_set (&self->cancel_flag, FALSE);
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
     g_mutex_unlock (&self->render_lock);
     FW_TRACE_DJVU ("render_page cancelled (pre-decode): page=%d", page);
     return NULL;
   }
-  g_atomic_int_set (&self->cancel_flag, FALSE);
 
   ddjvu_page_t *pg = ddjvu_page_create_by_pageno (self->djvu_doc, page);
   if (!pg) {
@@ -303,8 +308,7 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
   djvu_wait_for_job (self->djvu_ctx, ddjvu_page_job (pg));
   djvu_drain_messages (self->djvu_ctx);
 
-  /* Check cancel flag again after decode */
-  if (g_atomic_int_get (&self->cancel_flag)) {
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
     ddjvu_page_release (pg);
     g_mutex_unlock (&self->render_lock);
     FW_TRACE_DJVU ("render_page cancelled (post-decode): page=%d", page);
@@ -445,9 +449,19 @@ djvu_search (FwDocument *doc, const char *text, int page)
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   GArray *hits = g_array_new (FALSE, FALSE, sizeof (FwSearchHit));
 
+  /* Cancel beat — return whatever we have if a search was cancelled.
+   * Without this, fw-search's per-page worker has no way to bail
+   * mid-document on a slow DjVu file (single-mutex backend, slow
+   * first-page text decode). The caller's main-thread join then
+   * stalls the UI. Sample once at entry so a cancel during this
+   * page's decode short-circuits before doing the work. */
+  gint start_gen = g_atomic_int_get (&self->cancel_gen);
+
   miniexp_t page_text = ddjvu_document_get_pagetext (self->djvu_doc,
                                                       page, "word");
   if (page_text == miniexp_dummy)
+    return hits;
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen)
     return hits;
 
   /* Walk the s-expression tree to find words matching the search text.
@@ -648,16 +662,14 @@ djvu_render_page_from_handle (FwDocument *doc, gpointer handle,
 
   FW_TRACE_DJVU ("render_from_handle start: handle=%p zoom=%.2f rot=%d",
                   (void *) pg, zoom, rotation);
+  gint start_gen = g_atomic_int_get (&self->cancel_gen);
   g_mutex_lock (&self->render_lock);
 
-  if (g_atomic_int_get (&self->cancel_flag)) {
-    g_atomic_int_set (&self->cancel_flag, FALSE);
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
     g_mutex_unlock (&self->render_lock);
     FW_TRACE_DJVU ("render_from_handle cancelled: handle=%p", (void *) pg);
     return NULL;
   }
-
-  g_atomic_int_set (&self->cancel_flag, FALSE);
 
   int dpi = ddjvu_page_get_resolution (pg);
   if (dpi <= 0) dpi = 300;
@@ -690,7 +702,7 @@ djvu_cancel_render (FwDocument *doc)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
   FW_TRACE_DJVU ("cancel_render%s", "");
-  g_atomic_int_set (&self->cancel_flag, TRUE);
+  g_atomic_int_inc (&self->cancel_gen);
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */
