@@ -2,6 +2,60 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.57.0 (2026-05-02)
+
+*FB2 rewrite — libxml2 walker matching the EPUB / MOBI port shape; foliate-js's STYLE / SECTION / POEM / BODY transform tables ported as direct C dispatch.* Last reflow backend conversion in the foliate-port arc.
+
+### Approach
+
+Foliate's `fb2.js` builds an XHTML doc from FB2 XML by recursive transform-table application: each FB2 element name maps to a target XHTML element + a child-mapping table. We don't need the XHTML intermediate — we go directly from FB2 XML → `FwBlock` via libxml2 tree walk. The dispatch logic mirrors foliate's tables:
+
+| FB2 element | Output |
+|---|---|
+| `<section>` | CHAPTER marker; recurse with depth + 1 |
+| `<title>` (in section) | HEADING block at level = section depth, plus a TOC entry |
+| `<subtitle>` | HEADING block at level = depth + 1 |
+| `<p>` | PARAGRAPH block |
+| `<empty-line/>` | HR block |
+| `<epigraph>`, `<cite>`, `<poem>`, `<annotation>` | BLOCKQUOTE (children's `<p>`s become BLOCKQUOTE blocks) |
+| `<image l:href="#X">` | IMAGE block referencing `<binary id="X">` |
+| `<v>` | PARAGRAPH (verse line) |
+| `<emphasis>` / `<strong>` / `<code>` / `<sub>` / `<sup>` / `<strikethrough>` / `<a>` | Pango inline span |
+
+### Three-pass open
+
+1. **Metadata** — walk `<description><title-info>` for `<book-title>`, `<author>` (first/middle/last), `<lang>`, `<annotation>`. First-write-wins on duplicates.
+2. **Binaries** — walk `<binary id=… content-type=…>` elements (typically near EOF), base64-decode, push `GdkTexture` into the images hash. Keys are stripped of leading `#` so `<image l:href="#cover">` resolves to `images["cover"]`.
+3. **Body** — walk `<body>` recursively, dispatching per the table above. Section depth tracked so nested chapters get correct heading levels and CHAPTER markers carry their `id` as anchor.
+
+### libxml2 properties
+
+- **`xmlReadMemory` with `XML_PARSE_RECOVER | NOERROR | NOWARNING`** — strict XML mode (FB2 is XML, not HTML), but with recovery for the occasional malformed file. Encoding declarations (`<?xml encoding="windows-1251"?>`) are handled natively — the GMarkupParser version had to pre-convert via `g_convert`; that scaffolding is gone.
+- **Inline-stack auto-close** — same shape as the EPUB / MOBI walkers: if an inline span (e.g. `<emphasis>`) crosses a block boundary in the source FB2, the open inlines auto-close on flush and re-open on the next block start, so each block is independently well-formed Pango markup. Inline-close handler guards `if (cc->accum_active)`.
+
+### Verified
+
+- Synthesized smoke FB2 (used since v0.41.0) — opens clean, sections + paragraphs + inline styles + image binary all extracted.
+- TXT, EPUB, MOBI/KF7, AZW3/KF8 regression checks pass.
+- ASan + UBSan clean.
+- 4/5 stress tests pass; 5/5 in isolation. (The transient zoom-storm failure is the same memory-pressure threshold blip that hit v0.56.0; not a real regression.)
+
+### What's done with the foliate port arc
+
+The native reflow stack is now fully Foliate-derived:
+
+| Backend | Parser | Status |
+|---|---|---|
+| TXT | trivial | v0.40.0 |
+| FB2 | libxml2 (this slice) | v0.57.0 |
+| EPUB | libxml2 chapters + nav.xhtml | v0.56.0 |
+| MOBI / KF7 | libxml2 (foliate `MOBI6`) | v0.55.0 |
+| AZW3 / KF8 | libxml2 (foliate `KF8` w/ INDX, SKEL, FRAG) | v0.55.0 |
+
+Five native formats, paginated, font-bundled, position-persistent, two-column-capable.
+
+---
+
 ## v0.56.0 (2026-05-02)
 
 *EPUB rewrite — chapter XHTML walker switched from GMarkupParser to libxml2; EPUB 3 nav.xhtml TOC fallback added.* Same approach as the MOBI port (v0.55.0): foliate parses EPUB chapters via DOMParser; libxml2's `htmlReadMemory` gives us equivalent tolerance for malformed XHTML in C.

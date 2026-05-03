@@ -1,15 +1,22 @@
 /* fw-reflow-document-fb2.c — FB2 (FictionBook 2) reflow backend
  *
- * Walks the file with GMarkupParser. Section nesting maps to heading
- * level + CHAPTER markers; paragraphs become PARAGRAPH blocks with
- * inline <emphasis>/<strong>/<code>/<sub>/<sup>/<strikethrough>
- * translated to Pango markup; <image l:href="#X"/> references resolve
- * against the document's <binary id="X"> images, decoded from base64
- * into GdkTextures. <description>/<title-info> populates the
- * metadata hash.
+ * libxml2-based port from `.foliate-js/fb2.js`. The FB2 transform
+ * tables in foliate (STYLE / SECTION / POEM / TABLE / BODY) define
+ * how each FB2 element maps to XHTML; we go directly from FB2 XML
+ * to FwBlocks via tree walk, applying the same logical mapping:
  *
- * Bare .fb2 only — .fb2.zip is a follow-up. Non-UTF-8 XML declarations
- * are converted via g_convert before parsing.
+ *   <section>            → CHAPTER marker; recurse with depth+1
+ *   <title> in <section> → HEADING block at level=section depth
+ *   <p>                  → PARAGRAPH block
+ *   <subtitle>           → HEADING block at level=section depth + 1
+ *   <epigraph>, <cite>,
+ *   <poem>, <annotation> → BLOCKQUOTE block
+ *   <empty-line/>        → HR block
+ *   <image l:href="#X">  → IMAGE block (resolved against <binary id=X>)
+ *
+ * Inline tags ported via the same Pango-markup translation EPUB and
+ * MOBI use; an inline-stack auto-closes on block-boundary so spans
+ * crossing paragraphs don't break Pango parsing.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -17,6 +24,8 @@
 #include "fw-reflow-document-fb2.h"
 
 #include <string.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 
 struct _FwReflowDocumentFb2 {
   GObject       parent_instance;
@@ -24,7 +33,7 @@ struct _FwReflowDocumentFb2 {
   GListStore   *toc;        /* GListStore<FwReflowTocItem> */
   GHashTable   *metadata;   /* gchar* → gchar* */
   GHashTable   *images;     /* gchar* (id) → GdkTexture* (owned) */
-  GHashTable   *anchors;    /* gchar* (anchor_id) → guint position */
+  GHashTable   *anchors;    /* gchar* (anchor_id) → guint position+1 */
   char         *path;
 };
 
@@ -36,493 +45,520 @@ G_DEFINE_FINAL_TYPE_WITH_CODE (FwReflowDocumentFb2,
                                G_IMPLEMENT_INTERFACE (FW_TYPE_REFLOW_DOCUMENT,
                                                       fw_reflow_document_fb2_iface_init))
 
-/* ── Parser state ─────────────────────────────────────────────────── */
+/* ── Walker context ──────────────────────────────────────────────── */
 
 typedef struct {
   FwReflowDocumentFb2 *doc;
 
-  /* Body / section tracking */
-  int           section_depth;       /* 0 = outside any section */
-  char         *pending_section_id;  /* most recent section's id, awaiting title */
+  int           section_depth;     /* 0 outside body */
 
-  /* Block accumulator. Active only between matched <p>/<title> opens
-   * and the corresponding close. Text events while non-NULL append
-   * (Pango-escaped) into `accum`. Inline-style tags add open/close
-   * Pango-markup spans. */
-  FwBlockKind   accum_kind;
+  /* Block accumulator (active between p/title open and close). */
   gboolean      accum_active;
+  FwBlockKind   accum_kind;
+  int           accum_level;
   GString      *accum;
-  int           accum_level;     /* heading level if HEADING */
-  char         *accum_anchor;    /* anchor id when block flushes */
+  char         *pending_anchor;
 
-  /* While inside <title>, we collect a plain-text mirror for TOC. */
+  /* Inline-tag stack — same purpose as in the EPUB / MOBI walkers. */
+  GPtrArray    *open_inlines;
+
+  /* TOC: when inside a section's <title>, accumulate plain text. */
   GString      *toc_title;
+  char         *toc_anchor;
 
-  /* Description / metadata */
-  gboolean      in_description;
-  gboolean      in_title_info;
-  gboolean      in_author;
-  GString      *meta_text;       /* current scalar meta accumulator */
-  const char   *meta_key;        /* canonical key for meta_text */
+  /* Metadata accumulators. */
   GString      *author_first;
   GString      *author_middle;
   GString      *author_last;
+} Fb2WalkCtx;
 
-  /* Binary collection */
-  GString      *bin_data;
-  char         *bin_id;
-  char         *bin_type;
-} Fb2Ctx;
-
-/* ── Helpers ──────────────────────────────────────────────────────── */
+/* ── XLink helper — read href in any namespace prefix form ───── */
 
 static const char *
-attr_get (const char **names, const char **values, const char *want)
+fb2_get_href (xmlNode *n)
 {
-  for (int i = 0; names[i]; i++)
-    if (g_ascii_strcasecmp (names[i], want) == 0)
-      return values[i];
+  /* FB2 uses xlink:href; some files declare it as `l:href`. Match
+   * whichever is present. */
+  for (xmlAttr *a = n->properties; a; a = a->next) {
+    const char *name = (const char *)a->name;
+    if ((g_str_equal (name, "href") || g_ascii_strcasecmp (name, "href") == 0)
+        && a->children)
+      return (const char *)a->children->content;
+  }
   return NULL;
 }
 
-/* href can arrive as l:href, xlink:href, or plain href depending on
- * the FB2 producer's namespace declarations. */
+/* ── Inline-tag mapping (foliate's STYLE table) ───────────────── */
+
 static const char *
-attr_get_href (const char **names, const char **values)
+fb2_pango_for_inline (const char *lname)
 {
-  static const char *candidates[] = { "l:href", "xlink:href", "href", NULL };
-  for (int c = 0; candidates[c]; c++) {
-    const char *v = attr_get (names, values, candidates[c]);
-    if (v)
-      return v;
-  }
+  if (g_str_equal (lname, "emphasis"))                          return "i";
+  if (g_str_equal (lname, "strong"))                            return "b";
+  if (g_str_equal (lname, "code"))                              return "tt";
+  if (g_str_equal (lname, "sub"))                               return "sub";
+  if (g_str_equal (lname, "sup"))                               return "sup";
+  if (g_str_equal (lname, "strikethrough"))                     return "s";
+  if (g_str_equal (lname, "a"))                                 return "u";
+  /* `style` and `span` map to no Pango span; pass children through. */
   return NULL;
+}
+
+/* ── Accumulator helpers ──────────────────────────────────────── */
+
+static void
+fb2_flush (Fb2WalkCtx *cc)
+{
+  if (!cc->accum_active) return;
+  cc->accum_active = FALSE;
+
+  if (cc->open_inlines) {
+    for (gint i = (gint) cc->open_inlines->len - 1; i >= 0; i--)
+      g_string_append_printf (cc->accum, "</%s>",
+                              (const char *) cc->open_inlines->pdata[i]);
+  }
+
+  while (cc->accum->len > 0 &&
+         g_ascii_isspace (cc->accum->str[cc->accum->len - 1]))
+    g_string_truncate (cc->accum, cc->accum->len - 1);
+
+  if (cc->accum->len > 0) {
+    FwBlock *b = fw_block_new (cc->accum_kind, cc->accum_level,
+                               cc->accum->str, NULL,
+                               cc->pending_anchor, 0);
+    g_list_store_append (cc->doc->blocks, b);
+    if (cc->pending_anchor) {
+      guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->doc->blocks)) - 1;
+      g_hash_table_insert (cc->doc->anchors,
+                           g_strdup (cc->pending_anchor),
+                           GUINT_TO_POINTER (pos + 1));
+    }
+    g_object_unref (b);
+  }
+  g_string_truncate (cc->accum, 0);
+  g_clear_pointer (&cc->pending_anchor, g_free);
+  cc->accum_level = 0;
 }
 
 static void
-flush_accum_to_block (Fb2Ctx *ctx)
+fb2_re_emit_inlines (Fb2WalkCtx *cc)
 {
-  if (!ctx->accum_active)
-    return;
-
-  ctx->accum_active = FALSE;
-  if (ctx->accum && ctx->accum->len > 0) {
-    /* Trim trailing whitespace — FB2 sources frequently put a newline
-     * before the closing tag of a paragraph, which would otherwise
-     * make every paragraph render with a blank line at the end. */
-    while (ctx->accum->len > 0 &&
-           g_ascii_isspace (ctx->accum->str[ctx->accum->len - 1]))
-      g_string_truncate (ctx->accum, ctx->accum->len - 1);
-
-    if (ctx->accum->len > 0) {
-      FwBlock *b = fw_block_new (ctx->accum_kind, ctx->accum_level,
-                                 ctx->accum->str,
-                                 NULL, ctx->accum_anchor, 0);
-      g_list_store_append (ctx->doc->blocks, b);
-
-      if (ctx->accum_anchor) {
-        guint pos = g_list_model_get_n_items (G_LIST_MODEL (ctx->doc->blocks)) - 1;
-        g_hash_table_insert (ctx->doc->anchors,
-                             g_strdup (ctx->accum_anchor),
-                             GUINT_TO_POINTER (pos + 1));   /* +1 so 0 means "not found" */
-      }
-      g_object_unref (b);
-    }
-  }
-  if (ctx->accum)
-    g_string_truncate (ctx->accum, 0);
-  g_clear_pointer (&ctx->accum_anchor, g_free);
-  ctx->accum_level = 0;
+  if (!cc->open_inlines) return;
+  for (guint i = 0; i < cc->open_inlines->len; i++)
+    g_string_append_printf (cc->accum, "<%s>",
+                            (const char *) cc->open_inlines->pdata[i]);
 }
-
-/* Map FB2 inline element name to a Pango span open tag. Returns NULL
- * for unrecognized inlines (caller leaves the tag in place but text
- * still flows). */
-static const char *
-inline_open (const char *name)
-{
-  if (g_str_equal (name, "emphasis"))     return "<i>";
-  if (g_str_equal (name, "strong"))       return "<b>";
-  if (g_str_equal (name, "code"))         return "<tt>";
-  if (g_str_equal (name, "sub"))          return "<sub>";
-  if (g_str_equal (name, "sup"))          return "<sup>";
-  if (g_str_equal (name, "strikethrough"))return "<s>";
-  return NULL;
-}
-static const char *
-inline_close (const char *name)
-{
-  if (g_str_equal (name, "emphasis"))     return "</i>";
-  if (g_str_equal (name, "strong"))       return "</b>";
-  if (g_str_equal (name, "code"))         return "</tt>";
-  if (g_str_equal (name, "sub"))          return "</sub>";
-  if (g_str_equal (name, "sup"))          return "</sup>";
-  if (g_str_equal (name, "strikethrough"))return "</s>";
-  return NULL;
-}
-
-/* ── start/end element callbacks ──────────────────────────────────── */
 
 static void
-on_start (GMarkupParseContext  *context G_GNUC_UNUSED,
-          const gchar          *name,
-          const gchar         **attr_names,
-          const gchar         **attr_values,
-          gpointer              user_data,
-          GError              **error G_GNUC_UNUSED)
+fb2_start_block (Fb2WalkCtx *cc, FwBlockKind kind, int level, xmlNode *element)
 {
-  Fb2Ctx *ctx = user_data;
+  fb2_flush (cc);
+  cc->accum_active = TRUE;
+  cc->accum_kind   = kind;
+  cc->accum_level  = level;
+  for (xmlAttr *a = element->properties; a; a = a->next) {
+    if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
+      const char *val = (const char *)a->children->content;
+      if (val && *val) {
+        g_clear_pointer (&cc->pending_anchor, g_free);
+        cc->pending_anchor = g_strdup (val);
+      }
+      break;
+    }
+  }
+  fb2_re_emit_inlines (cc);
+}
 
-  /* description / title-info / metadata scopes */
-  if (g_str_equal (name, "description"))   { ctx->in_description = TRUE; return; }
-  if (g_str_equal (name, "title-info")) {
-    if (ctx->in_description) ctx->in_title_info = TRUE;
+static void
+fb2_text_escaped (GString *out, const char *text, gboolean to_toc, GString *toc_dst)
+{
+  if (!text) return;
+  for (const char *p = text; *p; p++) {
+    char c = *p;
+    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    if (c == ' ' && out->len > 0 && out->str[out->len - 1] == ' ')
+      continue;
+    if      (c == '<') g_string_append (out, "&lt;");
+    else if (c == '>') g_string_append (out, "&gt;");
+    else if (c == '&') g_string_append (out, "&amp;");
+    else               g_string_append_c (out, c);
+
+    if (to_toc && toc_dst) g_string_append_c (toc_dst, *p);
+  }
+}
+
+/* ── Forward decls for mutual recursion ──────────────────────── */
+
+static void fb2_walk_node     (Fb2WalkCtx *cc, xmlNode *node);
+static void fb2_walk_metadata (Fb2WalkCtx *cc, xmlNode *node);
+static void fb2_walk_binaries (Fb2WalkCtx *cc, xmlNode *node);
+
+/* ── Body walker ──────────────────────────────────────────────── */
+
+static void
+fb2_handle_inline (Fb2WalkCtx *cc, xmlNode *n, const char *lname)
+{
+  const char *pname = fb2_pango_for_inline (lname);
+  if (pname && cc->accum_active) {
+    g_string_append_printf (cc->accum, "<%s>", pname);
+    g_ptr_array_add (cc->open_inlines, (gpointer) pname);
+    fb2_walk_node (cc, n->children);
+    if (cc->open_inlines->len > 0 &&
+        cc->open_inlines->pdata[cc->open_inlines->len - 1] == pname) {
+      g_ptr_array_remove_index (cc->open_inlines,
+                                 cc->open_inlines->len - 1);
+      if (cc->accum_active)
+        g_string_append_printf (cc->accum, "</%s>", pname);
+    }
+  } else {
+    fb2_walk_node (cc, n->children);
+  }
+}
+
+static void
+fb2_handle_image (Fb2WalkCtx *cc, xmlNode *n)
+{
+  fb2_flush (cc);
+  const char *href = fb2_get_href (n);
+  if (!href) return;
+  /* Strip leading '#'. */
+  const char *id = href[0] == '#' ? href + 1 : href;
+  FwBlock *img = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL, 0);
+  g_list_store_append (cc->doc->blocks, img);
+  g_object_unref (img);
+}
+
+static void
+fb2_handle_section (Fb2WalkCtx *cc, xmlNode *n)
+{
+  fb2_flush (cc);
+  cc->section_depth++;
+
+  /* Record the section's id so the upcoming <title>'s flushed
+   * HEADING block carries it as its anchor. */
+  const char *section_id = NULL;
+  for (xmlAttr *a = n->properties; a; a = a->next) {
+    if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
+      section_id = (const char *)a->children->content;
+      break;
+    }
+  }
+
+  /* CHAPTER marker. */
+  FwBlock *chap = fw_block_new (FW_BLOCK_CHAPTER, cc->section_depth,
+                                NULL, NULL, section_id, 0);
+  g_list_store_append (cc->doc->blocks, chap);
+  if (section_id) {
+    guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->doc->blocks)) - 1;
+    g_hash_table_insert (cc->doc->anchors,
+                         g_strdup (section_id),
+                         GUINT_TO_POINTER (pos + 1));
+  }
+  g_object_unref (chap);
+
+  /* Stash for the title TOC entry. */
+  g_clear_pointer (&cc->toc_anchor, g_free);
+  if (section_id) cc->toc_anchor = g_strdup (section_id);
+
+  fb2_walk_node (cc, n->children);
+
+  fb2_flush (cc);
+  if (cc->section_depth > 0)
+    cc->section_depth--;
+}
+
+static void
+fb2_handle_title (Fb2WalkCtx *cc, xmlNode *n)
+{
+  if (cc->section_depth <= 0) {
+    /* `<title>` outside a section — top of <body> book-title. Walk
+     * children but ignore for now (could be added to metadata). */
+    fb2_walk_node (cc, n->children);
     return;
   }
-  if (ctx->in_title_info) {
-    if (g_str_equal (name, "author")) { ctx->in_author = TRUE; return; }
-    if (ctx->in_author) {
-      if (g_str_equal (name, "first-name") || g_str_equal (name, "middle-name") ||
-          g_str_equal (name, "last-name")) {
-        if (!ctx->meta_text) ctx->meta_text = g_string_new (NULL);
-        g_string_truncate (ctx->meta_text, 0);
-        ctx->meta_key = name;
-        return;
+
+  fb2_flush (cc);
+  cc->accum_active = TRUE;
+  cc->accum_kind   = FW_BLOCK_HEADING;
+  cc->accum_level  = cc->section_depth;
+  /* Anchor = the section's id (collected at fb2_handle_section). */
+  g_clear_pointer (&cc->pending_anchor, g_free);
+  if (cc->toc_anchor) {
+    cc->pending_anchor = cc->toc_anchor;
+    cc->toc_anchor = NULL;     /* transfer ownership */
+  }
+  if (!cc->toc_title) cc->toc_title = g_string_new (NULL);
+  else                g_string_truncate (cc->toc_title, 0);
+
+  /* `<title>` wraps `<p>` elements; treat each `<p>` as a line of
+   * the heading rather than a new block. To do this, we walk the
+   * children but avoid starting new accumulators. */
+  for (xmlNode *c = n->children; c; c = c->next) {
+    if (c->type == XML_TEXT_NODE && c->content) {
+      fb2_text_escaped (cc->accum, (const char *)c->content,
+                        TRUE, cc->toc_title);
+    } else if (c->type == XML_ELEMENT_NODE) {
+      g_autofree char *cname = g_ascii_strdown ((const char *)c->name, -1);
+      if (g_str_equal (cname, "p")) {
+        if (cc->accum->len > 0) g_string_append_c (cc->accum, ' ');
+        fb2_walk_node (cc, c->children);
+      } else if (g_str_equal (cname, "empty-line")) {
+        g_string_append (cc->accum, "\n");
+      } else {
+        fb2_walk_node (cc, c);
       }
     }
-    if (g_str_equal (name, "book-title") || g_str_equal (name, "lang") ||
-        g_str_equal (name, "src-lang")   || g_str_equal (name, "annotation")) {
-      if (!ctx->meta_text) ctx->meta_text = g_string_new (NULL);
-      g_string_truncate (ctx->meta_text, 0);
-      ctx->meta_key = name;
-      return;
+  }
+
+  /* Push TOC entry from the plain-text mirror. */
+  if (cc->toc_title && cc->toc_title->len > 0 && cc->pending_anchor) {
+    while (cc->toc_title->len > 0 &&
+           g_ascii_isspace (cc->toc_title->str[cc->toc_title->len - 1]))
+      g_string_truncate (cc->toc_title, cc->toc_title->len - 1);
+    FwReflowTocItem *item =
+      fw_reflow_toc_item_new (cc->toc_title->str, cc->pending_anchor);
+    g_list_store_append (cc->doc->toc, item);
+    g_object_unref (item);
+  }
+
+  fb2_flush (cc);
+}
+
+static void
+fb2_handle_block_quote (Fb2WalkCtx *cc, xmlNode *n)
+{
+  /* `epigraph` / `cite` / `poem` / `annotation` — walk children
+   * with PARAGRAPH-promoted-to-BLOCKQUOTE. We change accum_kind
+   * for any <p> we encounter inside. */
+  for (xmlNode *c = n->children; c; c = c->next) {
+    if (c->type != XML_ELEMENT_NODE) continue;
+    g_autofree char *cname = g_ascii_strdown ((const char *)c->name, -1);
+    if (g_str_equal (cname, "p") || g_str_equal (cname, "v") ||
+        g_str_equal (cname, "subtitle") || g_str_equal (cname, "text-author")) {
+      fb2_start_block (cc, FW_BLOCK_BLOCKQUOTE, 0, c);
+      fb2_walk_node (cc, c->children);
+      fb2_flush (cc);
+    } else if (g_str_equal (cname, "empty-line")) {
+      fb2_flush (cc);
+      FwBlock *hr = fw_block_new (FW_BLOCK_HR, 0, NULL, NULL, NULL, 0);
+      g_list_store_append (cc->doc->blocks, hr);
+      g_object_unref (hr);
+    } else if (g_str_equal (cname, "stanza")) {
+      /* Stanza: nested children of <stanza> behave like p's. */
+      fb2_handle_block_quote (cc, c);
+    } else {
+      fb2_walk_node (cc, c->children);
     }
   }
+}
 
-  /* binary */
-  if (g_str_equal (name, "binary")) {
-    g_clear_pointer (&ctx->bin_id,   g_free);
-    g_clear_pointer (&ctx->bin_type, g_free);
-    if (ctx->bin_data) g_string_truncate (ctx->bin_data, 0);
-    else               ctx->bin_data = g_string_new (NULL);
-    const char *id = attr_get (attr_names, attr_values, "id");
-    const char *ct = attr_get (attr_names, attr_values, "content-type");
-    if (id) ctx->bin_id   = g_strdup (id);
-    if (ct) ctx->bin_type = g_strdup (ct);
+static void
+fb2_handle_element (Fb2WalkCtx *cc, xmlNode *n)
+{
+  const char *name = (const char *)n->name;
+  g_autofree char *lname = g_ascii_strdown (name, -1);
+
+  if (g_str_equal (lname, "section")) {
+    fb2_handle_section (cc, n);
     return;
   }
-
-  /* section — emit a CHAPTER marker, hold the id for the upcoming title */
-  if (g_str_equal (name, "section")) {
-    ctx->section_depth++;
-    g_clear_pointer (&ctx->pending_section_id, g_free);
-    const char *id = attr_get (attr_names, attr_values, "id");
-    if (id)
-      ctx->pending_section_id = g_strdup (id);
-
-    /* Push CHAPTER marker — view paints nothing for it; we keep it
-     * because future scroll-to-anchor logic needs a separator block. */
-    FwBlock *chap = fw_block_new (FW_BLOCK_CHAPTER,
-                                  ctx->section_depth, NULL, NULL,
-                                  ctx->pending_section_id, 0);
-    g_list_store_append (ctx->doc->blocks, chap);
-    g_object_unref (chap);
+  if (g_str_equal (lname, "title")) {
+    fb2_handle_title (cc, n);
     return;
   }
-
-  /* image — push IMAGE block (inline images become block-level for
-   * now; the design doc explicitly accepts this for v1). */
-  if (g_str_equal (name, "image")) {
-    flush_accum_to_block (ctx);
-    const char *href = attr_get_href (attr_names, attr_values);
-    if (href) {
-      const char *id = href[0] == '#' ? href + 1 : href;
-      FwBlock *img = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL, 0);
-      g_list_store_append (ctx->doc->blocks, img);
-      g_object_unref (img);
-    }
+  if (g_str_equal (lname, "subtitle")) {
+    fb2_start_block (cc, FW_BLOCK_HEADING,
+                     cc->section_depth + 1, n);
+    fb2_walk_node (cc, n->children);
+    fb2_flush (cc);
     return;
   }
-
-  if (g_str_equal (name, "empty-line")) {
-    flush_accum_to_block (ctx);
+  if (g_str_equal (lname, "p")) {
+    fb2_start_block (cc, FW_BLOCK_PARAGRAPH, 0, n);
+    fb2_walk_node (cc, n->children);
+    fb2_flush (cc);
+    return;
+  }
+  if (g_str_equal (lname, "empty-line")) {
+    fb2_flush (cc);
     FwBlock *hr = fw_block_new (FW_BLOCK_HR, 0, NULL, NULL, NULL, 0);
-    g_list_store_append (ctx->doc->blocks, hr);
+    g_list_store_append (cc->doc->blocks, hr);
     g_object_unref (hr);
     return;
   }
-
-  /* title — start HEADING accumulator (only meaningful inside a section).
-   * Children (<p>) won't open new accums while we're already accumulating
-   * a HEADING. */
-  if (g_str_equal (name, "title") && ctx->section_depth > 0) {
-    flush_accum_to_block (ctx);
-    if (!ctx->accum) ctx->accum = g_string_new (NULL);
-    g_string_truncate (ctx->accum, 0);
-    ctx->accum_active = TRUE;
-    ctx->accum_kind   = FW_BLOCK_HEADING;
-    ctx->accum_level  = ctx->section_depth;
-    g_clear_pointer (&ctx->accum_anchor, g_free);
-    if (ctx->pending_section_id) {
-      ctx->accum_anchor = ctx->pending_section_id;  /* transfer */
-      ctx->pending_section_id = NULL;
-    }
-    if (!ctx->toc_title) ctx->toc_title = g_string_new (NULL);
-    g_string_truncate (ctx->toc_title, 0);
+  if (g_str_equal (lname, "epigraph") || g_str_equal (lname, "cite") ||
+      g_str_equal (lname, "poem") || g_str_equal (lname, "annotation")) {
+    fb2_handle_block_quote (cc, n);
+    return;
+  }
+  if (g_str_equal (lname, "image")) {
+    fb2_handle_image (cc, n);
+    return;
+  }
+  if (g_str_equal (lname, "v")) {
+    /* Verse line — paragraph with line-break feel. */
+    fb2_start_block (cc, FW_BLOCK_PARAGRAPH, 0, n);
+    fb2_walk_node (cc, n->children);
+    fb2_flush (cc);
     return;
   }
 
-  /* paragraph (or anything inside an active HEADING accumulator —
-   * <p> inside <title> contributes to the heading's text rather than
-   * starting a new block). */
-  if (g_str_equal (name, "p") || g_str_equal (name, "subtitle")) {
-    if (ctx->accum_active && ctx->accum_kind == FW_BLOCK_HEADING) {
-      if (ctx->accum->len > 0)
-        g_string_append_c (ctx->accum, ' ');
-      return;
-    }
-    flush_accum_to_block (ctx);
-    if (!ctx->accum) ctx->accum = g_string_new (NULL);
-    g_string_truncate (ctx->accum, 0);
-    ctx->accum_active = TRUE;
-    ctx->accum_kind   = FW_BLOCK_PARAGRAPH;
-    ctx->accum_level  = 0;
-    g_clear_pointer (&ctx->accum_anchor, g_free);
-    return;
-  }
-
-  /* cite / epigraph — blockquote */
-  if (g_str_equal (name, "cite") || g_str_equal (name, "epigraph")) {
-    flush_accum_to_block (ctx);
-    if (!ctx->accum) ctx->accum = g_string_new (NULL);
-    g_string_truncate (ctx->accum, 0);
-    ctx->accum_active = TRUE;
-    ctx->accum_kind   = FW_BLOCK_BLOCKQUOTE;
-    ctx->accum_level  = 0;
-    return;
-  }
-
-  /* Inline styles inside an active accumulator — append Pango open. */
-  if (ctx->accum_active) {
-    const char *open = inline_open (name);
-    if (open)
-      g_string_append (ctx->accum, open);
-    return;
-  }
+  /* Inline tags inside an active accumulator. */
+  fb2_handle_inline (cc, n, lname);
 }
 
 static void
-on_end (GMarkupParseContext  *context G_GNUC_UNUSED,
-        const gchar          *name,
-        gpointer              user_data,
-        GError              **error G_GNUC_UNUSED)
+fb2_walk_node (Fb2WalkCtx *cc, xmlNode *node)
 {
-  Fb2Ctx *ctx = user_data;
-
-  if (g_str_equal (name, "description"))   { ctx->in_description = FALSE; return; }
-  if (g_str_equal (name, "title-info")) {
-    ctx->in_title_info = FALSE;
-    /* On title-info close, build a single "author" entry from the
-     * collected name pieces. */
-    GString *au = g_string_new (NULL);
-    if (ctx->author_first  && ctx->author_first->len)  g_string_append (au, ctx->author_first->str);
-    if (ctx->author_middle && ctx->author_middle->len) {
-      if (au->len) g_string_append_c (au, ' ');
-      g_string_append (au, ctx->author_middle->str);
+  for (xmlNode *n = node; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE) {
+      fb2_handle_element (cc, n);
+    } else if (n->type == XML_TEXT_NODE && cc->accum_active) {
+      fb2_text_escaped (cc->accum, (const char *)n->content,
+                        FALSE, NULL);
     }
-    if (ctx->author_last   && ctx->author_last->len) {
-      if (au->len) g_string_append_c (au, ' ');
-      g_string_append (au, ctx->author_last->str);
-    }
-    if (au->len > 0)
-      g_hash_table_insert (ctx->doc->metadata,
-                           g_strdup ("author"), g_string_free (au, FALSE));
-    else
-      g_string_free (au, TRUE);
-    return;
-  }
-
-  if (g_str_equal (name, "author")) { ctx->in_author = FALSE; return; }
-
-  /* Metadata scalar close. */
-  if (ctx->meta_text && ctx->meta_key && g_str_equal (name, ctx->meta_key)) {
-    /* Trim whitespace */
-    while (ctx->meta_text->len > 0 &&
-           g_ascii_isspace (ctx->meta_text->str[ctx->meta_text->len - 1]))
-      g_string_truncate (ctx->meta_text, ctx->meta_text->len - 1);
-
-    if (ctx->in_author) {
-      if (g_str_equal (ctx->meta_key, "first-name")) {
-        if (!ctx->author_first)  ctx->author_first  = g_string_new (NULL);
-        g_string_assign (ctx->author_first, ctx->meta_text->str);
-      } else if (g_str_equal (ctx->meta_key, "middle-name")) {
-        if (!ctx->author_middle) ctx->author_middle = g_string_new (NULL);
-        g_string_assign (ctx->author_middle, ctx->meta_text->str);
-      } else if (g_str_equal (ctx->meta_key, "last-name")) {
-        if (!ctx->author_last)   ctx->author_last   = g_string_new (NULL);
-        g_string_assign (ctx->author_last, ctx->meta_text->str);
-      }
-    } else {
-      const char *canonical = ctx->meta_key;
-      if (g_str_equal (canonical, "book-title")) canonical = "title";
-      g_hash_table_insert (ctx->doc->metadata,
-                           g_strdup (canonical),
-                           g_strdup (ctx->meta_text->str));
-    }
-    g_string_truncate (ctx->meta_text, 0);
-    ctx->meta_key = NULL;
-    return;
-  }
-
-  /* binary: decode base64 → GBytes → GdkTexture */
-  if (g_str_equal (name, "binary")) {
-    if (ctx->bin_id && ctx->bin_data && ctx->bin_data->len > 0) {
-      gsize out_len = 0;
-      g_autofree guchar *bytes = g_base64_decode (ctx->bin_data->str, &out_len);
-      if (bytes && out_len > 0) {
-        g_autoptr (GBytes) gb = g_bytes_new (bytes, out_len);
-        g_autoptr (GError) e = NULL;
-        GdkTexture *tex = gdk_texture_new_from_bytes (gb, &e);
-        if (tex)
-          g_hash_table_insert (ctx->doc->images, g_strdup (ctx->bin_id), tex);
-        else
-          g_warning ("fb2: dropping image '%s': %s",
-                     ctx->bin_id, e ? e->message : "(unknown)");
-      }
-    }
-    g_clear_pointer (&ctx->bin_id,   g_free);
-    g_clear_pointer (&ctx->bin_type, g_free);
-    if (ctx->bin_data) g_string_truncate (ctx->bin_data, 0);
-    return;
-  }
-
-  if (g_str_equal (name, "section")) {
-    flush_accum_to_block (ctx);
-    if (ctx->section_depth > 0)
-      ctx->section_depth--;
-    g_clear_pointer (&ctx->pending_section_id, g_free);
-    return;
-  }
-
-  if (g_str_equal (name, "title")) {
-    /* Push TOC entry from the plain text we mirrored, then flush
-     * the heading accumulator. */
-    if (ctx->toc_title && ctx->toc_title->len > 0) {
-      const char *anchor = ctx->accum_anchor;
-      FwReflowTocItem *item =
-        fw_reflow_toc_item_new (ctx->toc_title->str, anchor);
-      g_list_store_append (ctx->doc->toc, item);
-      g_object_unref (item);
-    }
-    if (ctx->toc_title) g_string_truncate (ctx->toc_title, 0);
-    flush_accum_to_block (ctx);
-    return;
-  }
-
-  if (g_str_equal (name, "p") || g_str_equal (name, "subtitle")) {
-    if (ctx->accum_active && ctx->accum_kind == FW_BLOCK_HEADING)
-      return;  /* part of a heading; don't flush */
-    flush_accum_to_block (ctx);
-    return;
-  }
-
-  if (g_str_equal (name, "cite") || g_str_equal (name, "epigraph")) {
-    flush_accum_to_block (ctx);
-    return;
-  }
-
-  if (ctx->accum_active) {
-    const char *close = inline_close (name);
-    if (close)
-      g_string_append (ctx->accum, close);
   }
 }
+
+/* ── Metadata walker ─────────────────────────────────────────── */
 
 static void
-on_text (GMarkupParseContext *context G_GNUC_UNUSED,
-         const gchar         *text,
-         gsize                text_len,
-         gpointer             user_data,
-         GError             **error G_GNUC_UNUSED)
+fb2_metadata_set (FwReflowDocumentFb2 *self, const char *key, const char *val)
 {
-  Fb2Ctx *ctx = user_data;
-
-  /* Binary data — accumulate raw (we'll base64-decode at close). */
-  if (ctx->bin_id && ctx->bin_data) {
-    g_string_append_len (ctx->bin_data, text, text_len);
-    return;
-  }
-
-  /* Metadata scalar */
-  if (ctx->meta_text && ctx->meta_key) {
-    g_string_append_len (ctx->meta_text, text, text_len);
-    return;
-  }
-
-  /* Block accumulator */
-  if (ctx->accum_active) {
-    g_autofree char *escaped = g_markup_escape_text (text, text_len);
-    g_string_append (ctx->accum, escaped);
-
-    if (ctx->accum_kind == FW_BLOCK_HEADING && ctx->toc_title)
-      g_string_append_len (ctx->toc_title, text, text_len);
-  }
+  if (!val || !*val) return;
+  if (g_hash_table_contains (self->metadata, key)) return;
+  g_hash_table_insert (self->metadata, g_strdup (key), g_strdup (val));
 }
 
-/* ── Encoding normalization (XML prolog) ──────────────────────────── */
-
-/* If the file declares a non-UTF-8 encoding, convert it to UTF-8 in
- * place. GMarkupParser only understands UTF-8. Returns a fresh UTF-8
- * buffer (caller frees) and writes its length to *out_len. On
- * conversion failure or unknown encoding, returns NULL with error set. */
 static char *
-normalize_to_utf8 (const char *raw, gsize len, gsize *out_len, GError **error)
+fb2_node_text (xmlNode *n)
 {
-  /* Look for encoding="..." inside the first ~256 bytes. */
-  gsize scan = MIN (len, 256u);
-  const char *encbeg = g_strstr_len (raw, scan, "encoding=\"");
-  const char *encname = NULL;
-  gsize       enclen  = 0;
-  if (encbeg) {
-    encbeg += strlen ("encoding=\"");
-    const char *encend = memchr (encbeg, '"', scan - (encbeg - raw));
-    if (encend) {
-      encname = encbeg;
-      enclen  = encend - encbeg;
+  GString *out = g_string_new (NULL);
+  for (xmlNode *c = n->children; c; c = c->next) {
+    if (c->type == XML_TEXT_NODE && c->content)
+      g_string_append (out, (const char *)c->content);
+    else if (c->type == XML_ELEMENT_NODE) {
+      g_autofree char *inner = fb2_node_text (c);
+      if (inner) g_string_append (out, inner);
     }
   }
-
-  if (!encname || enclen == 0 ||
-      g_ascii_strncasecmp (encname, "UTF-8", MAX (enclen, 5u)) == 0 ||
-      g_ascii_strncasecmp (encname, "utf8",  MAX (enclen, 4u)) == 0) {
-    /* Already UTF-8 (or no declaration — assume UTF-8). */
-    *out_len = len;
-    return g_memdup2 (raw, len);
+  /* Trim. */
+  while (out->len > 0 && g_ascii_isspace (out->str[out->len - 1]))
+    g_string_truncate (out, out->len - 1);
+  const char *s = out->str;
+  while (*s && g_ascii_isspace (*s)) s++;
+  if (s != out->str) {
+    char *trimmed = g_strdup (s);
+    g_string_free (out, TRUE);
+    return trimmed;
   }
-
-  g_autofree char *encname_z = g_strndup (encname, enclen);
-  char *converted = g_convert (raw, len, "UTF-8", encname_z,
-                               NULL, out_len, error);
-  return converted;
+  return g_string_free (out, FALSE);
 }
-
-/* ── Interface implementation ─────────────────────────────────────── */
 
 static void
-fb2_ctx_clear (Fb2Ctx *ctx)
+fb2_walk_metadata (Fb2WalkCtx *cc, xmlNode *root)
 {
-  g_clear_pointer (&ctx->pending_section_id, g_free);
-  g_clear_pointer (&ctx->accum_anchor, g_free);
-  g_clear_pointer (&ctx->bin_id, g_free);
-  g_clear_pointer (&ctx->bin_type, g_free);
-  if (ctx->accum)         g_string_free (ctx->accum, TRUE);
-  if (ctx->toc_title)     g_string_free (ctx->toc_title, TRUE);
-  if (ctx->meta_text)     g_string_free (ctx->meta_text, TRUE);
-  if (ctx->author_first)  g_string_free (ctx->author_first, TRUE);
-  if (ctx->author_middle) g_string_free (ctx->author_middle, TRUE);
-  if (ctx->author_last)   g_string_free (ctx->author_last, TRUE);
-  if (ctx->bin_data)      g_string_free (ctx->bin_data, TRUE);
+  /* Find <description><title-info>...</title-info></description>. */
+  xmlNode *title_info = NULL;
+  for (xmlNode *n = root; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) continue;
+    if (g_ascii_strcasecmp ((const char *)n->name, "description") == 0) {
+      for (xmlNode *c = n->children; c; c = c->next) {
+        if (c->type == XML_ELEMENT_NODE &&
+            g_ascii_strcasecmp ((const char *)c->name, "title-info") == 0) {
+          title_info = c;
+          break;
+        }
+      }
+      break;
+    }
+  }
+  if (!title_info) return;
+
+  for (xmlNode *c = title_info->children; c; c = c->next) {
+    if (c->type != XML_ELEMENT_NODE) continue;
+    g_autofree char *cname = g_ascii_strdown ((const char *)c->name, -1);
+
+    if (g_str_equal (cname, "book-title")) {
+      g_autofree char *t = fb2_node_text (c);
+      fb2_metadata_set (cc->doc, "title", t);
+    } else if (g_str_equal (cname, "lang") || g_str_equal (cname, "src-lang")) {
+      g_autofree char *t = fb2_node_text (c);
+      fb2_metadata_set (cc->doc, "lang", t);
+    } else if (g_str_equal (cname, "annotation")) {
+      g_autofree char *t = fb2_node_text (c);
+      fb2_metadata_set (cc->doc, "annotation", t);
+    } else if (g_str_equal (cname, "author")) {
+      g_autofree char *fn = NULL, *mn = NULL, *ln = NULL;
+      for (xmlNode *p = c->children; p; p = p->next) {
+        if (p->type != XML_ELEMENT_NODE) continue;
+        const char *pn = (const char *)p->name;
+        if (!fn && g_ascii_strcasecmp (pn, "first-name") == 0)
+          fn = fb2_node_text (p);
+        else if (!mn && g_ascii_strcasecmp (pn, "middle-name") == 0)
+          mn = fb2_node_text (p);
+        else if (!ln && g_ascii_strcasecmp (pn, "last-name") == 0)
+          ln = fb2_node_text (p);
+      }
+      g_autoptr (GString) au = g_string_new (NULL);
+      if (fn && *fn) g_string_append (au, fn);
+      if (mn && *mn) {
+        if (au->len) g_string_append_c (au, ' ');
+        g_string_append (au, mn);
+      }
+      if (ln && *ln) {
+        if (au->len) g_string_append_c (au, ' ');
+        g_string_append (au, ln);
+      }
+      if (au->len > 0)
+        fb2_metadata_set (cc->doc, "author", au->str);
+    }
+  }
 }
+
+/* ── Binary walker ─────────────────────────────────────────────── */
+
+static void
+fb2_walk_binaries (Fb2WalkCtx *cc, xmlNode *root)
+{
+  /* `<binary id="..." content-type="image/...">BASE64</binary>` —
+   * decode base64 → GdkTexture, store in self->images. */
+  for (xmlNode *n = root; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) continue;
+    g_autofree char *lname = g_ascii_strdown ((const char *)n->name, -1);
+    if (!g_str_equal (lname, "binary")) {
+      if (n->children) fb2_walk_binaries (cc, n->children);
+      continue;
+    }
+
+    const char *id = NULL;
+    for (xmlAttr *a = n->properties; a; a = a->next) {
+      if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
+        id = (const char *)a->children->content;
+        break;
+      }
+    }
+    if (!id) continue;
+
+    g_autofree char *b64 = fb2_node_text (n);
+    if (!b64 || !*b64) continue;
+
+    gsize out_len = 0;
+    g_autofree guchar *bytes = g_base64_decode (b64, &out_len);
+    if (!bytes || out_len == 0) continue;
+
+    g_autoptr (GBytes) gb = g_bytes_new (bytes, out_len);
+    g_autoptr (GError) e = NULL;
+    GdkTexture *tex = gdk_texture_new_from_bytes (gb, &e);
+    if (tex)
+      g_hash_table_insert (cc->doc->images, g_strdup (id), tex);
+    else
+      g_warning ("fb2: dropping image '%s': %s",
+                 id, e ? e->message : "(unknown)");
+  }
+}
+
+/* ── Open path ─────────────────────────────────────────────────── */
 
 static gboolean
 fb2_open (FwReflowDocument *doc, const char *path, GError **error)
@@ -534,41 +570,59 @@ fb2_open (FwReflowDocument *doc, const char *path, GError **error)
   if (!g_file_get_contents (path, &raw, &raw_len, error))
     return FALSE;
 
-  gsize utf8_len = 0;
-  g_autofree char *utf8 = normalize_to_utf8 (raw, raw_len, &utf8_len, error);
-  if (!utf8)
+  /* libxml2 handles encoding declarations natively — no need to
+   * pre-convert from cp1251 etc. like the GMarkupParser version did. */
+  xmlDocPtr xdoc = xmlReadMemory (
+    raw, (int) raw_len,
+    NULL, NULL,
+    XML_PARSE_RECOVER | XML_PARSE_NOERROR | XML_PARSE_NOWARNING |
+    XML_PARSE_NONET   | XML_PARSE_NOBLANKS);
+  if (!xdoc) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "fb2: xmlReadMemory failed");
     return FALSE;
+  }
 
-  static const GMarkupParser parser = {
-    .start_element = on_start,
-    .end_element   = on_end,
-    .text          = on_text,
-    .passthrough   = NULL,
-    .error         = NULL,
+  xmlNode *root = xmlDocGetRootElement (xdoc);
+  if (!root) {
+    xmlFreeDoc (xdoc);
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "fb2: empty document");
+    return FALSE;
+  }
+
+  Fb2WalkCtx cc = {
+    .doc           = self,
+    .accum         = g_string_new (NULL),
+    .open_inlines  = g_ptr_array_new (),
   };
 
-  Fb2Ctx ctx = { .doc = self };
+  /* Pre-pass 1: metadata (title, author, language, annotation). */
+  fb2_walk_metadata (&cc, root->children);
 
-  GMarkupParseContext *pctx =
-    g_markup_parse_context_new (&parser, G_MARKUP_TREAT_CDATA_AS_TEXT, &ctx, NULL);
+  /* Pre-pass 2: <binary> elements → image hash. Doing this before
+   * the body walk means every <image l:href="#X"/> can resolve at
+   * render time, even when the binary appears after the body. */
+  fb2_walk_binaries (&cc, root->children);
 
-  gboolean ok =
-    g_markup_parse_context_parse (pctx, utf8, utf8_len, error) &&
-    g_markup_parse_context_end_parse (pctx, error);
+  /* Main pass: walk <body> producing FwBlocks. */
+  for (xmlNode *n = root->children; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE &&
+        g_ascii_strcasecmp ((const char *)n->name, "body") == 0) {
+      fb2_walk_node (&cc, n->children);
+    }
+  }
+  fb2_flush (&cc);
 
-  /* Final flush in case the document closed without explicit </p>
-   * (defensive — shouldn't happen on well-formed FB2 but the parser
-   * accepts text-after-close in non-strict mode). */
-  if (ok)
-    flush_accum_to_block (&ctx);
-
-  g_markup_parse_context_free (pctx);
-  fb2_ctx_clear (&ctx);
-
-  if (!ok)
-    return FALSE;
-
-  self->path = g_strdup (path);
+  g_string_free (cc.accum, TRUE);
+  g_clear_pointer (&cc.pending_anchor, g_free);
+  g_clear_pointer (&cc.toc_anchor, g_free);
+  if (cc.toc_title)     g_string_free (cc.toc_title, TRUE);
+  if (cc.author_first)  g_string_free (cc.author_first, TRUE);
+  if (cc.author_middle) g_string_free (cc.author_middle, TRUE);
+  if (cc.author_last)   g_string_free (cc.author_last, TRUE);
+  g_ptr_array_free (cc.open_inlines, TRUE);
+  xmlFreeDoc (xdoc);
 
   /* Round out metadata. */
   if (!g_hash_table_contains (self->metadata, "title")) {
@@ -578,8 +632,11 @@ fb2_open (FwReflowDocument *doc, const char *path, GError **error)
   g_hash_table_insert (self->metadata, g_strdup ("format"),
                        g_strdup ("FictionBook 2"));
 
+  self->path = g_strdup (path);
   return TRUE;
 }
+
+/* ── Interface accessors ──────────────────────────────────────── */
 
 static void
 fb2_close (FwReflowDocument *doc)
@@ -592,8 +649,7 @@ fb2_close (FwReflowDocument *doc)
 static GListModel *
 fb2_get_block_model (FwReflowDocument *doc)
 {
-  FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
-  return G_LIST_MODEL (self->blocks);
+  return G_LIST_MODEL (FW_REFLOW_DOCUMENT_FB2 (doc)->blocks);
 }
 
 static GdkTexture *
@@ -601,18 +657,14 @@ fb2_get_image (FwReflowDocument *doc, const char *image_id)
 {
   FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
   if (!image_id) return NULL;
-  /* href values often arrive with a leading '#' in the block; both
-   * keys are accepted. */
-  if (image_id[0] == '#')
-    image_id++;
+  if (image_id[0] == '#') image_id++;
   return g_hash_table_lookup (self->images, image_id);
 }
 
 static GListModel *
 fb2_get_toc (FwReflowDocument *doc)
 {
-  FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
-  return G_LIST_MODEL (self->toc);
+  return G_LIST_MODEL (FW_REFLOW_DOCUMENT_FB2 (doc)->toc);
 }
 
 static guint
@@ -620,15 +672,14 @@ fb2_find_block_by_anchor (FwReflowDocument *doc, const char *anchor_id)
 {
   FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
   if (!anchor_id) return 0;
-  gpointer v = g_hash_table_lookup (self->anchors, anchor_id);
-  return GPOINTER_TO_UINT (v);  /* 0 = not found; 1+ = block_pos + 1 */
+  return GPOINTER_TO_UINT (g_hash_table_lookup (self->anchors, anchor_id));
 }
 
 static GArray *
 fb2_search (FwReflowDocument *doc, const char *needle)
 {
   (void) doc; (void) needle;
-  return NULL;  /* Phase 6 polish — search highlight in the listview. */
+  return NULL;  /* Phase 6 — search highlighting in the listview. */
 }
 
 static GHashTable *
@@ -651,7 +702,7 @@ fw_reflow_document_fb2_iface_init (FwReflowDocumentInterface *iface)
   iface->get_metadata          = fb2_get_metadata;
 }
 
-/* ── GObject boilerplate ──────────────────────────────────────────── */
+/* ── GObject boilerplate ──────────────────────────────────────── */
 
 static void
 fw_reflow_document_fb2_finalize (GObject *object)
