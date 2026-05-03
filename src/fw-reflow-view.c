@@ -227,22 +227,47 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
       gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
       break;
     case FW_BLOCK_HR:
+      /* Real horizontal rule: empty label, CSS bottom border. The
+       * .reflow-hr class adds a thin border line at row mid-height,
+       * matching foliate's `<hr>` styling. Centered with side
+       * margins so it doesn't reach edge-to-edge. */
+      gtk_widget_add_css_class (text_w, "reflow-hr");
       gtk_label_set_use_markup (label, FALSE);
-      gtk_label_set_text (label, "———");
+      gtk_label_set_text (label, "");
       break;
     case FW_BLOCK_CHAPTER:
       gtk_widget_add_css_class (text_w, "reflow-chapter");
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, fw_block_get_text (block) ?: "");
       break;
+    case FW_BLOCK_LIST_ITEM: {
+      /* Bullet prefix — list-item rendering. Pango markup-safe. */
+      gtk_label_set_use_markup (label, TRUE);
+      const char *body = fw_block_get_text (block) ?: "";
+      g_autofree char *with_bullet =
+        g_strconcat ("\xe2\x80\xa2\xc2\xa0", body, NULL); /* "• " */
+      gtk_label_set_markup (label, with_bullet);
+      break;
+    }
     case FW_BLOCK_LIST:
-    case FW_BLOCK_LIST_ITEM:
     case FW_BLOCK_PARAGRAPH:
     case FW_BLOCK_IMAGE:        /* unreachable — handled above */
-    default:
+    default: {
       gtk_label_set_use_markup (label, TRUE);
-      gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
+      const char *body = fw_block_get_text (block) ?: "";
+      if (fw_block_get_kind (block) == FW_BLOCK_PARAGRAPH &&
+          (fw_block_get_flags (block) & FW_BLOCK_FLAG_INDENT)) {
+        /* Em-quad first-line indent (U+2003). Pango justification
+         * stretches inter-word gaps but leaves the leading em-quad
+         * intact, so it reads as a print-style first-line indent. */
+        g_autofree char *indented =
+          g_strconcat ("\xe2\x80\x83", body, NULL);
+        gtk_label_set_markup (label, indented);
+      } else {
+        gtk_label_set_markup (label, body);
+      }
       break;
+    }
   }
 
   gtk_stack_set_visible_child_name (stack, "text");
@@ -299,6 +324,17 @@ static const char REFLOW_STATIC_CSS[] =
   "    border-radius: 6px;"
   "    margin-top: 8px;"
   "    margin-bottom: 8px;"
+  "}"
+  /* Horizontal rule: empty label with a centered thin line. Side
+   * margins make it shorter than the column; vertical margins give
+   * breathing room from neighbouring blocks. */
+  ".reflow-hr {"
+  "    min-height: 1px;"
+  "    border-bottom: 1px solid alpha(currentColor, 0.25);"
+  "    margin-top: 1.0em;"
+  "    margin-bottom: 1.0em;"
+  "    margin-left: 30%;"
+  "    margin-right: 30%;"
   "}";
 
 static char *
@@ -809,6 +845,30 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
   g_set_object (&self->document, doc);
   self->all_blocks = doc ? fw_reflow_document_get_block_model (doc) : NULL;
   self->current_page = 0;
+
+  /* One-pass first-line-indent annotation. A paragraph gets the
+   * INDENT flag iff the previous block is also a paragraph (or list
+   * item / blockquote). Print-typography idiom: chapter-leading
+   * paragraphs and paragraphs-after-headings stay flush left.
+   * Foliate's `:not(p) + p, p:first-child { text-indent: 0 }`
+   * captured at model-load time so the bind handler is O(1). */
+  if (self->all_blocks) {
+    guint n = g_list_model_get_n_items (self->all_blocks);
+    FwBlockKind prev_kind = (FwBlockKind) -1;
+    for (guint i = 0; i < n; i++) {
+      g_autoptr (FwBlock) b = g_list_model_get_item (self->all_blocks, i);
+      if (!b) continue;
+      FwBlockKind k = fw_block_get_kind (b);
+      if (k == FW_BLOCK_PARAGRAPH &&
+          (prev_kind == FW_BLOCK_PARAGRAPH ||
+           prev_kind == FW_BLOCK_LIST_ITEM ||
+           prev_kind == FW_BLOCK_BLOCKQUOTE)) {
+        fw_block_set_flags (b,
+                            fw_block_get_flags (b) | FW_BLOCK_FLAG_INDENT);
+      }
+      prev_kind = k;
+    }
+  }
 
   if (self->page_slice) {
     /* Set the slice's underlying model to all_blocks. The slice

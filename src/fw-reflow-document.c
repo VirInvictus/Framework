@@ -67,6 +67,7 @@ const char  *fw_block_get_text       (FwBlock *self) { return self->text;      }
 const char  *fw_block_get_image_id   (FwBlock *self) { return self->image_id;  }
 const char  *fw_block_get_anchor_id  (FwBlock *self) { return self->anchor_id; }
 guint        fw_block_get_flags      (FwBlock *self) { return self->flags;     }
+void         fw_block_set_flags      (FwBlock *self, guint flags) { self->flags = flags; }
 
 /* ── FwReflowTocItem GObject ──────────────────────────────────────── */
 

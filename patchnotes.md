@@ -2,6 +2,35 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.63.0 (2026-05-02)
+
+*Reflow typography depth pass: first-line indent, list bullets, real horizontal rules.*
+
+Building on v0.61's justification + chapter-title centering, three more print-typography idioms now show up in the reflow stack.
+
+### First-line paragraph indent
+
+Consecutive paragraphs get a leading em-quad (U+2003) prefix to mark a print-style first-line indent. Pango justification stretches the inter-word gaps without disturbing the leading em-quad, so it reads as a real first-line indent rather than a magic-spaced word.
+
+The "consecutive" predicate matches foliate's `:not(p) + p, p:first-child { text-indent: 0 }` CSS idiom: a paragraph qualifies for indent iff the previous block is a paragraph, list-item, or blockquote. Paragraphs immediately after headings, chapter markers, images, code blocks, or HRs stay flush left — those are the typographic "first paragraph" positions.
+
+Computed once at model-load time as the `FW_BLOCK_FLAG_INDENT` flag on `FwBlock` (single O(N) pass in `fw_reflow_view_set_document` after the underlying model is bound). Bind handler is O(1): check the flag, prepend the em-quad if set.
+
+### List item bullets
+
+`FW_BLOCK_LIST_ITEM` blocks previously rendered as plain paragraphs — the bullet glyph was missing. Now they get a `"• "` prefix (U+2022 + non-breaking space) so list structure reads at a glance. Ordered-list numbering is still absent (the walker doesn't distinguish `<ol>` from `<ul>` yet); a future polish.
+
+### Horizontal rules
+
+`FW_BLOCK_HR` previously rendered as the literal string `"———"` (three em-dashes). Functional but obvious. Now an empty label with a `.reflow-hr` class: 1px-thick centered border-bottom at 25% alpha-currentColor, 1em margin top + bottom, 30% side margin so it doesn't reach edge-to-edge.
+
+### Verified
+
+* All 11 MOBI/AZW3 files in the corpus open cleanly with new typography.
+* EPUB / MOBI smoke-tested against random samples; both render expected.
+
+---
+
 ## v0.62.0 (2026-05-02)
 
 *HuffDic-compressed MOBI support (compression code 17480).*

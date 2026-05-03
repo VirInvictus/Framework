@@ -29,7 +29,8 @@ typedef enum {
 } FwBlockKind;
 
 /* FwBlock flags — packed into the `flags` GUINT. */
-#define FW_BLOCK_FLAG_COVER  (1u << 0)   /* IMAGE: render full-page */
+#define FW_BLOCK_FLAG_COVER   (1u << 0)  /* IMAGE: render full-page */
+#define FW_BLOCK_FLAG_INDENT  (1u << 1)  /* PARAGRAPH: first-line indent */
 
 /* ── FwBlock — GObject for use in GListModel ──────────────────────── */
 
@@ -50,6 +51,7 @@ const char  *fw_block_get_text       (FwBlock *self);
 const char  *fw_block_get_image_id   (FwBlock *self);
 const char  *fw_block_get_anchor_id  (FwBlock *self);
 guint        fw_block_get_flags      (FwBlock *self);
+void         fw_block_set_flags      (FwBlock *self, guint flags);
 
 /* ── Reflow TOC entry ─────────────────────────────────────────────── */
 
