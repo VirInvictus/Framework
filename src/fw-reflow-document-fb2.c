@@ -488,6 +488,27 @@ fb2_walk_metadata (Fb2WalkCtx *cc, xmlNode *root)
     } else if (g_str_equal (cname, "annotation")) {
       g_autofree char *t = fb2_node_text (c);
       fb2_metadata_set (cc->doc, "annotation", t);
+    } else if (g_str_equal (cname, "coverpage")) {
+      /* `<coverpage><image l:href="#cover_id"/></coverpage>` —
+       * the FB2 spec puts a cover-image reference here. We push a
+       * leading IMAGE block flagged FW_BLOCK_FLAG_COVER so the
+       * viewer gives it a full page. */
+      for (xmlNode *p = c->children; p; p = p->next) {
+        if (p->type == XML_ELEMENT_NODE &&
+            g_ascii_strcasecmp ((const char *)p->name, "image") == 0) {
+          const char *href = fb2_get_href (p);
+          if (href) {
+            const char *id = href[0] == '#' ? href + 1 : href;
+            FwBlock *cov = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id,
+                                          NULL, FW_BLOCK_FLAG_COVER);
+            /* Insert at head — but at metadata-walk time `blocks`
+             * is empty, so append works the same. */
+            g_list_store_append (cc->doc->blocks, cov);
+            g_object_unref (cov);
+            break;
+          }
+        }
+      }
     } else if (g_str_equal (cname, "author")) {
       g_autofree char *fn = NULL, *mn = NULL, *ln = NULL;
       for (xmlNode *p = c->children; p; p = p->next) {

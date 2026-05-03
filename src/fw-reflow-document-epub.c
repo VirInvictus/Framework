@@ -218,6 +218,11 @@ typedef struct {
   /* EPUB 3 nav.xhtml id (from manifest item with properties="nav"). */
   char       *nav_id;
 
+  /* Cover image id. Populated by either:
+   *   - EPUB 2: `<meta name="cover" content="X"/>` in <metadata>
+   *   - EPUB 3: `<item properties="cover-image"/>` in <manifest> */
+  char       *cover_id;
+
   /* Metadata accumulation */
   gboolean    in_metadata;
   GString    *meta_text;
@@ -273,8 +278,25 @@ opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
         if (g_strstr_len (props, -1, "nav"))
           oc->nav_id = g_strdup (id);
       }
+      /* EPUB 3: cover-image property on manifest item. */
+      if (props && !oc->cover_id) {
+        if (g_strstr_len (props, -1, "cover-image"))
+          oc->cover_id = g_strdup (id);
+      }
     }
     return;
+  }
+
+  /* EPUB 2: <meta name="cover" content="cover-id"/> inside <metadata>.
+   * The content value is the manifest id of the cover image item. */
+  if (g_str_equal (name, "meta") && oc->in_metadata && !oc->cover_id) {
+    const char *meta_name = NULL, *meta_content = NULL;
+    for (int i = 0; attr_names[i]; i++) {
+      if (g_str_equal (attr_names[i], "name"))    meta_name    = attr_values[i];
+      else if (g_str_equal (attr_names[i], "content")) meta_content = attr_values[i];
+    }
+    if (meta_name && meta_content && g_ascii_strcasecmp (meta_name, "cover") == 0)
+      oc->cover_id = g_strdup (meta_content);
   }
 
   /* Metadata scalars: dc:title, dc:creator, dc:language, etc. */
@@ -1227,7 +1249,21 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_ptr_array_free (oc.spine, TRUE);
       g_free (oc.toc_id);
       g_free (oc.nav_id);
+      g_free (oc.cover_id);
       return FALSE;
+    }
+  }
+
+  /* Push cover image as the first block — flagged FW_BLOCK_FLAG_COVER
+   * so FwReflowView gives it a full-viewport page. */
+  if (oc.cover_id) {
+    const char *cover_href = g_hash_table_lookup (oc.manifest_href, oc.cover_id);
+    if (cover_href) {
+      FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL,
+                                      cover_href, NULL,
+                                      FW_BLOCK_FLAG_COVER);
+      g_list_store_append (self->blocks, cover);
+      g_object_unref (cover);
     }
   }
 
@@ -1310,6 +1346,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   g_ptr_array_free (oc.spine, TRUE);
   g_free (oc.toc_id);
   g_free (oc.nav_id);
+  g_free (oc.cover_id);
 
   return TRUE;
 }

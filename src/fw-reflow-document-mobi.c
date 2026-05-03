@@ -833,10 +833,12 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   }
 
   /* If a cover image was identified via EXTH-201, push it as the
-   * first block so the user sees the cover when the doc opens. */
+   * first block — flagged FW_BLOCK_FLAG_COVER so FwReflowView
+   * gives it a full-viewport page. */
   if (m->cover_recindex > 0) {
     g_autofree char *id = g_strdup_printf ("%u", m->cover_recindex);
-    FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL, 0);
+    FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL,
+                                    FW_BLOCK_FLAG_COVER);
     g_list_store_append (self->blocks, cover);
     g_object_unref (cover);
   }

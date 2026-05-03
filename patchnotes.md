@@ -2,6 +2,41 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.58.0 (2026-05-02)
+
+*Cover pages now fill the viewport.* Reflow documents (MOBI / AZW3 / EPUB / FB2) where the format identifies a cover image now render that cover as a full-page first page, not a thumbnail capped at 600 px.
+
+### `FW_BLOCK_FLAG_COVER`
+
+New flag bit (`1u << 0`) packed into `FwBlock::flags`. Backends set it on the IMAGE block they identify as the cover. The view-side machinery branches on this flag in two places:
+
+### Pagination
+
+`FwReflowView::recompute_pagination` checks every block; cover-flagged blocks always get their own dedicated page. The current page flushes before a cover, the cover lands on a single-block page, and a fresh page starts after it.
+
+### Bind
+
+When the factory binds an IMAGE block, it picks the picture's height from the flag:
+
+- **Cover**: `gtk_widget_set_size_request(picture, -1, viewport_height - 32)`. With `content_fit=CONTAIN`, the picture grows to fill viewport height while preserving aspect ratio. A 600×900 cover at 1080 px viewport now renders 720×1080 (full height); a 1500×2000 cover renders the same way (scaled to fit).
+- **Inline image**: keeps the existing `IMAGE_MAX_HEIGHT_PX = 600` cap. Inline figures inside chapter content shouldn't dominate.
+
+### Per-backend cover detection
+
+| Format | Source | Notes |
+|---|---|---|
+| MOBI / KF7 / KF8 | `EXTH-201 coverOffset` | Already detected by `fw_mobi_parse`; this slice just adds the COVER flag to the block it pushes. |
+| EPUB | `<meta name="cover" content="X"/>` (EPUB 2) or `<item properties="cover-image"/>` (EPUB 3) | OpfCtx now tracks `cover_id`; before spine walk, if set, push a leading IMAGE block with COVER flag pointing at the manifest's resolved zip path. |
+| FB2 | `<title-info><coverpage><image l:href="#X"/></coverpage></title-info>` | Detected during the metadata pass; pushed as the first block. |
+
+### Verified
+
+- *The Broken God* (MOBI), *Datapoint* (AZW3), *The Verdant Passage* (EPUB) — all now render the cover as the entire first page. Page navigation moves to the second page (which is the actual content start) on Right Arrow.
+- ASan + UBSan clean.
+- All 5 stress tests pass.
+
+---
+
 ## v0.57.0 (2026-05-02)
 
 *FB2 rewrite — libxml2 walker matching the EPUB / MOBI port shape; foliate-js's STYLE / SECTION / POEM / BODY transform tables ported as direct C dispatch.* Last reflow backend conversion in the foliate-port arc.

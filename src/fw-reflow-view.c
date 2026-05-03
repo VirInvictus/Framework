@@ -15,6 +15,7 @@
 
 #define READING_COLUMN_MAX_WIDTH 720   /* px — caps comfortable line length */
 #define READING_COLUMN_MARGIN     24
+#define IMAGE_MAX_HEIGHT_PX      600   /* inline-image cap; covers ignore */
 
 /* ── Pagination ────────────────────────────────────────────────────
  * Each page is a contiguous range of whole blocks that fit within
@@ -160,6 +161,15 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
       tex = fw_reflow_document_get_image (self->document, id);
     if (tex) {
       gtk_picture_set_paintable (GTK_PICTURE (image_w), GDK_PAINTABLE (tex));
+      /* Cover: fill the viewport (less small breathing margin).
+       * Inline image: use the IMAGE_MAX_HEIGHT_PX cap. */
+      if (fw_block_get_flags (block) & FW_BLOCK_FLAG_COVER) {
+        int vh = self->last_alloc_h - 32;
+        if (vh < 200) vh = 600;
+        gtk_widget_set_size_request (image_w, -1, vh);
+      } else {
+        gtk_widget_set_size_request (image_w, -1, IMAGE_MAX_HEIGHT_PX);
+      }
       gtk_stack_set_visible_child_name (stack, "image");
       return;
     }
@@ -684,6 +694,24 @@ recompute_pagination (FwReflowView *self)
 
   for (guint i = 0; i < n; i++) {
     g_autoptr (FwBlock) b = g_list_model_get_item (self->all_blocks, i);
+    gboolean is_cover =
+      (fw_block_get_kind (b) == FW_BLOCK_IMAGE) &&
+      (fw_block_get_flags (b) & FW_BLOCK_FLAG_COVER);
+
+    /* Cover blocks always own their page. Flush any pending page
+     * before, then emit the cover as its own single-block page. */
+    if (is_cover) {
+      if (i > page_start) {
+        FwPageRange r = { .first = page_start, .count = i - page_start };
+        g_array_append_val (self->pages, r);
+      }
+      FwPageRange cov = { .first = i, .count = 1 };
+      g_array_append_val (self->pages, cov);
+      page_start = i + 1;
+      page_acc   = 0;
+      continue;
+    }
+
     int h = use_heuristic
               ? heuristic_block_height (self, b, content_w)
               : measure_block_height_widget (self, b, content_w);

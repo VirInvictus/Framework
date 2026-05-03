@@ -28,6 +28,9 @@ typedef enum {
   FW_BLOCK_CHAPTER,     /* ToC anchor — no rendered content */
 } FwBlockKind;
 
+/* FwBlock flags — packed into the `flags` GUINT. */
+#define FW_BLOCK_FLAG_COVER  (1u << 0)   /* IMAGE: render full-page */
+
 /* ── FwBlock — GObject for use in GListModel ──────────────────────── */
 
 #define FW_TYPE_BLOCK (fw_block_get_type ())

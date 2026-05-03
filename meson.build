@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 project('framework', 'c',
-  version: '0.57.0',
+  version: '0.58.0',
   meson_version: '>= 1.4',
   default_options: [
     'c_std=c17',
