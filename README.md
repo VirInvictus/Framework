@@ -13,7 +13,7 @@
 
 # Framework
 
-A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, and **MOBI** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
+A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, and **AZW3** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
@@ -36,6 +36,7 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
+| **Native Ebook Reflow** | EPUB, FB2, MOBI, and AZW3 render as native GTK widgets (not rasterized pages) through a Foliate-style block model: real text wrapping, justification, first-line indent, chapter titles, lists, drop caps, and live font-size adjustment. Format parsers are C ports of foliate-js. Falls back to MuPDF fixed layout if a document won't parse. |
 
 ## Screenshot
 
@@ -114,9 +115,11 @@ You can also drop a file directly onto the window to open it.
 |------------|---------|
 | gtk4 (4.16+) | UI toolkit |
 | libadwaita (1.7+) | GNOME design patterns |
-| mupdf (1.24+) | PDF / CBZ / XPS / EPUB / FB2 / MOBI rendering |
+| mupdf (1.24+) | PDF / CBZ / XPS rendering (and fallback ebook layout) |
 | djvulibre (3.5.28+) | DjVu rendering |
-| libarchive (3.6+) | CBR (RAR) decompression |
+| libarchive (3.6+) | CBR (RAR) decompression and EPUB (ZIP) reading |
+| libxml-2.0 (2.9+) | XHTML / FB2 / OPF parsing for the native reflow pipeline |
+| fontconfig | Bundled-font registration for reflow text |
 | cairo (1.18+) | Surface management |
 | glib (2.82+) | Data structures, threading |
 | json-glib (1.10+) | State persistence |
@@ -126,8 +129,8 @@ On Fedora:
 
 ```bash
 sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
-                 libarchive-devel cairo-devel glib2-devel json-glib-devel \
-                 meson gcc
+                 libarchive-devel libxml2-devel fontconfig-devel cairo-devel \
+                 glib2-devel json-glib-devel meson gcc
 ```
 
 ## Building
@@ -164,7 +167,7 @@ framework book.djvu
 framework volume.cbz
 ```
 
-CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB pagination is whatever MuPDF's default layout produces — Framework is good for fixed-layout EPUBs and as an "open everything" reader; serious EPUB readers like [Foliate](https://johnfactotum.github.io/foliate/) handle reflow and font customization better.
+CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB, FB2, MOBI, and AZW3 open through Framework's native reflow pipeline: text wraps and reflows as native GTK widgets with real typography, live font-size adjustment, a chapter sidebar, and in-text search highlighting, rather than MuPDF's fixed layout (which remains as an automatic fallback for documents the reflow parser can't handle). Some dedicated-reader polish (a reading-progress indicator, for instance) is still in progress; [Foliate](https://johnfactotum.github.io/foliate/) remains the more complete dedicated ebook reader.
 
 One document per window. Multiple files open multiple windows.
 

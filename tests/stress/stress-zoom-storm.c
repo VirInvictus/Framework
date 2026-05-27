@@ -22,11 +22,11 @@
 #include "fw-document.h"
 #include "fw-cache.h"
 #include "fw-debug.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/resource.h>
 
 /* The ZOOM-STORM peak is intentionally allowed to be high (a few GB).
  * Each transition holds both old + new surface + textures per cached
@@ -49,47 +49,6 @@
  * RSS by ~150 MB on this corpus sample. */
 #define DEFAULT_SETTLED_RSS_CAP_MB 1280
 #define ZOOM_CYCLES 50
-
-/* Peak RSS via getrusage — high-water mark, never decreases. Useful for
- * "did we ever exceed?" measurements but not for "did transient memory
- * actually drop after settle?". */
-static long
-rss_peak_mb (void)
-{
-  struct rusage ru;
-  getrusage (RUSAGE_SELF, &ru);
-  return ru.ru_maxrss / 1024;
-}
-
-/* Current RSS via /proc/self/status. Decreases when the process frees
- * memory back to the kernel. The settled-RSS leak check below uses this
- * — if transient zoom-transition memory was correctly released after
- * settle, current RSS drops below peak. If it didn't, that's a leak. */
-static long
-rss_current_mb (void)
-{
-  FILE *f = fopen ("/proc/self/status", "r");
-  if (!f) return -1;
-  char line[256];
-  long kb = -1;
-  while (fgets (line, sizeof line, f)) {
-    if (strncmp (line, "VmRSS:", 6) == 0) {
-      kb = strtol (line + 6, NULL, 10);
-      break;
-    }
-  }
-  fclose (f);
-  return kb < 0 ? -1 : kb / 1024;
-}
-
-static void
-spin_main_loop (int ms)
-{
-  GMainContext *ctx = g_main_context_default ();
-  gint64 deadline = g_get_monotonic_time () + (gint64) ms * 1000;
-  while (g_get_monotonic_time () < deadline)
-    g_main_context_iteration (ctx, FALSE);
-}
 
 int
 main (int argc, char **argv)

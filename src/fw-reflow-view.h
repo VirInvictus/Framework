@@ -50,6 +50,21 @@ void          fw_reflow_view_scroll_to_block  (FwReflowView *self,
  * when no document is loaded or no pages exist. */
 guint         fw_reflow_view_get_current_block (FwReflowView *self);
 
+/* ── Search highlighting ──────────────────────────────────────────────
+ * The window drives reflow search: it calls fw_reflow_document_search,
+ * then hands the resulting GArray<FwReflowHit> here to paint highlights.
+ * `active` is the flat index of the active (orange) hit, or -1. */
+void          fw_reflow_view_set_search_hits  (FwReflowView *self,
+                                               GArray       *hits,
+                                               int           active);
+
+/* Move the active highlight without re-running the search (F3 / Shift+F3). */
+void          fw_reflow_view_set_active_hit   (FwReflowView *self,
+                                               int           active);
+
+/* Drop all search highlighting. */
+void          fw_reflow_view_clear_search     (FwReflowView *self);
+
 /* Signal:
  *   "page-changed" (uint current, uint total) — emitted after pagination
  *   recomputes or after fw_reflow_view_scroll_by_page changes pages. */

@@ -23,37 +23,35 @@
 #include "fw-document.h"
 #include "fw-cache.h"
 #include "fw-debug.h"
+#include "corpus-root.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define FIRST_PAINT_TIMEOUT_MS 30000   /* very generous; comics on RAR can be slow */
 
-static const char *DEFAULT_CORPUS[] = {
-  "/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf",
-  "/home/bdkl/docs/Calibre Library/Imre Lakatos/Proofs and Refutations_ The Logic of Mathematical Discovery (1006)/Proofs and Refutations_ The Logic of Mathe - Imre Lakatos.djvu",
-  "/home/bdkl/docs/Calibre Library/Andrew Hunt/The Pragmatic Programmer_ your journey to mastery, 20th Anniversary Edition, 2nd Edition (8)/The Pragmatic Programmer_ your journey to - Andrew Hunt.pdf",
-  "/home/bdkl/docs/Calibre Library/Troy Denning/The Verdant Passage (2)/The Verdant Passage - Troy Denning.epub",
-  "/home/bdkl/docs/Calibre Library/David Gemmell/Fall of Kings (1581)/Fall of Kings - David Gemmell.mobi",
-  "/mnt/SharedData/Comics/Berserk (v01-v041)/Berserk v25 (2008) (Digital) (danke-Empire).cbz",
-  "/mnt/SharedData/Comics/From Hell (Master Edition)/From Hell - Master Edition (2020).cbr",
+/* Default corpus as filenames; resolved against the corpus root at
+ * runtime (see corpus-root.h). Pass paths as argv to override. */
+static const char *DEFAULT_CORPUS_FILES[] = {
+  "effective-java.pdf",
+  "visual-explanations-tufte.pdf",
+  "on-growth-and-form.djvu",
+  "playing-at-the-world-v2.epub",
+  "the-broken-god.mobi",
+  "datapoint.azw3",
+  "nausicaa-v01.cbz",
+  "vagabond-v01.cbr",
 };
 static const int DEFAULT_CORPUS_LEN =
-  (int) (sizeof (DEFAULT_CORPUS) / sizeof (DEFAULT_CORPUS[0]));
+  (int) (sizeof (DEFAULT_CORPUS_FILES) / sizeof (DEFAULT_CORPUS_FILES[0]));
 
 static const char *
 display_name (const char *path)
 {
   const char *base = strrchr (path, '/');
   return base ? base + 1 : path;
-}
-
-static gboolean
-file_exists (const char *path)
-{
-  return g_file_test (path, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR);
 }
 
 /* Iterate the main loop until either the page-0 texture is ready or
@@ -134,11 +132,16 @@ main (int argc, char **argv)
 
   const char **corpus;
   int corpus_len;
+  g_auto (GStrv) resolved = NULL;
   if (argc >= 2) {
     corpus     = (const char **) (argv + 1);
     corpus_len = argc - 1;
   } else {
-    corpus     = DEFAULT_CORPUS;
+    g_autofree char *root = fw_test_corpus_root ();
+    resolved = g_new0 (char *, DEFAULT_CORPUS_LEN + 1);
+    for (int i = 0; i < DEFAULT_CORPUS_LEN; i++)
+      resolved[i] = g_build_filename (root, DEFAULT_CORPUS_FILES[i], NULL);
+    corpus     = (const char **) resolved;
     corpus_len = DEFAULT_CORPUS_LEN;
   }
 

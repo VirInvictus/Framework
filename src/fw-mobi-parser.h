@@ -61,7 +61,20 @@ typedef struct {
    * the highest-quality version available. is_kf8 just reports
    * which path was taken so the backend can label the format. */
   gboolean      is_kf8;
+
+  /* KF8 table of contents, extracted from the NCX INDX (foliate's
+   * getNCX). `body_offset` is a byte position into `body` (the spliced
+   * KF8 HTML) where the entry's target lands, so the backend can inject
+   * an anchor there. NULL/empty for KF7 (which uses in-body filepos) or
+   * when no NCX is present. Caller frees via fw_mobi_parsed_free. */
+  GArray       *toc;   /* FwMobiTocEntry */
 } FwMobiParsed;
+
+typedef struct {
+  char    *label;        /* owned; chapter/section title from the CNCX */
+  guint32  body_offset;  /* byte offset into FwMobiParsed.body */
+  int      level;        /* NCX heading level (0 = top); flat list for now */
+} FwMobiTocEntry;
 
 /* Parse the file at `path`. On success returns a heap-allocated
  * FwMobiParsed; on failure returns NULL with *error populated.

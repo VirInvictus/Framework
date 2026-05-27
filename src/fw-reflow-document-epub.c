@@ -786,6 +786,7 @@ ncx_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
         g_autofree char *base =
           frag ? g_strndup (s, frag - s) : g_strdup (s);
         g_autofree char *resolved = resolve_zip_path (nc->ncx_dir, base);
+        g_free (nc->cur_src);   /* defensive; normally already NULL after a flush */
         if (frag)
           nc->cur_src = g_strconcat (resolved, frag, NULL);
         else
@@ -793,6 +794,24 @@ ncx_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
         break;
       }
     }
+    /* Flush this navPoint's entry here, at its <content>. In NCX a
+     * navPoint's navLabel and content precede its child navPoints, so
+     * cur_text/cur_src hold THIS entry at this point. Flushing at
+     * navPoint-end instead dropped every parent (section) entry, because
+     * a child's navLabel/content overwrote the parent's state first.
+     * Document order == reading order, so parents land before children.
+     * cur_src is consumed (cleared) so it can't be flushed twice. */
+    if (nc->cur_text && nc->cur_text->len > 0 && nc->cur_src) {
+      while (nc->cur_text->len > 0 &&
+             g_ascii_isspace (nc->cur_text->str[nc->cur_text->len - 1]))
+        g_string_truncate (nc->cur_text, nc->cur_text->len - 1);
+      FwReflowTocItem *item =
+        fw_reflow_toc_item_new (nc->cur_text->str, nc->cur_src);
+      g_list_store_append (nc->toc, item);
+      g_object_unref (item);
+    }
+    if (nc->cur_text) g_string_truncate (nc->cur_text, 0);
+    g_clear_pointer (&nc->cur_src, g_free);
     return;
   }
 }
@@ -810,17 +829,8 @@ ncx_end (GMarkupParseContext *ctx G_GNUC_UNUSED,
     return;
   }
   if (g_str_equal (name, "navPoint")) {
-    /* Flush a TOC entry from the collected title + src. */
-    if (nc->cur_text && nc->cur_text->len > 0 && nc->cur_src) {
-      while (nc->cur_text->len > 0 &&
-             g_ascii_isspace (nc->cur_text->str[nc->cur_text->len - 1]))
-        g_string_truncate (nc->cur_text, nc->cur_text->len - 1);
-
-      FwReflowTocItem *item =
-        fw_reflow_toc_item_new (nc->cur_text->str, nc->cur_src);
-      g_list_store_append (nc->toc, item);
-      g_object_unref (item);
-    }
+    /* The entry was already flushed at <content> (see ncx_start). Just
+     * drop any leftover state from a navPoint that carried no content. */
     if (nc->cur_text) g_string_truncate (nc->cur_text, 0);
     g_clear_pointer (&nc->cur_src, g_free);
   }
@@ -1199,10 +1209,6 @@ static guint epub_find_block_by_anchor (FwReflowDocument *doc, const char *a) {
   return GPOINTER_TO_UINT (
     g_hash_table_lookup (FW_REFLOW_DOCUMENT_EPUB (doc)->anchors, a));
 }
-static GArray *epub_search (FwReflowDocument *doc, const char *needle) {
-  (void) doc; (void) needle;
-  return NULL;
-}
 static GHashTable *epub_get_metadata (FwReflowDocument *doc) {
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
@@ -1217,7 +1223,6 @@ fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
   iface->get_image             = epub_get_image;
   iface->get_toc               = epub_get_toc;
   iface->find_block_by_anchor  = epub_find_block_by_anchor;
-  iface->search                = epub_search;
   iface->get_metadata          = epub_get_metadata;
 }
 

@@ -22,12 +22,11 @@
 #include "fw-document.h"
 #include "fw-cache.h"
 #include "fw-debug.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/resource.h>
 
 /* Default cap covers: cache surfaces (FW_CACHE_BYTES_CAP_MB, default 128
  * for tests), persistent thumbnails (~120 MB on 1000-page docs), MuPDF's
@@ -37,24 +36,6 @@
  * ASan). The cap exists to flag obvious runaway, not to measure typical
  * memory — for that, use FW_DEBUG=1 and read the byte-cap evict traces. */
 #define DEFAULT_RSS_CAP_MB 1200
-
-static long
-rss_mb (void)
-{
-  struct rusage ru;
-  getrusage (RUSAGE_SELF, &ru);
-  /* ru_maxrss is in KiB on Linux. */
-  return ru.ru_maxrss / 1024;
-}
-
-static void
-spin_main_loop (int ms)
-{
-  GMainContext *ctx = g_main_context_default ();
-  gint64 deadline = g_get_monotonic_time () + (gint64) ms * 1000;
-  while (g_get_monotonic_time () < deadline)
-    g_main_context_iteration (ctx, FALSE);
-}
 
 static void
 push_priority_for_page (FwCache *cache, int page, int total)
@@ -86,7 +67,7 @@ main (int argc, char **argv)
   } else {
     fprintf (stderr,
              "stress-scrub: pass a document path as argv[1].\n"
-             "  example: stress-scrub \"/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf\"\n");
+             "  example: stress-scrub .testfiles/effective-java.pdf\n");
     return 2;
   }
 
@@ -96,7 +77,7 @@ main (int argc, char **argv)
     rss_cap_mb = atol (cap_env);
 
   printf ("stress-scrub: opening %s\n", path);
-  long rss_baseline = rss_mb ();
+  long rss_baseline = rss_peak_mb ();
 
   g_autoptr (GError) error = NULL;
   FwDocument *doc = fw_document_new_for_path (path, &error);
@@ -165,7 +146,7 @@ main (int argc, char **argv)
     spin_main_loop (200);
   }
 
-  long rss_peak = rss_mb ();
+  long rss_peak = rss_peak_mb ();
   printf ("rss: baseline=%ld MB, peak=%ld MB, cap=%ld MB\n",
           rss_baseline, rss_peak, rss_cap_mb);
 

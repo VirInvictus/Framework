@@ -21,12 +21,12 @@
 #include "fw-document.h"
 #include "fw-cache.h"
 #include "fw-debug.h"
+#include "corpus-root.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/resource.h>
 
 #define SEQUENTIAL_ITERATIONS 50
 #define PARALLEL_INSTANCES    10
@@ -37,64 +37,43 @@
  * a real leak ever pushes us higher. */
 #define DEFAULT_RSS_CAP_MB  2000
 
-static long
-rss_peak_mb (void)
-{
-  struct rusage ru;
-  getrusage (RUSAGE_SELF, &ru);
-  return ru.ru_maxrss / 1024;
-}
-
-static long
-rss_current_mb (void)
-{
-  FILE *f = fopen ("/proc/self/status", "r");
-  if (!f) return -1;
-  char line[256];
-  long kb = -1;
-  while (fgets (line, sizeof line, f)) {
-    if (strncmp (line, "VmRSS:", 6) == 0) {
-      kb = strtol (line + 6, NULL, 10);
-      break;
-    }
-  }
-  fclose (f);
-  return kb < 0 ? -1 : kb / 1024;
-}
-
-static void
-spin_main_loop (int ms)
-{
-  GMainContext *ctx = g_main_context_default ();
-  gint64 deadline = g_get_monotonic_time () + (gint64) ms * 1000;
-  while (g_get_monotonic_time () < deadline)
-    g_main_context_iteration (ctx, FALSE);
-}
-
 /* Six representative samples — one per backend code path (PDF/DjVu via
  * stext + render; EPUB/MOBI via reflowable layout; CBZ via MuPDF
  * dispatch; CBR via libarchive). The cycle covers each backend
  * roughly 8x in 50 iterations.
  *
- * Hardcoded paths under FW_TEST_CORPUS_ROOT (default Brandon's
- * Calibre Library / Comics tree). If a sample is missing, the test
- * skips that iteration silently — better than failing on environments
- * that don't have the full corpus. */
-static const char *SEQUENTIAL_CORPUS[] = {
-  "/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf",
-  "/home/bdkl/docs/Calibre Library/Michael Spivak/Calculus (1325)/Calculus - Michael Spivak.djvu",
-  "/home/bdkl/docs/Calibre Library/Haruki Murakami/The Wind-Up Bird Chronicle (506)/The Wind-Up Bird Chronicle - Haruki Murakami.epub",
-  "/home/bdkl/docs/Calibre Library/David Gemmell/Fall of Kings (1581)/Fall of Kings - David Gemmell.mobi",
-  "/mnt/SharedData/Comics/Berserk (v01-v041)/Berserk v25 (2008) (Digital) (danke-Empire).cbz",
-  "/mnt/SharedData/Comics/From Hell (Master Edition)/From Hell - Master Edition (2020).cbr",
+ * Filenames resolved against the corpus root (FW_TEST_CORPUS_ROOT, else
+ * the repo's .testfiles/; see corpus-root.h). If a sample is missing,
+ * the test skips it silently rather than failing on a partial corpus.
+ * One per backend so the open/close cycle covers each. */
+static const char *CORPUS_FILES[] = {
+  "effective-java.pdf",
+  "on-growth-and-form.djvu",
+  "playing-at-the-world-v2.epub",
+  "the-broken-god.mobi",
+  "nausicaa-v01.cbz",
+  "vagabond-v01.cbr",
 };
 static const int SEQUENTIAL_CORPUS_LEN =
-  (int) (sizeof (SEQUENTIAL_CORPUS) / sizeof (SEQUENTIAL_CORPUS[0]));
+  (int) (sizeof (CORPUS_FILES) / sizeof (CORPUS_FILES[0]));
 
-static gboolean
-file_exists (const char *path)
+/* Full paths, resolved from the corpus root once at startup by
+ * corpus_resolve() and freed by corpus_free(). */
+static char *SEQUENTIAL_CORPUS[G_N_ELEMENTS (CORPUS_FILES)];
+
+static void
+corpus_resolve (void)
 {
-  return g_file_test (path, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR);
+  g_autofree char *root = fw_test_corpus_root ();
+  for (int i = 0; i < SEQUENTIAL_CORPUS_LEN; i++)
+    SEQUENTIAL_CORPUS[i] = g_build_filename (root, CORPUS_FILES[i], NULL);
+}
+
+static void
+corpus_free (void)
+{
+  for (int i = 0; i < SEQUENTIAL_CORPUS_LEN; i++)
+    g_clear_pointer (&SEQUENTIAL_CORPUS[i], g_free);
 }
 
 static void
@@ -206,6 +185,7 @@ main (int argc, char **argv)
   (void) argc; (void) argv;
   fw_debug_init ();
   gtk_init ();
+  corpus_resolve ();
 
   long rss_cap_mb = DEFAULT_RSS_CAP_MB;
   const char *cap_env = g_getenv ("FW_STRESS_RSS_CAP_MB");
@@ -247,6 +227,8 @@ main (int argc, char **argv)
     printf ("rss drift across sequential phase: first=%ld last=%ld delta=%+ld MB\n",
             first_iter_rss, last_iter_rss, delta);
   }
+
+  corpus_free ();
 
   if (peak > rss_cap_mb) {
     fprintf (stderr, "FAIL: peak RSS %ld MB exceeded cap %ld MB.\n",

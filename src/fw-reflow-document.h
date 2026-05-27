@@ -92,12 +92,19 @@ struct _FwReflowDocumentInterface {
   guint        (*find_block_by_anchor) (FwReflowDocument *self,
                                         const char       *anchor_id);
 
-  /* GArray of (block_index, char_offset, length) triples — Phase 6. */
-  GArray      *(*search)           (FwReflowDocument *self,
-                                    const char       *needle);
-
   GHashTable  *(*get_metadata)     (FwReflowDocument *self);
 };
+
+/* ── Search hit ───────────────────────────────────────────────────── */
+
+/* A single match. Offsets are into the block's *visible* text — markup
+ * tags stripped and entities decoded — so they line up with what the
+ * reader sees and with the highlight splicer in fw-reflow-view.c. */
+typedef struct {
+  guint block;    /* index into the block model */
+  guint offset;   /* byte offset of the match in the block's visible text */
+  guint length;   /* byte length of the match */
+} FwReflowHit;
 
 gboolean     fw_reflow_document_open                (FwReflowDocument *self,
                                                      const char       *path,
@@ -109,6 +116,12 @@ GdkTexture  *fw_reflow_document_get_image           (FwReflowDocument *self,
 GListModel  *fw_reflow_document_get_toc             (FwReflowDocument *self);
 guint        fw_reflow_document_find_block_by_anchor(FwReflowDocument *self,
                                                      const char       *anchor_id);
+
+/* Case-insensitive substring search across the whole block model,
+ * mirroring the fixed-layout backends' semantics (Unicode-lowercased
+ * substring, no regex / whole-word). Returns a newly-allocated
+ * GArray<FwReflowHit> in reading order, or NULL when there are no
+ * matches. Caller frees with g_array_unref. */
 GArray      *fw_reflow_document_search              (FwReflowDocument *self,
                                                      const char       *needle);
 GHashTable  *fw_reflow_document_get_metadata        (FwReflowDocument *self);

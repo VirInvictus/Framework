@@ -12,6 +12,7 @@
 #include "fw-reflow-view.h"
 #include "fw-config.h"
 #include <gio/gio.h>
+#include <string.h>
 
 #define READING_COLUMN_MAX_WIDTH 720   /* px — caps comfortable line length */
 #define READING_COLUMN_MARGIN     24
@@ -64,6 +65,14 @@ struct _FwReflowView {
    * before pagination has produced a page table. Recompute uses it to
    * land on the right page. -1 = no pending target. */
   gint64              pending_target_block;
+
+  /* Search highlighting. search_hits is the flat hit list (owned ref,
+   * shared with the window). search_by_block maps FwBlock* → GArray of
+   * HlSpan, for O(1) lookup in the bind handler. search_active is the
+   * flat index of the active hit (rendered orange), or -1 for none. */
+  GArray             *search_hits;       /* GArray<FwReflowHit>, owned */
+  GHashTable         *search_by_block;   /* FwBlock* → GArray<HlSpan> */
+  int                 search_active;
 };
 
 enum {
@@ -73,6 +82,198 @@ enum {
 static guint signals[N_SIGNALS];
 
 G_DEFINE_FINAL_TYPE (FwReflowView, fw_reflow_view, GTK_TYPE_WIDGET)
+
+/* ── Search highlighting ──────────────────────────────────────────────
+ * The block model carries Pango markup; FwReflowHit offsets are in
+ * *visible* text (tags stripped, entities decoded). To paint a match we
+ * splice <span background> into the markup at the matching range. The
+ * highlight span is broken around any intervening inline tag so the
+ * result stays well-nested, then the bind handler's prefix / indent /
+ * dropcap decorations wrap the already-spliced body. */
+
+typedef struct { guint off; guint len; guint flat; } HlSpan;
+
+/* Active hit = orange, other matches = yellow — same palette as the
+ * fixed-layout overlay in fw-view.c. */
+#define HL_SPAN_ACTIVE "<span background=\"#FF8C1A\" bgalpha=\"55%\">"
+#define HL_SPAN_MATCH  "<span background=\"#FFEB33\" bgalpha=\"40%\">"
+
+/* Decode an XML/Pango entity at `p` ('&'). Returns decoded UTF-8 length
+ * and sets *src_len to source bytes consumed, or 0 if not an entity.
+ * Keep byte-for-byte in sync with decode_entity() in
+ * fw-reflow-document.c — the matcher and this splicer must agree on how
+ * many visible bytes an entity contributes, or highlights misalign. */
+static int
+decode_entity (const char *p, char out[8], int *src_len)
+{
+  const char *sc = strchr (p, ';');
+  if (!sc || sc - p > 12 || sc == p + 1)
+    return 0;
+  int n = (int) (sc - p - 1);
+  const char *body = p + 1;
+  gunichar cp = 0;
+
+  if (body[0] == '#') {
+    if (n >= 2 && (body[1] == 'x' || body[1] == 'X'))
+      cp = (gunichar) g_ascii_strtoull (body + 2, NULL, 16);
+    else if (n >= 1)
+      cp = (gunichar) g_ascii_strtoull (body + 1, NULL, 10);
+  } else if (n == 3 && strncmp (body, "amp",  3) == 0) cp = '&';
+  else if   (n == 2 && strncmp (body, "lt",   2) == 0) cp = '<';
+  else if   (n == 2 && strncmp (body, "gt",   2) == 0) cp = '>';
+  else if   (n == 4 && strncmp (body, "quot", 4) == 0) cp = '"';
+  else if   (n == 4 && strncmp (body, "apos", 4) == 0) cp = '\'';
+
+  if (cp == 0 || !g_unichar_validate (cp))
+    return 0;
+  *src_len = (int) (sc - p) + 1;
+  return g_unichar_to_utf8 (cp, out);
+}
+
+/* The highlight span covering visible-byte position `vpos`, or NULL. */
+static const HlSpan *
+span_at (const GArray *spans, guint vpos)
+{
+  for (guint i = 0; i < spans->len; i++) {
+    const HlSpan *s = &g_array_index (spans, HlSpan, i);
+    if (vpos >= s->off && vpos < s->off + s->len)
+      return s;
+  }
+  return NULL;
+}
+
+static char *
+splice_highlights (const char *src, gboolean is_markup,
+                   const GArray *spans, guint active_flat)
+{
+  GString *out = g_string_new (NULL);
+  gboolean open = FALSE;
+  guint    open_flat = 0;
+  guint    vpos = 0;
+
+  for (const char *p = src; *p; ) {
+    /* Inline tag: copy verbatim, breaking any open highlight around it. */
+    if (is_markup && *p == '<') {
+      const char *gt = strchr (p, '>');
+      if (!gt) { g_string_append (out, p); break; }
+      if (open) { g_string_append (out, "</span>"); open = FALSE; }
+      g_string_append_len (out, p, gt - p + 1);
+      p = gt + 1;
+      continue;
+    }
+
+    /* Measure this visible unit: source bytes vs. visible bytes (they
+     * differ for entities). */
+    int src_len, vis_len;
+    char decbuf[8];
+    if (is_markup && *p == '&') {
+      int sl = 0, dl = decode_entity (p, decbuf, &sl);
+      if (dl > 0) { src_len = sl; vis_len = dl; }
+      else        { src_len = 1; vis_len = 1; }   /* stray '&' */
+    } else {
+      const char *next = g_utf8_next_char (p);
+      if (next <= p) next = p + 1;
+      src_len = vis_len = (int) (next - p);
+    }
+
+    /* Reconcile highlight state with whether vpos sits inside a span. */
+    const HlSpan *s = span_at (spans, vpos);
+    if (s && !open) {
+      g_string_append (out, s->flat == active_flat ? HL_SPAN_ACTIVE : HL_SPAN_MATCH);
+      open = TRUE; open_flat = s->flat;
+    } else if (s && open && s->flat != open_flat) {
+      g_string_append (out, "</span>");
+      g_string_append (out, s->flat == active_flat ? HL_SPAN_ACTIVE : HL_SPAN_MATCH);
+      open_flat = s->flat;
+    } else if (!s && open) {
+      g_string_append (out, "</span>");
+      open = FALSE;
+    }
+
+    if (is_markup) {
+      g_string_append_len (out, p, src_len);      /* char or entity, verbatim */
+    } else {
+      g_autofree char *esc = g_markup_escape_text (p, src_len);
+      g_string_append (out, esc);
+    }
+    vpos += vis_len;
+    p    += src_len;
+  }
+  if (open)
+    g_string_append (out, "</span>");
+  return g_string_free (out, FALSE);
+}
+
+/* Returns highlighted markup for `block` (caller frees), or NULL when
+ * the block has no matches and should render normally. */
+static char *
+highlight_block_markup (FwReflowView *self, FwBlock *block, const char *raw)
+{
+  if (!self->search_by_block || !raw || !*raw)
+    return NULL;
+  GArray *spans = g_hash_table_lookup (self->search_by_block, block);
+  if (!spans || spans->len == 0)
+    return NULL;
+  FwBlockKind kind = fw_block_get_kind (block);
+  gboolean is_markup = (kind != FW_BLOCK_CODE && kind != FW_BLOCK_CHAPTER);
+  return splice_highlights (raw, is_markup, spans, (guint) self->search_active);
+}
+
+/* Force the currently-bound rows to re-run the bind handler (and thus
+ * pick up highlight changes) without touching scroll position or
+ * emitting page-changed — toggling the slice size round-trips an
+ * items-changed remove+add through GtkListView. */
+static void
+refresh_visible_rows (FwReflowView *self)
+{
+  if (self->page_slice) {
+    guint sz = gtk_slice_list_model_get_size (self->page_slice);
+    if (sz > 0) {
+      gtk_slice_list_model_set_size (self->page_slice, 0);
+      gtk_slice_list_model_set_size (self->page_slice, sz);
+    }
+  }
+  if (self->page_slice_right) {
+    guint sr = gtk_slice_list_model_get_size (self->page_slice_right);
+    if (sr > 0) {
+      gtk_slice_list_model_set_size (self->page_slice_right, 0);
+      gtk_slice_list_model_set_size (self->page_slice_right, sr);
+    }
+  }
+}
+
+/* Rebuild the FwBlock* → spans index from the flat hit list. Each hit's
+ * block index is resolved to its FwBlock* (kept alive as the hash key). */
+static void
+rebuild_search_index (FwReflowView *self)
+{
+  g_clear_pointer (&self->search_by_block, g_hash_table_unref);
+  if (!self->search_hits || self->search_hits->len == 0 || !self->all_blocks)
+    return;
+
+  self->search_by_block = g_hash_table_new_full (
+    g_direct_hash, g_direct_equal,
+    g_object_unref, (GDestroyNotify) g_array_unref);
+
+  guint n = g_list_model_get_n_items (self->all_blocks);
+  for (guint i = 0; i < self->search_hits->len; i++) {
+    FwReflowHit *h = &g_array_index (self->search_hits, FwReflowHit, i);
+    if (h->block >= n)
+      continue;
+    FwBlock *b = FW_BLOCK (g_list_model_get_item (self->all_blocks, h->block));
+    if (!b)
+      continue;
+    GArray *spans = g_hash_table_lookup (self->search_by_block, b);
+    if (spans) {
+      g_object_unref (b);          /* hash already holds a key ref */
+    } else {
+      spans = g_array_new (FALSE, FALSE, sizeof (HlSpan));
+      g_hash_table_insert (self->search_by_block, b, spans);  /* takes ref */
+    }
+    HlSpan s = { .off = h->offset, .len = h->length, .flat = i };
+    g_array_append_val (spans, s);
+  }
+}
 
 /* ── Factory: FwBlock → GtkWidget ─────────────────────────────────── */
 
@@ -203,6 +404,14 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
   gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
   gtk_label_set_xalign (label, 0.0);
 
+  /* Search highlight: splice match spans into the body; the per-kind
+   * prefix / indent / dropcap decorations below wrap the result. `hl`
+   * is NULL (and `body` falls back to the raw text) when this block has
+   * no matches. */
+  const char *raw = fw_block_get_text (block) ?: "";
+  g_autofree char *hl = highlight_block_markup (self, block, raw);
+  const char *body = hl ? hl : raw;
+
   switch (fw_block_get_kind (block)) {
     case FW_BLOCK_HEADING: {
       gtk_widget_add_css_class (text_w, "reflow-heading");
@@ -218,20 +427,25 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
         gtk_label_set_justify (label, GTK_JUSTIFY_LEFT);
       }
       gtk_label_set_use_markup (label, TRUE);
-      gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
+      gtk_label_set_markup (label, body);
       break;
     }
     case FW_BLOCK_CODE:
       gtk_widget_add_css_class (text_w, "reflow-code");
       /* Code shouldn't be justified — preserves intra-line spacing. */
       gtk_label_set_justify (label, GTK_JUSTIFY_LEFT);
-      gtk_label_set_use_markup (label, FALSE);
-      gtk_label_set_text (label, fw_block_get_text (block) ?: "");
+      /* hl (when present) is escaped markup with highlight spans; the
+       * raw path stays plain text so whitespace is untouched. */
+      gtk_label_set_use_markup (label, hl != NULL);
+      if (hl)
+        gtk_label_set_markup (label, hl);
+      else
+        gtk_label_set_text (label, raw);
       break;
     case FW_BLOCK_BLOCKQUOTE:
       gtk_widget_add_css_class (text_w, "reflow-blockquote");
       gtk_label_set_use_markup (label, TRUE);
-      gtk_label_set_markup (label, fw_block_get_text (block) ?: "");
+      gtk_label_set_markup (label, body);
       break;
     case FW_BLOCK_HR:
       /* Real horizontal rule: empty label, CSS bottom border. The
@@ -244,14 +458,16 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
       break;
     case FW_BLOCK_CHAPTER:
       gtk_widget_add_css_class (text_w, "reflow-chapter");
-      gtk_label_set_use_markup (label, FALSE);
-      gtk_label_set_text (label, fw_block_get_text (block) ?: "");
+      gtk_label_set_use_markup (label, hl != NULL);
+      if (hl)
+        gtk_label_set_markup (label, hl);
+      else
+        gtk_label_set_text (label, raw);
       break;
     case FW_BLOCK_LIST_ITEM: {
       /* Bullet (level==0) or "N." (level>0) prefix. Pango
        * markup-safe — prefix is plain text inserted before body. */
       gtk_label_set_use_markup (label, TRUE);
-      const char *body = fw_block_get_text (block) ?: "";
       int lvl = fw_block_get_level (block);
       g_autofree char *with_prefix = NULL;
       if (lvl > 0)
@@ -266,7 +482,6 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
     case FW_BLOCK_IMAGE:        /* unreachable — handled above */
     default: {
       gtk_label_set_use_markup (label, TRUE);
-      const char *body = fw_block_get_text (block) ?: "";
       guint flags = fw_block_get_flags (block);
       gboolean is_para = fw_block_get_kind (block) == FW_BLOCK_PARAGRAPH;
       /* Caption — figcaption text. Italic, smaller, centered (CSS
@@ -931,6 +1146,13 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
   self->all_blocks = doc ? fw_reflow_document_get_block_model (doc) : NULL;
   self->current_page = 0;
 
+  /* Drop any search highlight from the previous document — the index
+   * keys on the old block objects. The upcoming pagination rebinds all
+   * rows, so no explicit row refresh is needed here. */
+  g_clear_pointer (&self->search_hits, g_array_unref);
+  g_clear_pointer (&self->search_by_block, g_hash_table_unref);
+  self->search_active = -1;
+
   /* One-pass typography annotation. Computed at model-load so the
    * bind handler is O(1):
    *
@@ -1112,6 +1334,42 @@ fw_reflow_view_get_current_block (FwReflowView *self)
   return g_array_index (self->pages, FwPageRange, self->current_page).first;
 }
 
+/* ── Search highlight API ─────────────────────────────────────────── */
+
+void
+fw_reflow_view_set_search_hits (FwReflowView *self, GArray *hits, int active)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+  g_clear_pointer (&self->search_hits, g_array_unref);
+  if (hits && hits->len > 0)
+    self->search_hits = g_array_ref (hits);
+  self->search_active = active;
+  rebuild_search_index (self);
+  refresh_visible_rows (self);
+}
+
+void
+fw_reflow_view_set_active_hit (FwReflowView *self, int active)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+  if (self->search_active == active)
+    return;
+  self->search_active = active;
+  refresh_visible_rows (self);
+}
+
+void
+fw_reflow_view_clear_search (FwReflowView *self)
+{
+  g_return_if_fail (FW_IS_REFLOW_VIEW (self));
+  gboolean had = (self->search_hits != NULL);
+  g_clear_pointer (&self->search_hits, g_array_unref);
+  g_clear_pointer (&self->search_by_block, g_hash_table_unref);
+  self->search_active = -1;
+  if (had)
+    refresh_visible_rows (self);
+}
+
 /* ── GObject lifecycle ────────────────────────────────────────────── */
 
 static void
@@ -1160,6 +1418,8 @@ fw_reflow_view_dispose (GObject *object)
   g_clear_object (&self->page_slice_right);
   self->all_blocks = NULL;
   g_clear_pointer (&self->pages, g_array_unref);
+  g_clear_pointer (&self->search_hits, g_array_unref);
+  g_clear_pointer (&self->search_by_block, g_hash_table_unref);
 
   G_OBJECT_CLASS (fw_reflow_view_parent_class)->dispose (object);
 }
@@ -1242,6 +1502,7 @@ fw_reflow_view_init (FwReflowView *self)
   self->last_alloc_w         = 0;
   self->last_alloc_h         = 0;
   self->pending_target_block = -1;
+  self->search_active        = -1;
 
   /* Two columns; right one starts hidden. The active column count
    * is driven by the reading-two-column GSetting (via

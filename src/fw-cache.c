@@ -10,6 +10,7 @@
 #include "fw-cache.h"
 #include "fw-debug.h"
 
+#include <math.h>
 #include <stdlib.h>
 
 /* A previous-zoom snapshot retained as a sharper-than-thumbnail
@@ -80,6 +81,7 @@ typedef struct {
   int      page;
   double   zoom;
   int      rotation;
+  int      scale_factor;  /* device scale captured at job creation (under lock) */
   guint    render_gen; /* render params generation at time of job creation */
   guint    cancel_gen; /* cancel generation at time of job creation */
   gint64   last_view_time; /* monotonic µs at job creation — sort key for the pool */
@@ -120,9 +122,7 @@ struct _FwCache {
   GtkWidget     *view_widget;  /* owned ref for scheduling redraws */
 
   gboolean       stopping;     /* TRUE once dispose begins — blocks new jobs */
-
-  /* Throttle: avoid rebuilding priority on every scroll tick */
-  gint64         last_priority_time;  /* monotonic µs of last set_priority */
+  gboolean       redraw_scheduled; /* a coalesced redraw idle is already queued */
 
   /* Bytes-aware Tier 2 cap (Phase 11 Tier 1). Replaces the v1.3.3 fixed
    * 30-page eviction bound — page-count caps mis-fit by orders of
@@ -259,6 +259,11 @@ get_or_create_entry (FwCache *self, int page)
  * fit-width fits ~25 pages here, a textbook at fit-width fits ~150. */
 #define CACHE_BYTES_CAP_DEFAULT (512u * 1024u * 1024u)
 
+/* Per-render surface allocation cap. A render whose surface would exceed
+ * this (extreme zoom on a poster PDF) is scaled down to fit and GTK
+ * upscales the texture on paint — see render_worker for the rationale. */
+#define RENDER_BYTES_CAP (64u * 1024u * 1024u)
+
 /* Upper bound on the priority_order array. Priority is visible (~1-3
  * pages) plus NEAR_RANGE forward and NEAR_RANGE backward — fixed at
  * compile time, so the array can be sized once per `fw_cache_set_priority`
@@ -267,17 +272,41 @@ get_or_create_entry (FwCache *self, int page)
 
 /* ── Redraw helper ───────────────────────────────────────────────── */
 
-/* Called on the main thread via g_idle_add.  The widget is ref'd so the
- * GObject is alive, but it may already be disposed/unrealized during
- * document swap — check before touching GTK state. */
+/* Called on the main thread via g_idle_add. Holds a ref on the cache so
+ * it stays alive until the idle fires (which therefore always runs
+ * before dispose); clears the coalescing flag, then queues a draw on the
+ * view widget if it's still realized. The widget may already be
+ * disposed/unrealized during a document swap — check before touching it. */
 static gboolean
 safe_queue_draw (gpointer user_data)
 {
-  GtkWidget *widget = user_data;
-  if (GTK_IS_WIDGET (widget) && gtk_widget_get_parent (widget) != NULL)
-    gtk_widget_queue_draw (widget);
-  g_object_unref (widget);
+  FwCache *self = user_data;
+
+  g_mutex_lock (&self->lock);
+  self->redraw_scheduled = FALSE;
+  GtkWidget *widget = self->view_widget;
+  if (widget) g_object_ref (widget);   /* keep alive past the unlock */
+  g_mutex_unlock (&self->lock);
+
+  if (widget) {
+    if (GTK_IS_WIDGET (widget) && gtk_widget_get_parent (widget) != NULL)
+      gtk_widget_queue_draw (widget);
+    g_object_unref (widget);
+  }
+  g_object_unref (self);
   return G_SOURCE_REMOVE;
+}
+
+/* Queue a coalesced main-thread redraw. Caller holds self->lock. A render
+ * burst (e.g. 14 pages at open) would otherwise schedule one idle source
+ * per stored page; the redraw_scheduled flag collapses them to one. */
+static void
+schedule_redraw (FwCache *self)
+{
+  if (!self->view_widget || self->redraw_scheduled)
+    return;
+  self->redraw_scheduled = TRUE;
+  g_idle_add (safe_queue_draw, g_object_ref (self));
 }
 
 /* ── Thread pool worker ───────────────────────────────────────────── */
@@ -310,6 +339,19 @@ lru_victim_compare (gconstpointer a, gconstpointer b)
   if (va->access_us < vb->access_us) return -1;
   if (va->access_us > vb->access_us) return  1;
   return 0;
+}
+
+/* Linear membership test against the current priority window. The window
+ * is at most MAX_PRIORITY_PAGES (64) entries, so a scan beats building a
+ * GHashTable keep-set on every fw_cache_set_priority call — and that runs
+ * on every scroll tick. Caller holds self->lock. */
+static gboolean
+page_in_priority (FwCache *self, int page)
+{
+  for (int i = 0; i < self->priority_len; i++)
+    if (self->priority_order[i] == page)
+      return TRUE;
+  return FALSE;
 }
 
 /* ── Thumbnail worker ─────────────────────────────────────────────── */
@@ -354,8 +396,7 @@ thumb_worker (gpointer data, gpointer user_data)
     te->texture = texture_from_surface (surface);
     te->rendering = FALSE;
     FW_TRACE_MEM ("thumb stored: page=%d surface=%p", job->page, (void *) surface);
-    if (self->view_widget)
-      g_idle_add (safe_queue_draw, g_object_ref (self->view_widget));
+    schedule_redraw (self);
   } else {
     te->rendering = FALSE;
     te->failed = TRUE;
@@ -447,10 +488,9 @@ render_worker (gpointer data, gpointer user_data)
    * for a real slice path through the cache + view; on the actual
    * Calibre corpus (no poster PDFs) the threshold is essentially
    * never reached, so the visual cost is hypothetical. Slicing is
-   * tracked as a follow-up if a poster-format need ever surfaces. */
-  #define RENDER_BYTES_CAP (64u * 1024u * 1024u)
-
-  double render_zoom = job->zoom * self->scale_factor;
+   * tracked as a follow-up if a poster-format need ever surfaces.
+   * (RENDER_BYTES_CAP is defined at file scope with the other caps.) */
+  double render_zoom = job->zoom * job->scale_factor;
   double effective_doc_zoom = job->zoom;
   {
     double pw, ph;
@@ -528,17 +568,15 @@ render_worker (gpointer data, gpointer user_data)
     entry->size_bytes    = surface_byte_size (surface);
     entry->zoom          = effective_doc_zoom;
     entry->rotation      = job->rotation;
-    entry->scale_factor  = self->scale_factor;
+    entry->scale_factor  = job->scale_factor;
     self->total_cached_bytes += entry->size_bytes;
     entry->rendering  = FALSE;
     entry->render_gen = job->render_gen;
     entry->last_access_us = g_get_monotonic_time ();
 
-    /* Schedule a redraw on the main thread so the new surface appears.
-     * We ref the widget so it stays alive until the idle fires — the
-     * callback unrefs after checking the widget is still realized. */
-    if (self->view_widget)
-      g_idle_add (safe_queue_draw, g_object_ref (self->view_widget));
+    /* Schedule a coalesced redraw on the main thread so the new surface
+     * appears (see schedule_redraw / safe_queue_draw). */
+    schedule_redraw (self);
   } else {
     /* Render params changed (zoom/rotation) — surface is wrong size, discard */
     FW_TRACE_CACHE ("worker stale-discard: page=%d rgen=%u (current=%u) surface=%p",
@@ -589,6 +627,7 @@ submit_next_jobs (FwCache *self)
     job->page           = pg;
     job->zoom           = self->zoom;
     job->rotation       = self->rotation;
+    job->scale_factor   = self->scale_factor;
     job->render_gen     = self->render_gen;
     job->cancel_gen     = self->cancel_gen;
     /* Subtract the index so earlier-in-priority pages have a later effective
@@ -701,7 +740,6 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
   g_return_if_fail (FW_IS_CACHE (self));
 
   g_mutex_lock (&self->lock);
-  self->last_priority_time = g_get_monotonic_time ();
 
   g_free (self->priority_order);
 
@@ -747,39 +785,27 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
 
   self->priority_len = idx;
 
-  /* Build keep-set from priority window */
-  GHashTable *keep_set = g_hash_table_new (g_direct_hash, g_direct_equal);
-  for (int i = 0; i < self->priority_len; i++)
-    g_hash_table_add (keep_set, GINT_TO_POINTER (self->priority_order[i]));
-
   /* ── Tier 1: Evict parsed page handles outside the priority window ──
    * Handles are created lazily by render workers — we only evict here.
    * IMPORTANT: skip pages with rendering=TRUE — a worker thread may be
    * holding the handle pointer between releasing self->lock and calling
-   * render_page_from_handle. Evicting now would free it mid-use. */
+   * render_page_from_handle. Evicting now would free it mid-use.
+   * Free-then-steal during iteration: the parsed table has no
+   * GDestroyNotify (handles need the document to close), so we free
+   * manually then steal the current entry — safe inside the iter. */
   {
     GHashTableIter iter;
     gpointer key, value;
-    GArray *to_remove = g_array_new (FALSE, FALSE, sizeof (int));
     g_hash_table_iter_init (&iter, self->parsed);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
-      if (!g_hash_table_contains (keep_set, key)) {
-        CacheEntry *ce = g_hash_table_lookup (self->pages, key);
-        if (ce && ce->rendering)
-          continue;  /* worker may be using this handle — skip */
-        int pg = GPOINTER_TO_INT (key);
-        g_array_append_val (to_remove, pg);
-      }
+      if (page_in_priority (self, GPOINTER_TO_INT (key)))
+        continue;
+      CacheEntry *ce = g_hash_table_lookup (self->pages, key);
+      if (ce && ce->rendering)
+        continue;  /* worker may be using this handle — skip */
+      parsed_entry_free_with_doc (value, self->document);
+      g_hash_table_iter_steal (&iter);
     }
-    for (guint i = 0; i < to_remove->len; i++) {
-      int pg = g_array_index (to_remove, int, i);
-      ParsedEntry *pe = g_hash_table_lookup (self->parsed, GINT_TO_POINTER (pg));
-      if (pe) {
-        parsed_entry_free_with_doc (pe, self->document);
-        g_hash_table_steal (self->parsed, GINT_TO_POINTER (pg));
-      }
-    }
-    g_array_unref (to_remove);
   }
 
   /* ── Tier 2: Evict rendered surfaces by byte cap ──
@@ -802,7 +828,7 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
     gpointer key, value;
     g_hash_table_iter_init (&iter, self->pages);
     while (g_hash_table_iter_next (&iter, &key, &value)) {
-      if (g_hash_table_contains (keep_set, key)) continue;
+      if (page_in_priority (self, GPOINTER_TO_INT (key))) continue;
       CacheEntry *entry = value;
       if (entry->rendering) continue;
       LruVictim v = { .page = GPOINTER_TO_INT (key),
@@ -828,8 +854,6 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
     FW_TRACE_MEM ("byte-cap evict: dropped=%u freed=%zu remaining=%zu cap=%zu",
                   dropped, freed, self->total_cached_bytes, self->byte_cap);
   }
-
-  g_hash_table_unref (keep_set);
 
   FW_TRACE_MEM ("cache after eviction: surfaces=%u parsed=%u priority=%d bytes=%zu",
                 g_hash_table_size (self->pages),
@@ -965,14 +989,19 @@ fw_cache_get_thumbnail (FwCache *self, int page, double page_w, double page_h)
 {
   g_return_val_if_fail (FW_IS_CACHE (self), NULL);
 
-  if (self->stopping)
-    return NULL;
+  /* page_count is immutable after construction; page_w/h are args — safe
+   * to check before locking. `stopping` is mutable (set under lock in
+   * fw_cache_stop), so its check moves inside the lock. */
   if (page < 0 || page >= self->page_count)
     return NULL;
   if (page_w <= 0 || page_h <= 0)
     return NULL;
 
   g_mutex_lock (&self->lock);
+  if (self->stopping) {
+    g_mutex_unlock (&self->lock);
+    return NULL;
+  }
   ThumbEntry *te = g_hash_table_lookup (self->thumbs, GINT_TO_POINTER (page));
 
   if (te && te->texture) {

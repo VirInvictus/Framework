@@ -128,7 +128,7 @@ main (int argc, char **argv)
   if (!path) {
     fprintf (stderr,
              "bench-render: pass a document path as argv[1].\n"
-             "  example: bench-render \"/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf\"\n");
+             "  example: bench-render .testfiles/effective-java.pdf\n");
     return 2;
   }
 

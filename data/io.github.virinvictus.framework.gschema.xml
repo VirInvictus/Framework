@@ -159,5 +159,18 @@
       </description>
     </key>
 
+    <key name="prefer-fixed-layout" type="b">
+      <default>false</default>
+      <summary>Open ebooks as fixed pages instead of reflowed text</summary>
+      <description>
+        When true, reflow-eligible formats (EPUB / FB2 / MOBI / AZW3)
+        are opened through the fixed-layout MuPDF backend rather than
+        the native reflow pipeline. Useful for documents the reflow
+        parser renders poorly. Toggling it re-opens the current
+        document. No effect on PDF / DjVu / comics, which are always
+        fixed-layout.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

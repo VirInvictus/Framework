@@ -29,12 +29,12 @@
 #include "fw-document.h"
 #include "fw-cache.h"
 #include "fw-debug.h"
+#include "corpus-root.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/resource.h>
 
 /* Comics-heavy runs (CBZ + CBR back-to-back) push RSS past 1500 MB
  * with the default 512 MB byte-cap × two formats × glibc retention.
@@ -45,59 +45,22 @@
 #define DEFAULT_DWELL_MS     60
 #define DEFAULT_MAX_PAGES   200
 
-/* Same coverage as stress-multidoc, but every backend gets a soak —
- * walked in stride rather than just touched. Missing files are
- * skipped (not failures). */
-static const char *CORPUS[] = {
-  "/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf",
-  "/home/bdkl/docs/Calibre Library/Imre Lakatos/Proofs and Refutations_ The Logic of Mathematical Discovery (1006)/Proofs and Refutations_ The Logic of Mathe - Imre Lakatos.djvu",
-  "/home/bdkl/docs/Calibre Library/Andrew Hunt/The Pragmatic Programmer_ your journey to mastery, 20th Anniversary Edition, 2nd Edition (8)/The Pragmatic Programmer_ your journey to - Andrew Hunt.pdf",
-  "/home/bdkl/docs/Calibre Library/Troy Denning/The Verdant Passage (2)/The Verdant Passage - Troy Denning.epub",
-  "/home/bdkl/docs/Calibre Library/David Gemmell/Fall of Kings (1581)/Fall of Kings - David Gemmell.mobi",
-  "/mnt/SharedData/Comics/Berserk (v01-v041)/Berserk v25 (2008) (Digital) (danke-Empire).cbz",
-  "/mnt/SharedData/Comics/From Hell (Master Edition)/From Hell - Master Edition (2020).cbr",
+/* One sample per backend, resolved against the corpus root (see
+ * resolve_corpus_root). Filenames match the .testfiles layout and
+ * tests/corpus.json. Missing files are skipped (not failures), so a
+ * partially-populated corpus still runs. */
+static const char *CORPUS_FILES[] = {
+  "effective-java.pdf",            /* PDF — textbook, 901pp, font/code-heavy */
+  "visual-explanations-tufte.pdf", /* PDF — image-heavy */
+  "on-growth-and-form.djvu",       /* DjVu — scanned */
+  "playing-at-the-world-v2.epub",  /* reflow routes via MuPDF here (FwDocument) */
+  "the-broken-god.mobi",           /* MOBI / KF7 */
+  "datapoint.azw3",                /* AZW3 / KF8 */
+  "nausicaa-v01.cbz",              /* CBZ */
+  "vagabond-v01.cbr",              /* CBR — RAR via libarchive */
 };
-static const int CORPUS_LEN = (int) (sizeof (CORPUS) / sizeof (CORPUS[0]));
+static const int CORPUS_LEN = (int) (sizeof (CORPUS_FILES) / sizeof (CORPUS_FILES[0]));
 
-static long
-rss_peak_mb (void)
-{
-  struct rusage ru;
-  getrusage (RUSAGE_SELF, &ru);
-  return ru.ru_maxrss / 1024;
-}
-
-static long
-rss_current_mb (void)
-{
-  FILE *f = fopen ("/proc/self/status", "r");
-  if (!f) return -1;
-  char line[256];
-  long kb = -1;
-  while (fgets (line, sizeof line, f)) {
-    if (strncmp (line, "VmRSS:", 6) == 0) {
-      kb = strtol (line + 6, NULL, 10);
-      break;
-    }
-  }
-  fclose (f);
-  return kb < 0 ? -1 : kb / 1024;
-}
-
-static void
-spin_main_loop (int ms)
-{
-  GMainContext *ctx = g_main_context_default ();
-  gint64 deadline = g_get_monotonic_time () + (gint64) ms * 1000;
-  while (g_get_monotonic_time () < deadline)
-    g_main_context_iteration (ctx, FALSE);
-}
-
-static gboolean
-file_exists (const char *path)
-{
-  return g_file_test (path, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR);
-}
 
 static gboolean
 soak_one (const char *path, int stride, int dwell_ms, int max_pages)
@@ -165,13 +128,15 @@ main (int argc, char **argv)
   const char *max_env = g_getenv ("FW_SOAK_MAX_PAGES");
   if (max_env) max_pages = atoi (max_env);
 
-  printf ("stress-corpus-soak: stride=%d dwell=%dms max_pages=%d cap=%ld MB\n",
-          stride, dwell_ms, max_pages, rss_cap_mb);
+  g_autofree char *root = fw_test_corpus_root ();
+  printf ("stress-corpus-soak: root=%s stride=%d dwell=%dms max_pages=%d cap=%ld MB\n",
+          root, stride, dwell_ms, max_pages, rss_cap_mb);
 
   int failures = 0;
   int processed = 0;
   for (int i = 0; i < CORPUS_LEN; i++) {
-    if (!soak_one (CORPUS[i], stride, dwell_ms, max_pages))
+    g_autofree char *path = g_build_filename (root, CORPUS_FILES[i], NULL);
+    if (!soak_one (path, stride, dwell_ms, max_pages))
       failures++;
     processed++;
   }

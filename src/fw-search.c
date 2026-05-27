@@ -338,32 +338,6 @@ fw_search_get_current_page (FwSearch *self)
   return g_array_index (self->hits, FwSearchHit, self->current).page;
 }
 
-GArray *
-fw_search_hits_for_page (FwSearch *self, int page, int *out_active_idx)
-{
-  g_return_val_if_fail (FW_IS_SEARCH (self), NULL);
-
-  if (out_active_idx) *out_active_idx = -1;
-  if (self->hits->len == 0)
-    return NULL;
-
-  GArray *out = g_array_new (FALSE, FALSE, sizeof (FwSearchHit));
-  for (guint i = 0; i < self->hits->len; i++) {
-    FwSearchHit *h = &g_array_index (self->hits, FwSearchHit, i);
-    if (h->page != page)
-      continue;
-    if (out_active_idx && (int) i == self->current)
-      *out_active_idx = (int) out->len;
-    g_array_append_val (out, *h);
-  }
-
-  if (out->len == 0) {
-    g_array_unref (out);
-    return NULL;
-  }
-  return out;
-}
-
 const FwSearchHit *
 fw_search_peek_hits (FwSearch *self, int *out_count)
 {

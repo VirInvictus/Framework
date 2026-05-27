@@ -33,8 +33,9 @@
  * regressions: "the binary opens a document, the cache renders the
  * first page within the timeout, and nothing crashed." */
 #define SELF_TEST_TIMEOUT_MS 5000
-#define SELF_TEST_DEFAULT \
-  "/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf"
+/* Default doc when --self-test is invoked with no path. Relative to the
+ * CWD (run from the repo root); pass an explicit path to override. */
+#define SELF_TEST_DEFAULT ".testfiles/effective-java.pdf"
 
 static int
 run_self_test (const char *path)

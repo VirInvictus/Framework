@@ -2,6 +2,81 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.67.0 (2026-05-27)
+
+*Post-reflow-search hardening and polish: a full code-audit pass, format-coverage completeness (AZW3 TOC, .fb2.zip), two reading features, and a reproducible test corpus. No 1.0-release work yet (Phase 15 stays deferred).*
+
+### Reading features
+
+* **AZW3 / KF8 table of contents.** AZW3 and KF8 MOBIs previously opened with an empty sidebar; only KF7 (filepos-based) TOCs worked. The MOBI parser now extracts the KF8 NCX index (a faithful port of foliate-js's `getNCX` / `getIndexData`): it reads the NCX INDX, resolves chapter labels from the CNCX string table, and maps each entry's `[fid, off]` position into the SKEL+FRAG-spliced body via per-fragment output offsets recorded during the splice. The backend injects `ncx_<offset>` anchors at those positions and builds the sidebar from the NCX entries. Verified on a real AZW3: 31 entries, correct labels, anchors resolving to monotonically-increasing block positions across the book.
+* **"% read" progress indicator.** Reflow documents (EPUB / FB2 / MOBI / AZW3) show reading progress as a percentage next to the page count ("12 / 340 (4%)"). The page count is synthetic for ebooks, so the percentage is the natural progress metric, matching Foliate / Kindle.
+* **"Render as Fixed Pages" toggle.** A new primary-menu / GSettings toggle (`prefer-fixed-layout`) forces reflow-eligible formats through the fixed-layout MuPDF backend instead of the native reflow pipeline, for documents the reflow parser renders poorly. Toggling it re-opens the current document.
+* **Complete NCX TOCs.** EPUB NCX parsing no longer drops parent (section) entries from nested navPoints: each navPoint now flushes its entry at its `<content>` (before descending into children), so the sidebar carries the full hierarchy in reading order.
+
+### Format coverage
+
+* **`.fb2.zip`** files are detected and the inner `.fb2` is extracted (libarchive) before parsing.
+* **FB2 title fallback:** a `<body>`-level `<title>` now fills the metadata title when the canonical `<title-info><book-title>` is absent.
+* **DjVu selection text** now filters by the selection rectangle (mapping the doc-space rect into DjVu's bottom-left hidden-text pixel space) rather than copying the whole page. The coordinate convention is DjVu's documented one; selection precision is worth an interactive confirm.
+
+### Audit pass (full code review)
+
+* **Security: MOBI record-offset table hardened** (`fw-mobi-parser.c`). Offsets were read straight from the file and unvalidated; a non-monotonic table made a record-length subtraction underflow to a huge `gsize`, defeating the length-relative bounds checks (notably the HuffDic decoder) and allowing an out-of-bounds read on a crafted MOBI. The table is now rejected unless monotonic and within the file. HuffDic compression itself remains untested against a real HuffDic file (none exist in the test corpus), but the decoder is a faithful port and is now guarded against malformed input.
+* **Memory leak fixed (EPUB NCX):** nested navPoints overwrote the content-src without freeing the prior value, leaking once per nested entry. Caught by the new `stress-reflow` under ASan.
+* **Performance: `fw_cache_set_priority`** no longer allocates two GHashTables on every scroll tick (linear membership scan over the ≤64-page window plus steal-during-iteration). The search overlay paints from the zero-copy `fw_search_peek_hits` instead of allocating a per-page array every frame.
+* **Correctness / hygiene:** added a missing `#include <math.h>` to `fw-cache.c` (`sqrt`/`fabs` were resolving only via transitive includes); removed dead `last_priority_time` state, the dead `fw_search_hits_for_page`, and three lockless cache-field reads (captured into the render job / moved under the lock); coalesced per-store redraw scheduling behind a flag.
+* Reviewed clean: `fw-document-pdf.c` (threading, `fz_try`/`fz_catch` discipline, cookie cancellation, stext LRU) and the EPUB resource lifecycle.
+
+### Test suite
+
+* The stress/bench corpus is now a gitignored `.testfiles/` directory resolved through a shared `corpus-root.h` (`FW_TEST_CORPUS_ROOT` override), replacing scattered hardcoded paths into Brandon's live library. See `tests/README.md`.
+* New **`stress-reflow`** target: the reflow pipeline (EPUB / MOBI / AZW3 parsers + the v0.66 search core) had zero automated coverage and now has document-layer + ASan coverage. It surfaced the NCX leak above.
+* Duplicated stress helpers (RSS sampling, main-loop pump, file-existence) consolidated into `stress-util.h`.
+
+### Verified
+
+* All six stress tests pass; ASan + UBSan clean across the reflow corpus and the cache eviction paths.
+* AZW3 TOC validated headlessly on a real KF8 file; final navigation behaviour is worth an in-app confirm.
+
+---
+
+## v0.66.0 (2026-05-27)
+
+*Reflow search. Ctrl+F now works inside EPUB / FB2 / MOBI / AZW3 / TXT, with match highlighting in the GtkListView. Closes the last functional gap in the Phase 13.1 reflow stack.*
+
+Fixed-layout search (PDF / DjVu / comics) has worked since v0.7, but the reflow pipeline shipped its `search()` backend hooks as stubs; typing in the search bar with an ebook open did nothing. This release implements reflow search end to end.
+
+### Search core
+
+`fw_reflow_document_search` now scans the block model directly. Reflow documents are fully in RAM, so the scan is synchronous: there is no worker thread or signal plumbing like the fixed-layout `FwSearch`. For each block it extracts the *visible* text (Pango markup tags stripped, entities decoded) and runs a case-insensitive substring match, returning a flat `GArray<FwReflowHit>` of `{block, offset, length}` in reading order, with offsets as byte positions in the visible text.
+
+Matching is codepoint-by-codepoint via `g_unichar_tolower` rather than the fixed-layout backends' `g_utf8_strdown` + `strstr`. The user-visible behavior is the same (case-insensitive substring, no regex or whole-word), but comparing in place keeps match offsets aligned to the original visible bytes, which downcasing can otherwise shift; the highlight splicer needs exact original offsets.
+
+Entity decoding is load-bearing here: GLib escapes apostrophes and quotes, and book prose is full of them, so the body markup stores `don&#39;t`, not `don't`. The matcher decodes `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;` and decimal / hex numeric references before matching, so searching `don't` finds it.
+
+The four per-backend `search()` stubs and the interface vtable slot are gone; one generic implementation over the shared block model replaces them.
+
+### Highlighting
+
+Matches paint as Pango `<span background>` spliced into each block's markup at bind time. The active hit is orange (`#FF8C1A`), other matches yellow (`#FFEB33`), matching the fixed-layout overlay palette in `fw-view.c`.
+
+The splice is markup-aware. A match that straddles an inline tag (`<i>`, a drop-cap span, and so on) has its highlight span *broken* around the tag and reopened after, so the result stays well-nested. A naive splice would interleave a `</i>` inside a `<span>` and Pango would reject the whole string. The existing per-block decorations (first-line indent em-quad, list bullets and numbers, raised cap) wrap the already-spliced body, so they compose without interfering.
+
+`FwReflowView` holds the hit list, an active index, and a `FwBlock*`-keyed span index for O(1) lookup in the bind handler. Highlight changes refresh only the currently-bound rows (a slice-size round-trip forces a rebind) without disturbing scroll position.
+
+### Window wiring
+
+The shared search bar branches on whether a reflow document is open: find / next / prev / clear route to the synchronous reflow path, the "N of M" count label is driven the same way (no "+" running state, since the scan is instant), and F3 / Shift+F3 cycle matches, scrolling each active hit's block into view via the existing `fw_reflow_view_scroll_to_block`.
+
+### Verified
+
+* Splicer and matcher validated against crafted cases (matches straddling tags, entity boundaries, code blocks, multi-match active coloring); every spliced output passes `pango_parse_markup`.
+* Headless search over a real EPUB (*Small Gods*) under ASan: clean, no leaks. `don't` matches 251 times (apostrophe-entity decoding confirmed on real data), an unlikely token returns 0, an empty needle returns NULL.
+* EPUB opens clean under ASan + UBSan (the bind-handler refactor).
+* Build clean at `-Dwarning_level=2`.
+
+---
+
 ## v0.65.0 (2026-05-02)
 
 *Audit-pass cleanup. Three parallel reviewers walked the codebase looking for portfolio-blockers; this slice fixes everything they flagged at HIGH and MEDIUM severity. No new features.*

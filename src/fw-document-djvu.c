@@ -443,6 +443,42 @@ collect_text_from_sexpr (miniexp_t exp, GString *buf)
     collect_text_from_sexpr (miniexp_car (rest), buf);
 }
 
+/* Collect word text whose bbox overlaps [qx0,qy0,qx1,qy1], expressed in
+ * DjVu hidden-text pixel space (image pixels, bottom-left origin). Each
+ * node is (type x0 y0 x1 y1 content...); leaf word nodes carry a string
+ * child. `all` collects everything regardless of the query (whole-page
+ * fallback). Words are space-separated so a selection copies as readable
+ * text. */
+static void
+collect_text_in_rect (miniexp_t exp, GString *buf,
+                      int qx0, int qy0, int qx1, int qy1, gboolean all)
+{
+  if (!miniexp_consp (exp))
+    return;
+
+  miniexp_t p = miniexp_cdr (exp);   /* skip the type symbol */
+  int box[4] = { 0, 0, 0, 0 };
+  for (int i = 0; i < 4 && miniexp_consp (p); i++) {
+    miniexp_t c = miniexp_car (p);
+    if (miniexp_numberp (c)) box[i] = miniexp_to_int (c);
+    p = miniexp_cdr (p);
+  }
+  gboolean overlaps = all ||
+    !(box[2] < qx0 || box[0] > qx1 || box[3] < qy0 || box[1] > qy1);
+
+  for (; miniexp_consp (p); p = miniexp_cdr (p)) {
+    miniexp_t child = miniexp_car (p);
+    if (miniexp_stringp (child)) {
+      if (overlaps) {
+        if (buf->len > 0) g_string_append_c (buf, ' ');
+        g_string_append (buf, miniexp_to_str (child));
+      }
+    } else {
+      collect_text_in_rect (child, buf, qx0, qy0, qx1, qy1, all);
+    }
+  }
+}
+
 static GArray *
 djvu_search (FwDocument *doc, const char *text, int page)
 {
@@ -510,16 +546,36 @@ djvu_get_text (FwDocument *doc, int page,
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
 
-  (void) x0; (void) y0; (void) x1; (void) y1;
-
   miniexp_t page_text = ddjvu_document_get_pagetext (self->djvu_doc,
                                                       page, "word");
   if (page_text == miniexp_dummy)
     return NULL;
 
-  /* TODO: filter by rectangle coordinates. For now, return all text. */
+  /* Map the doc-space query rect (points, top-left origin) into DjVu
+   * hidden-text pixel space (image pixels, bottom-left origin), then
+   * collect only the words it overlaps. A degenerate rect — or missing
+   * page info — collects the whole page (the previous behaviour). DjVu's
+   * bottom-left convention means the y axis is flipped against the
+   * page height. (Selection precision here is worth an interactive
+   * confirm; the coordinate convention is DjVu's documented one.) */
+  gboolean all = (x1 <= x0 || y1 <= y0);
+  int qx0 = 0, qy0 = 0, qx1 = 0, qy1 = 0;
+  if (!all) {
+    ddjvu_pageinfo_t info;
+    if (ddjvu_document_get_pageinfo (self->djvu_doc, page, &info) == DDJVU_JOB_OK
+        && info.dpi > 0 && info.height > 0) {
+      double scale = (double) info.dpi / 72.0;   /* points → pixels */
+      qx0 = (int) (x0 * scale);
+      qx1 = (int) (x1 * scale);
+      qy0 = (int) (info.height - y1 * scale);
+      qy1 = (int) (info.height - y0 * scale);
+    } else {
+      all = TRUE;
+    }
+  }
+
   GString *buf = g_string_new (NULL);
-  collect_text_from_sexpr (page_text, buf);
+  collect_text_in_rect (page_text, buf, qx0, qy0, qx1, qy1, all);
 
   if (buf->len == 0) {
     g_string_free (buf, TRUE);

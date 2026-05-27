@@ -24,6 +24,8 @@
 #include "fw-reflow-document-fb2.h"
 
 #include <string.h>
+#include <archive.h>
+#include <archive_entry.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 
@@ -192,6 +194,8 @@ fb2_text_escaped (GString *out, const char *text, gboolean to_toc, GString *toc_
 static void fb2_walk_node     (Fb2WalkCtx *cc, xmlNode *node);
 static void fb2_walk_metadata (Fb2WalkCtx *cc, xmlNode *node);
 static void fb2_walk_binaries (Fb2WalkCtx *cc, xmlNode *node);
+static void fb2_metadata_set  (FwReflowDocumentFb2 *self,
+                               const char *key, const char *val);
 
 /* ── Body walker ──────────────────────────────────────────────── */
 
@@ -271,8 +275,17 @@ static void
 fb2_handle_title (Fb2WalkCtx *cc, xmlNode *n)
 {
   if (cc->section_depth <= 0) {
-    /* `<title>` outside a section — top of <body> book-title. Walk
-     * children but ignore for now (could be added to metadata). */
+    /* `<title>` at the top of <body> — the book title. Use it as a
+     * metadata-title fallback: fb2_metadata_set is first-write-wins and
+     * the metadata pre-pass (canonical <title-info><book-title>) runs
+     * first, so this only fills in when a malformed FB2 omits title-info.
+     * Children are still walked so the title also renders as content. */
+    xmlChar *content = xmlNodeGetContent (n);
+    if (content) {
+      g_autofree char *t = g_strstrip (g_strdup ((const char *) content));
+      if (*t) fb2_metadata_set (cc->doc, "title", t);
+      xmlFree (content);
+    }
     fb2_walk_node (cc, n->children);
     return;
   }
@@ -582,13 +595,70 @@ fb2_walk_binaries (Fb2WalkCtx *cc, xmlNode *root)
 /* ── Open path ─────────────────────────────────────────────────── */
 
 static gboolean
+fb2_has_suffix_ci (const char *s, const char *suffix)
+{
+  gsize ls = strlen (s), lf = strlen (suffix);
+  return ls >= lf && g_ascii_strcasecmp (s + ls - lf, suffix) == 0;
+}
+
+/* Read the FB2 XML bytes. A plain .fb2 is read directly; a .fb2.zip is a
+ * ZIP wrapping (normally) a single .fb2 entry — extract the first .fb2
+ * entry, or failing that the first regular file. Caller frees *out. */
+static gboolean
+fb2_read_source (const char *path, char **out, gsize *out_len, GError **error)
+{
+  if (!fb2_has_suffix_ci (path, ".zip"))
+    return g_file_get_contents (path, out, out_len, error);
+
+  struct archive *a = archive_read_new ();
+  archive_read_support_format_zip (a);
+  if (archive_read_open_filename (a, path, 16384) != ARCHIVE_OK) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "fb2: cannot open zip: %s", archive_error_string (a));
+    archive_read_free (a);
+    return FALSE;
+  }
+
+  struct archive_entry *entry;
+  char *best = NULL;
+  gsize best_len = 0;
+  gboolean best_is_fb2 = FALSE;
+  while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
+    if (archive_entry_filetype (entry) != AE_IFREG) { archive_read_data_skip (a); continue; }
+    const char *name = archive_entry_pathname (entry);
+    la_int64_t size = archive_entry_size (entry);
+    if (size <= 0) { archive_read_data_skip (a); continue; }
+    gboolean is_fb2 = name && fb2_has_suffix_ci (name, ".fb2");
+    /* Keep the first .fb2; otherwise the first regular file as fallback. */
+    if (best_is_fb2 || (best && !is_fb2)) { archive_read_data_skip (a); continue; }
+    char *buf = g_malloc (size);
+    if (archive_read_data (a, buf, size) != size) { g_free (buf); continue; }
+    g_free (best);
+    best = buf;
+    best_len = size;
+    best_is_fb2 = is_fb2;
+    if (is_fb2) break;
+  }
+  archive_read_free (a);
+
+  if (!best) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                 "fb2: no usable entry in zip");
+    return FALSE;
+  }
+  *out = best;
+  *out_len = best_len;
+  return TRUE;
+}
+
+static gboolean
 fb2_open (FwReflowDocument *doc, const char *path, GError **error)
 {
   FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
 
   g_autofree char *raw = NULL;
   gsize raw_len = 0;
-  if (!g_file_get_contents (path, &raw, &raw_len, error))
+  if (!fb2_read_source (path, &raw, &raw_len, error))
     return FALSE;
 
   /* libxml2 handles encoding declarations natively — no need to
@@ -696,13 +766,6 @@ fb2_find_block_by_anchor (FwReflowDocument *doc, const char *anchor_id)
   return GPOINTER_TO_UINT (g_hash_table_lookup (self->anchors, anchor_id));
 }
 
-static GArray *
-fb2_search (FwReflowDocument *doc, const char *needle)
-{
-  (void) doc; (void) needle;
-  return NULL;  /* Phase 6 — search highlighting in the listview. */
-}
-
 static GHashTable *
 fb2_get_metadata (FwReflowDocument *doc)
 {
@@ -719,7 +782,6 @@ fw_reflow_document_fb2_iface_init (FwReflowDocumentInterface *iface)
   iface->get_image             = fb2_get_image;
   iface->get_toc               = fb2_get_toc;
   iface->find_block_by_anchor  = fb2_find_block_by_anchor;
-  iface->search                = fb2_search;
   iface->get_metadata          = fb2_get_metadata;
 }
 

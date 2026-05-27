@@ -1,27 +1,46 @@
 {
   "_comment": [
     "Canonical test corpus for Framework's stress and benchmark suite.",
-    "Paths are relative to FW_TEST_CORPUS_ROOT (default: /home/bdkl/docs/Calibre Library).",
-    "Tags drive which samples each stress/bench target picks up.",
-    "Tags: large = >500 pages, scanned = image-heavy, djvu, comic, reflow = epub/mobi/fb2."
+    "Filenames are relative to the corpus root: $FW_TEST_CORPUS_ROOT if set,",
+    "otherwise the repo's gitignored .testfiles/ directory. These files are",
+    "copyrighted sample documents and are never committed; see tests/README.md",
+    "for how to populate .testfiles/ (or point FW_TEST_CORPUS_ROOT elsewhere).",
+    "Tags: large = >500 pages, scanned = image-heavy, djvu, comic,",
+    "reflow = epub/mobi/azw3 (native reflow pipeline)."
   ],
-  "default_root": "/home/bdkl/docs/Calibre Library",
+  "default_root": ".testfiles",
   "samples": [
     {
-      "path": "Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf",
+      "path": "effective-java.pdf",
       "tags": ["large", "textbook", "pdf"]
     },
     {
-      "path": "Imre Lakatos/Proofs and Refutations_ The Logic of Mathematical Discovery (1006)/Proofs and Refutations_ The Logic of Mathe - Imre Lakatos.djvu",
+      "path": "visual-explanations-tufte.pdf",
+      "tags": ["pdf", "scanned", "image-heavy"]
+    },
+    {
+      "path": "on-growth-and-form.djvu",
       "tags": ["djvu", "scanned"]
     },
     {
-      "path": "Andrew Hunt/The Pragmatic Programmer_ your journey to mastery, 20th Anniversary Edition, 2nd Edition (8)/The Pragmatic Programmer_ your journey to - Andrew Hunt.pdf",
-      "tags": ["pdf", "textbook"]
+      "path": "playing-at-the-world-v2.epub",
+      "tags": ["reflow", "epub", "image-heavy"]
     },
     {
-      "path": "Troy Denning/The Verdant Passage (2)/The Verdant Passage - Troy Denning.epub",
-      "tags": ["reflow", "epub"]
+      "path": "the-broken-god.mobi",
+      "tags": ["reflow", "mobi", "kf7"]
+    },
+    {
+      "path": "datapoint.azw3",
+      "tags": ["reflow", "azw3", "kf8"]
+    },
+    {
+      "path": "nausicaa-v01.cbz",
+      "tags": ["comic", "cbz"]
+    },
+    {
+      "path": "vagabond-v01.cbr",
+      "tags": ["comic", "cbr"]
     }
   ]
 }

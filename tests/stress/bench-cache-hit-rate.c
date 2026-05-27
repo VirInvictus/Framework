@@ -28,21 +28,14 @@
 
 #include "fw-document.h"
 #include "fw-cache.h"
+#include "corpus-root.h"
 #include "fw-debug.h"
+#include "stress-util.h"
 
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static void
-spin_main_loop (int ms)
-{
-  GMainContext *ctx = g_main_context_default ();
-  gint64 deadline = g_get_monotonic_time () + (gint64) ms * 1000;
-  while (g_get_monotonic_time () < deadline)
-    g_main_context_iteration (ctx, FALSE);
-}
 
 typedef struct {
   const char *label;
@@ -83,8 +76,12 @@ main (int argc, char **argv)
   fw_debug_init ();
   gtk_init ();
 
-  const char *path = argc >= 2 ? argv[1]
-    : "/home/bdkl/docs/Calibre Library/Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf";
+  g_autofree char *fallback = NULL;
+  if (argc < 2) {
+    g_autofree char *root = fw_test_corpus_root ();
+    fallback = g_build_filename (root, "effective-java.pdf", NULL);
+  }
+  const char *path = argc >= 2 ? argv[1] : fallback;
 
   printf ("bench-cache-hit-rate: %s\n", path);
 

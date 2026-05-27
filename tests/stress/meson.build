@@ -35,6 +35,13 @@ stress_corpus_soak = executable(
   install: false,
 )
 
+stress_reflow = executable(
+  'stress-reflow',
+  'stress-reflow.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
 bench_render = executable(
   'bench-render',
   'bench-render.c',
@@ -57,18 +64,18 @@ bench_cache_hit_rate = executable(
 )
 
 # Register as a meson test. RSS cap of 800 MB by default; override with
-# FW_STRESS_RSS_CAP_MB. Corpus path resolves from $FW_TEST_CORPUS_ROOT
-# at meson configure time when set; otherwise falls back to Brandon's
-# local Calibre library so the project's own dev workflow keeps
-# working. Anyone else cloning the repo should set
-# FW_TEST_CORPUS_ROOT to a directory containing the canonical samples
-# (or invoke the test binaries directly with a path argument).
+# FW_STRESS_RSS_CAP_MB. The corpus path resolves from $FW_TEST_CORPUS_ROOT
+# at configure time when set; otherwise it defaults to the repo's
+# gitignored .testfiles/ directory (populate it per tests/README.md).
+# This keeps the suite reproducible: the canonical samples live at known
+# filenames under one root rather than scattered across a mutable library.
+default_corpus = meson.project_source_root() / '.testfiles'
 corpus_root = run_command(
   'sh', '-c',
-  'echo "${FW_TEST_CORPUS_ROOT:-/home/bdkl/docs/Calibre Library}"',
+  'echo "${FW_TEST_CORPUS_ROOT:-' + default_corpus + '}"',
   check: true,
 ).stdout().strip()
-sample_pdf  = corpus_root / 'Joshua Bloch/Effective Java (5)/Effective Java - Joshua Bloch.pdf'
+sample_pdf  = corpus_root / 'effective-java.pdf'
 
 test('stress-scrub-effective-java',
   stress_scrub,
@@ -117,6 +124,17 @@ test('stress-corpus-soak',
   env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
         'G_TEST_BUILDDIR=' + meson.project_build_root()],
   timeout: 300,
+  protocol: 'exitcode',
+  is_parallel: false,
+)
+
+# Reflow pipeline (parsers + v0.66 search core) — document layer only;
+# no display needed. Fast, so a short timeout is plenty.
+test('stress-reflow',
+  stress_reflow,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 60,
   protocol: 'exitcode',
   is_parallel: false,
 )

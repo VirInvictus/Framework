@@ -704,10 +704,18 @@ indx_tag_value (const IndxEntry *e, guint tag, guint index)
   return g_array_index (vals, guint32, index);
 }
 
+/* Splice fragments into their skeleton sections to form the real KF8
+ * HTML body. When `frag_offsets` is non-NULL it receives one guint32 per
+ * fragment (indexed by fragment id, matching the NCX `pos` fid): the
+ * absolute byte offset in the returned buffer where that fragment's
+ * content begins, or G_MAXUINT32 for a fragment skipped as out-of-range.
+ * The NCX TOC builder maps each entry's [fid, off] to frag_offsets[fid]
+ * + off to find its anchor position. */
 static GString *
 splice_kf8_sections (const char *body, gsize body_len,
                      GPtrArray  *skel_entries,
-                     GPtrArray  *frag_entries)
+                     GPtrArray  *frag_entries,
+                     GArray     *frag_offsets)
 {
   GString *out = g_string_sized_new (body_len + 1024);
   if (!skel_entries || !frag_entries) return out;
@@ -722,7 +730,9 @@ splice_kf8_sections (const char *body, gsize body_len,
 
     if ((gsize) skel_offset + skel_length > body_len) break;
 
-    /* Build the section into a temp GString. */
+    /* Build the section into a temp GString. `section_start` is where
+     * this section will land in `out` (all prior sections' length). */
+    gsize section_start = out->len;
     g_autoptr (GString) sec = g_string_sized_new (skel_length + 256);
     g_string_append_len (sec, body + skel_offset, skel_length);
 
@@ -734,13 +744,24 @@ splice_kf8_sections (const char *body, gsize body_len,
       guint32 frag_offset   = indx_tag_value (frag, 6, 0);
       guint32 frag_length   = indx_tag_value (frag, 6, 1);
 
-      if ((gsize) frag_offset + frag_length > body_len) continue;
+      if ((gsize) frag_offset + frag_length > body_len) {
+        if (frag_offsets) {
+          guint32 sentinel = G_MAXUINT32;
+          g_array_append_val (frag_offsets, sentinel);
+        }
+        continue;
+      }
 
       /* Where in `sec` does this fragment splice in? */
       gint64 splice_at = insert_offset - (gint64) skel_offset
                           + (gint64) inserted;
       if (splice_at < 0) splice_at = 0;
       if ((gsize) splice_at > sec->len) splice_at = sec->len;
+
+      if (frag_offsets) {
+        guint32 abs = (guint32) (section_start + (gsize) splice_at);
+        g_array_append_val (frag_offsets, abs);
+      }
 
       g_string_insert_len (sec, splice_at,
                            body + frag_offset, frag_length);
@@ -750,6 +771,110 @@ splice_kf8_sections (const char *body, gsize body_len,
     g_string_append_len (out, sec->str, sec->len);
   }
   return out;
+}
+
+/* Read the CNCX (compiled NCX) string table for an INDX index: the
+ * num_cncx records following the index's secondary records, each a
+ * sequence of (varlen length-prefix, UTF-8 bytes). Returns a
+ * GHashTable<guint cncx-offset → char* label> (caller unrefs); labels
+ * are referenced from NCX entries via tag 3. */
+static GHashTable *
+read_cncx (const guchar *data, gsize raw_len, const gsize *roff,
+           guint16 record_count, guint32 indx_index,
+           guint32 num_records, guint32 num_cncx)
+{
+  GHashTable *cncx = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                            NULL, g_free);
+  guint32 base = 0;
+  for (guint32 i = 0; i < num_cncx; i++) {
+    guint32 ri = indx_index + num_records + 1 + i;
+    if (ri >= record_count) break;
+    gsize r_off = roff[ri];
+    gsize r_len = roff[ri + 1] - r_off;
+    if (r_off + r_len > raw_len) break;
+    const guchar *rec = data + r_off;
+    gsize pos = 0;
+    while (pos < r_len) {
+      gsize entry_index = pos;
+      FwMobiVarLen vl = read_var_len (rec, r_len, pos);
+      if (vl.length == 0) break;
+      pos += vl.length;
+      if (pos + vl.value > r_len) break;
+      char *label = g_strndup ((const char *) rec + pos, vl.value);
+      pos += vl.value;
+      g_hash_table_insert (cncx,
+                           GUINT_TO_POINTER (base + (guint32) entry_index),
+                           label);
+    }
+    base += 0x10000;
+  }
+  return cncx;
+}
+
+/* Build the KF8 table of contents from the NCX INDX (foliate getNCX).
+ * Each NCX entry carries a CNCX label offset (tag 3), a heading level
+ * (tag 4) and a [fid, off] position (tag 6). The position resolves to a
+ * byte offset in the spliced body via frag_offsets[fid] + off. Returns
+ * a GArray<FwMobiTocEntry> in document order, or NULL when empty. */
+static GArray *
+build_kf8_toc (const guchar *data, gsize raw_len, const gsize *roff,
+               guint16 record_count, guint32 ncx_index,
+               const GArray *frag_offsets)
+{
+  if (ncx_index == 0 || ncx_index >= record_count || !frag_offsets)
+    return NULL;
+  gsize off = roff[ncx_index];
+  gsize len = roff[ncx_index + 1] - off;
+  if (len < 0x38 || memcmp (data + off, "INDX", 4) != 0)
+    return NULL;
+  guint32 num_records = read_be32 (data + off + 24);
+  guint32 num_cncx    = read_be32 (data + off + 0x34);
+
+  GHashTable *cncx = read_cncx (data, raw_len, roff, record_count,
+                                ncx_index, num_records, num_cncx);
+  GPtrArray *entries = parse_indx (data, raw_len, roff, record_count,
+                                   ncx_index);
+  if (!entries) {
+    g_hash_table_unref (cncx);
+    return NULL;
+  }
+
+  GArray *toc = g_array_new (FALSE, FALSE, sizeof (FwMobiTocEntry));
+  for (guint i = 0; i < entries->len; i++) {
+    IndxEntry *e = entries->pdata[i];
+    /* tag 6 = [fid, off] (the KF8 position). Absent → not navigable. */
+    GArray *pos = e->tag_map
+      ? g_hash_table_lookup (e->tag_map, GUINT_TO_POINTER (6u)) : NULL;
+    if (!pos || pos->len < 2)
+      continue;
+    guint32 fid    = g_array_index (pos, guint32, 0);
+    guint32 off_in = g_array_index (pos, guint32, 1);
+    if (fid >= frag_offsets->len)
+      continue;
+    guint32 frag_abs = g_array_index (frag_offsets, guint32, fid);
+    if (frag_abs == G_MAXUINT32)
+      continue;
+    const char *label =
+      g_hash_table_lookup (cncx, GUINT_TO_POINTER (indx_tag_value (e, 3, 0)));
+    if (!label || !*label)
+      continue;
+
+    FwMobiTocEntry te = {
+      .label       = g_strdup (label),
+      .body_offset = frag_abs + off_in,
+      .level       = (int) indx_tag_value (e, 4, 0),
+    };
+    g_array_append_val (toc, te);
+  }
+
+  g_hash_table_unref (cncx);
+  g_ptr_array_free (entries, TRUE);
+
+  if (toc->len == 0) {
+    g_array_free (toc, TRUE);
+    return NULL;
+  }
+  return toc;
 }
 
 /* ── Top-level open ───────────────────────────────────────────── */
@@ -787,6 +912,22 @@ fw_mobi_parse (const char *path, GError **error)
   for (guint16 i = 0; i < record_count; i++)
     roff[i] = read_be32 (data + 78 + i * 8);
   roff[record_count] = raw_len;
+
+  /* Record offsets come straight from the file. Reject any table that
+   * isn't monotonically non-decreasing and bounded by raw_len:
+   * downstream code derives record lengths as roff[i+1] - roff[i], which
+   * underflows to a huge gsize on a non-monotonic table and defeats the
+   * `len`-relative bounds checks (notably in the HuffDic decoder),
+   * opening an out-of-bounds read on a crafted MOBI. Valid PalmDB files
+   * lay their records out sequentially, so this never rejects a real
+   * book. */
+  for (guint16 i = 0; i < record_count; i++) {
+    if (roff[i] > raw_len || roff[i] > roff[i + 1]) {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "mobi: record offset table not monotonic / out of range");
+      return NULL;
+    }
+  }
 
   /* PalmDocHeader at start of record 0; MobiHeader at +16. */
   gsize r0     = roff[0];
@@ -942,6 +1083,9 @@ fw_mobi_parse (const char *path, GError **error)
                       ? read_be32 (data + r0 + 248) : 0xffffffff;
   guint32 kf8_skel = (is_kf8 && r0 + 256 <= r0_end)
                       ? read_be32 (data + r0 + 252) : 0xffffffff;
+  /* KF8 NCX index (foliate MOBI_HEADER `indx` offset 244). KF8-relative. */
+  guint32 kf8_ncx  = (is_kf8 && r0 + 248 <= r0_end)
+                      ? read_be32 (data + r0 + 244) : 0xffffffff;
 
   /* EXTH (gated by exthFlag, bit 0x40). foliate exthFlag offset = 128. */
   char *meta_title = NULL, *meta_author = NULL;
@@ -1018,6 +1162,7 @@ fw_mobi_parse (const char *path, GError **error)
    * insertOffsets to produce real HTML. Foliate's KF8.init walks
    * the SKEL and FRAG INDX tables to discover the splice plan;
    * its loadSection performs each splice. We do both inline. */
+  GArray *kf8_toc = NULL;
   if (is_kf8 &&
       kf8_skel != 0xFFFFFFFF && kf8_skel + kf8_start < record_count &&
       kf8_frag != 0xFFFFFFFF && kf8_frag + kf8_start < record_count) {
@@ -1026,12 +1171,22 @@ fw_mobi_parse (const char *path, GError **error)
     GPtrArray *frag = parse_indx (data, raw_len, roff, record_count,
                                    kf8_start + kf8_frag);
     if (skel && frag) {
+      g_autoptr (GArray) frag_offsets =
+        g_array_new (FALSE, FALSE, sizeof (guint32));
       g_autoptr (GString) spliced = splice_kf8_sections (
-        body->str, body->len, skel, frag);
+        body->str, body->len, skel, frag, frag_offsets);
       /* Replace the body with the spliced result. */
       g_string_free (body, TRUE);
       body = g_string_new (NULL);
       g_string_append_len (body, spliced->str, spliced->len);
+      /* NCX TOC offsets index the spliced body; they stay valid only
+       * when the body isn't re-encoded below. KF8 is normally UTF-8, so
+       * skip TOC extraction on the rare cp1252 KF8 rather than ship
+       * shifted anchors. */
+      if (kf8_ncx != 0xFFFFFFFF && kf8_start + kf8_ncx < record_count
+          && text_enc != 1252)
+        kf8_toc = build_kf8_toc (data, raw_len, roff, record_count,
+                                 kf8_start + kf8_ncx, frag_offsets);
     } else {
       g_warning ("mobi: KF8 INDX parse failed, falling back to raw body");
     }
@@ -1128,6 +1283,7 @@ fw_mobi_parse (const char *path, GError **error)
   p->images         = images_ht;
   p->cover_recindex = cover_recindex;
   p->is_kf8         = is_kf8;
+  p->toc            = kf8_toc;
   return p;
 }
 
@@ -1141,5 +1297,10 @@ fw_mobi_parsed_free (FwMobiParsed *p)
   g_free (p->language);
   g_free (p->publisher);
   g_clear_pointer (&p->images, g_hash_table_unref);
+  if (p->toc) {
+    for (guint i = 0; i < p->toc->len; i++)
+      g_free (g_array_index (p->toc, FwMobiTocEntry, i).label);
+    g_array_free (p->toc, TRUE);
+  }
   g_free (p);
 }

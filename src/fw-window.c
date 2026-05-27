@@ -61,6 +61,13 @@ struct _FwWindow {
   GtkButton            *search_prev_button;
   GtkButton            *search_next_button;
 
+  /* Reflow search runs synchronously (the block model is in RAM), so
+   * there's no worker/signal machinery like FwSearch — the window holds
+   * the flat hit list and the active index directly. Used only when
+   * reflow_doc is set; the FwSearch path above drives fixed-layout. */
+  GArray               *reflow_hits;    /* GArray<FwReflowHit>, owned */
+  int                   reflow_active;  /* flat index of active hit, -1 none */
+
   /* State */
   double                zoom;
   int                   rotation;
@@ -114,6 +121,9 @@ static void nav_push_current               (FwWindow *self);
 static void on_kinetic_setting_changed     (GSettings *settings,
                                             const char *key,
                                             gpointer user_data);
+static void on_prefer_fixed_setting_changed (GSettings *settings,
+                                             const char *key,
+                                             gpointer user_data);
 static void on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar,
                                                 const char      *anchor,
                                                 gpointer         user_data);
@@ -336,6 +346,10 @@ on_scroll_changed (GtkAdjustment *adj, gpointer user_data)
 
 /* ── Search toggle ────────────────────────────────────────────────── */
 
+static void reflow_search_clear (FwWindow *self);
+static void reflow_search_run   (FwWindow *self, const char *text);
+static void reflow_search_step  (FwWindow *self, int dir);
+
 static void
 search_toggled (GtkToggleButton *button, gpointer user_data)
 {
@@ -344,6 +358,8 @@ search_toggled (GtkToggleButton *button, gpointer user_data)
   gtk_search_bar_set_search_mode (self->search_bar, active);
   if (active) {
     gtk_widget_grab_focus (GTK_WIDGET (self->search_entry));
+  } else if (self->reflow_doc) {
+    reflow_search_clear (self);
   } else if (self->search) {
     fw_search_clear (self->search);
   }
@@ -354,12 +370,21 @@ search_toggled (GtkToggleButton *button, gpointer user_data)
 static void
 update_search_count_label (FwWindow *self)
 {
-  if (!self->search_count_label || !self->search)
+  if (!self->search_count_label)
     return;
 
-  int count = fw_search_get_count (self->search);
-  int current = fw_search_get_current (self->search);
-  gboolean running = fw_search_is_running (self->search);
+  int count, current;
+  gboolean running = FALSE;
+  if (self->reflow_doc) {
+    count   = self->reflow_hits ? (int) self->reflow_hits->len : 0;
+    current = self->reflow_active;
+  } else if (self->search) {
+    count   = fw_search_get_count (self->search);
+    current = fw_search_get_current (self->search);
+    running = fw_search_is_running (self->search);
+  } else {
+    return;
+  }
 
   char buf[64];
   if (count == 0)
@@ -373,6 +398,59 @@ update_search_count_label (FwWindow *self)
   gtk_label_set_text (self->search_count_label, buf);
   gtk_widget_set_sensitive (GTK_WIDGET (self->search_prev_button), count > 0);
   gtk_widget_set_sensitive (GTK_WIDGET (self->search_next_button), count > 0);
+}
+
+/* ── Reflow search (synchronous) ──────────────────────────────────── */
+
+/* Scroll the reflow view so the active hit's block is on-screen. */
+static void
+reflow_search_reveal_active (FwWindow *self)
+{
+  if (!self->reflow_hits || self->reflow_active < 0 ||
+      (guint) self->reflow_active >= self->reflow_hits->len)
+    return;
+  FwReflowHit *h = &g_array_index (self->reflow_hits, FwReflowHit,
+                                   self->reflow_active);
+  fw_reflow_view_scroll_to_block (self->reflow_view, h->block);
+}
+
+static void
+reflow_search_clear (FwWindow *self)
+{
+  g_clear_pointer (&self->reflow_hits, g_array_unref);
+  self->reflow_active = -1;
+  if (self->reflow_view)
+    fw_reflow_view_clear_search (self->reflow_view);
+  update_search_count_label (self);
+}
+
+static void
+reflow_search_run (FwWindow *self, const char *text)
+{
+  g_clear_pointer (&self->reflow_hits, g_array_unref);
+  self->reflow_active = -1;
+
+  if (text && text[0] && self->reflow_doc)
+    self->reflow_hits = fw_reflow_document_search (self->reflow_doc, text);
+  if (self->reflow_hits && self->reflow_hits->len > 0)
+    self->reflow_active = 0;
+
+  fw_reflow_view_set_search_hits (self->reflow_view, self->reflow_hits,
+                                  self->reflow_active);
+  reflow_search_reveal_active (self);
+  update_search_count_label (self);
+}
+
+static void
+reflow_search_step (FwWindow *self, int dir)
+{
+  if (!self->reflow_hits || self->reflow_hits->len == 0)
+    return;
+  int n = (int) self->reflow_hits->len;
+  self->reflow_active = ((self->reflow_active + dir) % n + n) % n;
+  fw_reflow_view_set_active_hit (self->reflow_view, self->reflow_active);
+  reflow_search_reveal_active (self);
+  update_search_count_label (self);
 }
 
 static void
@@ -409,9 +487,15 @@ static void
 on_search_entry_changed (GtkSearchEntry *entry, gpointer user_data)
 {
   FwWindow *self = FW_WINDOW (user_data);
+  const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
+
+  if (self->reflow_doc) {
+    reflow_search_run (self, text);
+    return;
+  }
+
   if (!self->search)
     return;
-  const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
   if (!text || !text[0]) {
     fw_search_clear (self->search);
     update_search_count_label (self);
@@ -426,7 +510,9 @@ on_search_entry_next (GtkSearchEntry *entry, gpointer user_data)
 {
   (void) entry;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->search)
+  if (self->reflow_doc)
+    reflow_search_step (self, +1);
+  else if (self->search)
     fw_search_next (self->search);
 }
 
@@ -435,7 +521,9 @@ on_search_entry_previous (GtkSearchEntry *entry, gpointer user_data)
 {
   (void) entry;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->search)
+  if (self->reflow_doc)
+    reflow_search_step (self, -1);
+  else if (self->search)
     fw_search_prev (self->search);
 }
 
@@ -452,7 +540,9 @@ search_prev_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->search)
+  if (self->reflow_doc)
+    reflow_search_step (self, -1);
+  else if (self->search)
     fw_search_prev (self->search);
 }
 
@@ -461,7 +551,9 @@ search_next_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->search)
+  if (self->reflow_doc)
+    reflow_search_step (self, +1);
+  else if (self->search)
     fw_search_next (self->search);
 }
 
@@ -469,7 +561,9 @@ static void act_find_next (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   FwWindow *w = d;
-  if (w->search)
+  if (w->reflow_doc)
+    reflow_search_step (w, +1);
+  else if (w->search)
     fw_search_next (w->search);
 }
 
@@ -477,7 +571,9 @@ static void act_find_prev (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   FwWindow *w = d;
-  if (w->search)
+  if (w->reflow_doc)
+    reflow_search_step (w, -1);
+  else if (w->search)
     fw_search_prev (w->search);
 }
 
@@ -1508,7 +1604,7 @@ fw_window_constructed (GObject *object)
   /* Header chrome that the reflow path manipulates needs to exist
    * before adw_header_bar_pack_end references it. */
   self->reflow_page_label = GTK_LABEL (gtk_label_new (""));
-  gtk_widget_set_size_request (GTK_WIDGET (self->reflow_page_label), 90, -1);
+  gtk_widget_set_size_request (GTK_WIDGET (self->reflow_page_label), 140, -1);
   gtk_widget_add_css_class    (GTK_WIDGET (self->reflow_page_label), "dim-label");
   gtk_widget_set_visible      (GTK_WIDGET (self->reflow_page_label), FALSE);
 
@@ -1577,6 +1673,7 @@ fw_window_constructed (GObject *object)
   g_menu_append_submenu (menu, "Comic Layout", G_MENU_MODEL (comic_section));
   g_object_unref (comic_section);
 
+  g_menu_append (menu, "Render as Fixed Pages", "win.prefer-fixed-layout");
   g_menu_append (menu, "Print…", "win.print");
   g_menu_append (menu, "Save Embedded Files…", "win.save-attachments");
   g_menu_append (menu, "Reading Settings…", "win.reading-settings");
@@ -1856,6 +1953,15 @@ fw_window_constructed (GObject *object)
       g_settings_create_action (self->settings, "facing-pages");
     g_action_map_add_action (G_ACTION_MAP (self), facing_action);
 
+    g_autoptr (GAction) fixed_action =
+      g_settings_create_action (self->settings, "prefer-fixed-layout");
+    g_action_map_add_action (G_ACTION_MAP (self), fixed_action);
+    /* Toggling fixed-layout swaps the pipeline for the open document, so
+     * re-open it to apply (handler dups the path first — open_file frees
+     * file_path mid-call). */
+    g_signal_connect (self->settings, "changed::prefer-fixed-layout",
+                      G_CALLBACK (on_prefer_fixed_setting_changed), self);
+
     /* Apply kinetic-scrolling to the scrolled window now and on every
      * change. The previous hardcoded TRUE is now driven by the user's
      * setting. */
@@ -1980,13 +2086,18 @@ on_reflow_page_changed (FwReflowView *view G_GNUC_UNUSED,
   gboolean two_col = self->settings &&
     g_settings_get_boolean (self->settings, "reading-two-column");
 
+  /* Reading progress: 1-based current page over total. Ebook "% read"
+   * is the natural progress metric (the page count is synthetic and
+   * shifts with font size), matching Foliate / Kindle. */
+  guint pct = total > 0 ? ((current + 1) * 100u) / total : 0;
+
   g_autofree char *txt = NULL;
   if (total == 0) {
     txt = g_strdup ("…");
   } else if (two_col && current + 1 < total) {
-    txt = g_strdup_printf ("%u–%u / %u", current + 1, current + 2, total);
+    txt = g_strdup_printf ("%u–%u / %u (%u%%)", current + 1, current + 2, total, pct);
   } else {
-    txt = g_strdup_printf ("%u / %u", current + 1, total);
+    txt = g_strdup_printf ("%u / %u (%u%%)", current + 1, total, pct);
   }
   gtk_label_set_text (self->reflow_page_label, txt);
 }
@@ -2002,6 +2113,21 @@ on_kinetic_setting_changed (GSettings *settings, const char *key,
   gboolean kinetic = g_settings_get_boolean (settings, "kinetic-scrolling");
   gtk_scrolled_window_set_kinetic_scrolling (self->scroll, kinetic);
   FW_TRACE_WINDOW ("kinetic-scrolling=%d", kinetic);
+}
+
+static void
+on_prefer_fixed_setting_changed (GSettings *settings, const char *key,
+                                 gpointer user_data)
+{
+  (void) settings; (void) key;
+  FwWindow *self = FW_WINDOW (user_data);
+  /* Only reflow-eligible formats change pipeline; re-open the current
+   * document to apply. Dup the path first — fw_window_open_file clears
+   * self->file_path while tearing down the old document. */
+  if (self->file_path && fw_reflow_path_is_supported (self->file_path)) {
+    g_autofree char *path = g_strdup (self->file_path);
+    fw_window_open_file (self, path);
+  }
 }
 
 /* ── Auto-reload via GFileMonitor ────────────────────────────────── */
@@ -2114,6 +2240,8 @@ fw_window_close_active_document (FwWindow *self)
   if (self->reflow_view)
     fw_reflow_view_set_document (self->reflow_view, NULL);
   g_clear_object (&self->reflow_doc);
+  g_clear_pointer (&self->reflow_hits, g_array_unref);
+  self->reflow_active = -1;
 
   g_clear_pointer (&self->file_path, g_free);
 }
@@ -2218,8 +2346,11 @@ fw_window_open_file (FwWindow *self, const char *path)
   /* Reflow path — TXT / FB2 / EPUB / MOBI handled natively. If
    * reflow refuses (e.g. corrupt file, KF8 hybrid we don't yet
    * understand), fall through to the fixed-layout MuPDF backend
-   * which can also read these formats. */
-  if (fw_reflow_path_is_supported (path)) {
+   * which can also read these formats. The "Render as Fixed Pages"
+   * toggle (prefer-fixed-layout) forces that fall-through up front. */
+  gboolean prefer_fixed = self->settings &&
+    g_settings_get_boolean (self->settings, "prefer-fixed-layout");
+  if (!prefer_fixed && fw_reflow_path_is_supported (path)) {
     if (fw_window_open_reflow (self, path))
       return;
   }
@@ -2425,6 +2556,7 @@ fw_window_dispose (GObject *object)
   if (self->reflow_view)
     fw_reflow_view_set_document (self->reflow_view, NULL);
   g_clear_object (&self->reflow_doc);
+  g_clear_pointer (&self->reflow_hits, g_array_unref);
   g_clear_pointer (&self->file_path, g_free);
   g_clear_pointer (&self->nav_back,    g_array_unref);
   g_clear_pointer (&self->nav_forward, g_array_unref);
@@ -2443,7 +2575,7 @@ fw_window_class_init (FwWindowClass *klass)
 static void
 fw_window_init (FwWindow *self)
 {
-  (void) self;
+  self->reflow_active = -1;
 }
 
 FwWindow *

@@ -202,13 +202,6 @@ txt_find_block_by_anchor (FwReflowDocument *doc, const char *anchor_id)
   return 0;
 }
 
-static GArray *
-txt_search (FwReflowDocument *doc, const char *needle)
-{
-  (void) doc; (void) needle;
-  return NULL;  /* Phase 6. */
-}
-
 static GHashTable *
 txt_get_metadata (FwReflowDocument *doc)
 {
@@ -225,7 +218,6 @@ fw_reflow_document_txt_iface_init (FwReflowDocumentInterface *iface)
   iface->get_image             = txt_get_image;
   iface->get_toc               = txt_get_toc;
   iface->find_block_by_anchor  = txt_find_block_by_anchor;
-  iface->search                = txt_search;
   iface->get_metadata          = txt_get_metadata;
 }
 

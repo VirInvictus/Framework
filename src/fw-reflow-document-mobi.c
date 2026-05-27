@@ -484,12 +484,15 @@ mobi_collect_filepos (const char *body, gsize len)
   return out;
 }
 
-/* Build a new body by inserting `<span id="filepos_N"></span>`
- * markers at each filepos byte offset (in ascending order, so
- * earlier insertions don't shift later positions). */
+/* Build a new body by inserting `<span id="<prefix><N>"></span>` markers
+ * at each byte offset in `positions` (which MUST be ascending, so
+ * earlier insertions don't shift later positions). Used for both KF7
+ * filepos anchors (prefix "filepos_") and KF8 NCX anchors (prefix
+ * "ncx_"); in both cases the marker id encodes the offset so the TOC
+ * entry can reference it. */
 static char *
-mobi_inject_filepos_markers (const char *body, gsize body_len,
-                              GArray *positions, gsize *out_len)
+mobi_inject_markers (const char *body, gsize body_len,
+                     GArray *positions, const char *id_prefix, gsize *out_len)
 {
   if (!positions || positions->len == 0) {
     *out_len = body_len;
@@ -503,13 +506,20 @@ mobi_inject_filepos_markers (const char *body, gsize body_len,
     if (pos > body_len) pos = body_len;
     if (pos > cursor)
       g_string_append_len (out, body + cursor, pos - cursor);
-    g_string_append_printf (out, "<span id=\"filepos_%u\"></span>", pos);
+    g_string_append_printf (out, "<span id=\"%s%u\"></span>", id_prefix, pos);
     cursor = pos;
   }
   if (cursor < body_len)
     g_string_append_len (out, body + cursor, body_len - cursor);
   *out_len = out->len;
   return g_string_free (out, FALSE);
+}
+
+static gint
+cmp_guint32 (gconstpointer a, gconstpointer b)
+{
+  guint32 x = *(const guint32 *) a, y = *(const guint32 *) b;
+  return (x > y) - (x < y);
 }
 
 /* Concatenate descendant text content of a node, normalised to
@@ -689,12 +699,30 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     return TRUE;
   }
 
-  /* Pre-scan body for filepos values, inject synthetic anchor
-   * markers so libxml2's tree carries them as id-bearing nodes. */
-  g_autoptr (GArray) filepos = mobi_collect_filepos (m->body, m->body_len);
+  /* TOC anchor source. KF8/AZW3 carries an NCX index (extracted by the
+   * parser into m->toc with byte offsets into the spliced body); KF7
+   * uses in-body filepos byte offsets. Either way we inject synthetic
+   * id-bearing markers at those offsets so libxml2's tree carries them
+   * and find_block_by_anchor can resolve TOC targets. */
+  gboolean kf8_toc = (m->is_kf8 && m->toc && m->toc->len > 0);
+  g_autoptr (GArray) positions = NULL;
+  const char *marker_prefix;
+  if (kf8_toc) {
+    positions = g_array_new (FALSE, FALSE, sizeof (guint32));
+    for (guint i = 0; i < m->toc->len; i++) {
+      guint32 o = g_array_index (m->toc, FwMobiTocEntry, i).body_offset;
+      g_array_append_val (positions, o);
+    }
+    g_array_sort (positions, cmp_guint32);   /* injector needs ascending */
+    marker_prefix = "ncx_";
+  } else {
+    positions = mobi_collect_filepos (m->body, m->body_len);  /* sorted, unique */
+    marker_prefix = "filepos_";
+  }
+
   gsize body_len2 = 0;
-  g_autofree char *body2 = mobi_inject_filepos_markers (
-    m->body, m->body_len, filepos, &body_len2);
+  g_autofree char *body2 = mobi_inject_markers (
+    m->body, m->body_len, positions, marker_prefix, &body_len2);
 
   /* libxml2 HTML mode — tolerant of malformed markup. The flags
    * RECOVER (continue on error) + NOERROR / NOWARNING (don't print
@@ -726,12 +754,22 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   g_ptr_array_free (cc.open_inlines, TRUE);
   g_array_free (cc.ol_stack, TRUE);
 
-  /* Guide TOC — walk the doc for `<reference>` elements anywhere
-   * (typically inside `<guide>`). After body walk so anchors are
-   * registered first; the TOC entries point at filepos_N anchors
-   * which now resolve via fw_reflow_document_find_block_by_anchor. */
-  mobi_walk_guide (self, xmlDocGetRootElement (xdoc),
-                   filepos && filepos->len > 0);
+  /* TOC. KF8: build directly from the parser's NCX entries, in
+   * document order, each pointing at its injected ncx_<offset> anchor.
+   * KF7: walk `<reference>`/`<guide>` filepos entries. Both run after
+   * the body walk so the anchors are registered first. */
+  if (kf8_toc) {
+    for (guint i = 0; i < m->toc->len; i++) {
+      FwMobiTocEntry *te = &g_array_index (m->toc, FwMobiTocEntry, i);
+      g_autofree char *anchor = g_strdup_printf ("ncx_%u", te->body_offset);
+      FwReflowTocItem *item = fw_reflow_toc_item_new (te->label, anchor);
+      g_list_store_append (self->toc, item);
+      g_object_unref (item);
+    }
+  } else {
+    mobi_walk_guide (self, xmlDocGetRootElement (xdoc),
+                     positions && positions->len > 0);
+  }
 
   xmlFreeDoc (xdoc);
 
@@ -761,9 +799,6 @@ static guint mobi_find_block_by_anchor (FwReflowDocument *doc, const char *a) {
   return GPOINTER_TO_UINT (
     g_hash_table_lookup (FW_REFLOW_DOCUMENT_MOBI (doc)->anchors, a));
 }
-static GArray *mobi_search (FwReflowDocument *doc, const char *needle) {
-  (void) doc; (void) needle; return NULL;
-}
 static GHashTable *mobi_get_metadata (FwReflowDocument *doc) {
   FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
@@ -778,7 +813,6 @@ fw_reflow_document_mobi_iface_init (FwReflowDocumentInterface *iface)
   iface->get_image             = mobi_get_image;
   iface->get_toc               = mobi_get_toc;
   iface->find_block_by_anchor  = mobi_find_block_by_anchor;
-  iface->search                = mobi_search;
   iface->get_metadata          = mobi_get_metadata;
 }
 

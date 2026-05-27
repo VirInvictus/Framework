@@ -669,27 +669,30 @@ fw_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
       gtk_snapshot_append_color (snapshot, &gray, &rect);
     }
 
-    /* Paint search match overlays on this page */
+    /* Paint search match overlays on this page. Zero-copy: scan the flat
+     * hit array and filter by page inline, rather than allocating a
+     * per-page GArray every frame (the old fw_search_hits_for_page path).
+     * peek_hits returns NULL only when n_hits == 0, so the loop never
+     * dereferences a NULL `hits`. */
     if (self->search) {
-      int active_in_page = -1;
-      GArray *page_hits = fw_search_hits_for_page (self->search, i,
-                                                    &active_in_page);
-      if (page_hits) {
-        for (guint h = 0; h < page_hits->len; h++) {
-          FwSearchHit *hit = &g_array_index (page_hits, FwSearchHit, h);
-          float hx = (float) (x + hit->x0 * self->zoom);
-          float hy = (float) (y + hit->y0 * self->zoom);
-          float hw = (float) ((hit->x1 - hit->x0) * self->zoom);
-          float hh = (float) ((hit->y1 - hit->y0) * self->zoom);
-          if (hw <= 0 || hh <= 0)
-            continue;
-          graphene_rect_t hr = GRAPHENE_RECT_INIT (hx, hy, hw, hh);
-          GdkRGBA color = (int) h == active_in_page
-            ? (GdkRGBA) { 1.0f, 0.55f, 0.10f, 0.55f }    /* active: orange */
-            : (GdkRGBA) { 1.0f, 0.92f, 0.20f, 0.40f };   /* match: yellow */
-          gtk_snapshot_append_color (snapshot, &color, &hr);
-        }
-        g_array_unref (page_hits);
+      int n_hits = 0;
+      const FwSearchHit *hits = fw_search_peek_hits (self->search, &n_hits);
+      int active = fw_search_active_index (self->search);
+      for (int h = 0; h < n_hits; h++) {
+        const FwSearchHit *hit = &hits[h];
+        if (hit->page != i)
+          continue;
+        float hx = (float) (x + hit->x0 * self->zoom);
+        float hy = (float) (y + hit->y0 * self->zoom);
+        float hw = (float) ((hit->x1 - hit->x0) * self->zoom);
+        float hh = (float) ((hit->y1 - hit->y0) * self->zoom);
+        if (hw <= 0 || hh <= 0)
+          continue;
+        graphene_rect_t hr = GRAPHENE_RECT_INIT (hx, hy, hw, hh);
+        GdkRGBA color = (h == active)
+          ? (GdkRGBA) { 1.0f, 0.55f, 0.10f, 0.55f }    /* active: orange */
+          : (GdkRGBA) { 1.0f, 0.92f, 0.20f, 0.40f };   /* match: yellow */
+        gtk_snapshot_append_color (snapshot, &color, &hr);
       }
     }
 

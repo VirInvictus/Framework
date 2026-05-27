@@ -41,17 +41,12 @@ gboolean  fw_search_is_running   (FwSearch   *self);
 /* Returns the active hit's page, or -1 if none. */
 int       fw_search_get_current_page (FwSearch *self);
 
-/* Returns a newly allocated GArray (FwSearchHit) of all hits on `page`,
- * including the active-hit index within that array via *out_active_idx
- * (or -1 if the active hit is on a different page). Caller frees with
- * g_array_unref. NULL if no hits on this page. */
-GArray   *fw_search_hits_for_page (FwSearch *self,
-                                   int       page,
-                                   int      *out_active_idx);
-
-/* Direct access to all hits as a contiguous FwSearchHit array — used by the
- * view's snapshot loop to avoid per-page array copies. The returned pointer
- * is owned by FwSearch and is valid until the next find/clear/dispose. */
+/* Direct, zero-copy access to all hits as a contiguous FwSearchHit array.
+ * The view's snapshot loop scans this and filters by page each frame, and
+ * fw_view_reveal_active_hit uses it to locate the active hit — both
+ * without copying. The returned pointer is owned by FwSearch and is valid
+ * until the next find/clear/dispose; it is NULL exactly when *out_count
+ * is 0. */
 const FwSearchHit *fw_search_peek_hits (FwSearch *self, int *out_count);
 
 /* The hit at this index is currently active (highlighted with a stronger
