@@ -36,7 +36,7 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
-| **Native Ebook Reflow** | EPUB, FB2, MOBI, and AZW3 render as native GTK widgets (not rasterized pages) through a Foliate-style block model: real text wrapping, justification, first-line indent, chapter titles, lists, drop caps, and live font-size adjustment. Format parsers are C ports of foliate-js. Falls back to MuPDF fixed layout if a document won't parse. |
+| **Native Ebook Reflow** | EPUB renders through WebKitGTK (Phase 17); FB2, MOBI, and AZW3 render as native GTK widgets (not rasterized pages) through a Foliate-style block model with real text wrapping, justification, first-line indent, chapter titles, lists, drop caps, and live font-size adjustment. Format parsers are C ports of foliate-js either way. Falls back to MuPDF fixed layout if a document won't parse. |
 
 ## Screenshot
 
@@ -169,7 +169,7 @@ framework book.djvu
 framework volume.cbz
 ```
 
-CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB, FB2, MOBI, and AZW3 open through Framework's native reflow pipeline: text wraps and reflows as native GTK widgets with real typography, live font-size adjustment, a chapter sidebar, and in-text search highlighting, rather than MuPDF's fixed layout (which remains as an automatic fallback for documents the reflow parser can't handle). Some dedicated-reader polish (a reading-progress indicator, for instance) is still in progress; [Foliate](https://johnfactotum.github.io/foliate/) remains the more complete dedicated ebook reader.
+CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB, FB2, MOBI, and AZW3 open through Framework's reflow pipeline rather than MuPDF's fixed layout (which remains as an automatic fallback for documents the reflow parser can't handle). EPUB now renders through WebKitGTK (Phase 17), the same engine Foliate uses, while FB2, MOBI, and AZW3 reflow as native GTK widgets with real typography, live font-size adjustment, a chapter sidebar, and in-text search highlighting; the foliate-js-derived parsers feed both paths. The remaining formats move to the WebKit path incrementally. [Foliate](https://johnfactotum.github.io/foliate/) remains the more complete dedicated ebook reader.
 
 One document per window. Multiple files open multiple windows.
 
@@ -229,6 +229,7 @@ Foliate is the serious GNOME ebook reader; foliate-js is its parser library. The
 - **EPUB OPF spine walker** (v0.42.0; `src/fw-reflow-document-epub.c`) &mdash; container.xml → OPF → manifest + spine + metadata; per-chapter XHTML through GMarkupParser. C port of `.foliate-js/epub.js`'s structural walk.
 - **FB2 walker** (v0.41.0; `src/fw-reflow-document-fb2.c`) &mdash; FictionBook XML through GMarkupParser; section nesting + inline styles + `<binary>` base64 → GdkTexture. C port of `.foliate-js/fb2.js`.
 - **Pagination math** (v0.48.0; `src/fw-reflow-view.c::recompute_pagination`) &mdash; viewport-driven block-level pagination. Block-only granularity for now; line-level Pango-split is a follow-up. Pattern conceptually from `.foliate-js/paginator.js`.
+- **WebKitGTK renderer for EPUB** (v0.68.0, Phase 17; `src/fw-webview.c`): Foliate renders EPUB by handing its content to a web engine rather than reconstructing layout itself, because EPUB is HTML and CSS underneath. Framework follows the same approach for EPUB, keeping the foliate-js-derived spine / manifest / NCX parsers and feeding their stitched-HTML output to a `WebKitWebView`. The other reflow formats move to this path incrementally.
 - **Reading-position persistence** (v0.50.0; `src/fw-state.c`) &mdash; first-block index of active page survives across sessions. Pattern from Foliate's reader.js.
 
 ### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions, async search, threading hybrid*

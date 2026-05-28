@@ -217,6 +217,23 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - **Plato**: e-ink-specific UI; `framebuffer/` direct-to-fb rendering; single-threaded `Rc<Context>` model (loses our parallelism).
 - **mupdf-gl**: single-threaded design; in-tree custom UI toolkit.
 
+## Phase 16: Typography Pillars (parked, superseded)
+*Native-engine typography refinements for the `FwReflowView` pipeline. Started, then superseded by the Phase 17 WebKit pivot, which gets most of this as CSS for free. Pillar 1 is preserved on a branch in case client-side hyphenation outside a browser engine is ever wanted again.*
+
+- [~] **Pillar 1 (en_US hyphenation).** Knuth-Liang trie over the vendored hyph-en-us patterns. Built, ASan-clean, verified on real EPUB block text, then parked on `parking/phase-16-hyphenation` (commit `88d2e72`). The WebView path hyphenates via CSS `hyphens: auto`.
+- Remaining pillars (OpenType features, themes, measure / column width) were not started. On the WebKit foundation they become `font-feature-settings`, CSS variables, and `max-width`, all handled by the engine.
+
+## Phase 17: WebKit Reflow Renderer
+*Replace the `FwReflowView` block-model renderer with a `WebKitWebView`, keeping the foliate-js-derived parsers. Incremental cutover: EPUB first, then MOBI / AZW3, then FB2, then TXT. Once all four are on WebKit, `FwReflowView` and the renderer halves of each backend get deleted. Rationale and the full step plan are in the v0.68.0 patchnote.*
+
+- [x] **EPUB via WebKitGTK 6.0** (v0.68.0): `FwWebView` widget; `produce_html` on the EPUB backend (spine stitch + `framework-img://` scheme + reading CSS); per-format dispatch in `fw_window_open_reflow`; TOC / search / scroll routing; `webview_pos` reading-position persistence.
+- [ ] **MOBI / AZW3 `produce_html`** (Phase 17.2): the existing KF7/KF8 HTML reconstruction becomes the producer.
+- [ ] **FB2 `produce_html`** (Phase 17.3): the libxml2 walker pivots from emitting blocks to emitting HTML.
+- [ ] **TXT `produce_html`** (Phase 17.4): wrap in `<pre>` or paragraph-per-blank-line.
+- [ ] **Delete `FwReflowView`** (Phase 17.5): once all formats are on WebKit; drop `get_block_model` / `get_image` / block-model search.
+- [ ] **Security tightening** (Phase 17.x): restore the Landlock EXECUTE drop behind a path-beneath allow for `/usr/libexec/webkitgtk-6.0/*`; scrub inline event-handler attributes during HTML emit; revisit the disabled WebKit bubblewrap sandbox.
+- [ ] **Publisher CSS + cross-chapter links** (Phase 17.x): a `framework-css:` scheme to honour publisher stylesheets; rewrite cross-chapter hrefs to in-doc fragments.
+
 ## Phase 15: The 1.0 Release (Concrete)
 *Getting it out the door. Moved to the end after the 0.x sprint outgrew its original landing slot — Brandon explicitly does not want flathub submission until the rest of the roadmap is closed out.*
 

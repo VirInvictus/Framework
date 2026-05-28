@@ -2415,13 +2415,15 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   fw_reflow_sidebar_set_toc (self->reflow_sidebar,
                              fw_reflow_document_get_toc (self->reflow_doc));
 
-  /* Restore reading position. fw_reflow_view_scroll_to_block queues
-   * the target if pagination hasn't run yet, so this works even when
-   * the listview hasn't been allocated.  The webview path doesn't yet
-   * persist position; Phase 17.x adds webview_pos to the state schema. */
+  /* Restore reading position.  Both restore calls queue internally if
+   * their view hasn't finished laying out / loading, so this is safe to
+   * call before allocation (FwReflowView) or before load-finished
+   * (FwWebView). */
   FwDocumentState *saved = fw_state_load (path);
   if (saved) {
-    if (!self->reflow_via_webview && saved->reflow_block >= 0)
+    if (self->reflow_via_webview && self->webview && saved->webview_pos)
+      fw_webview_restore_position (self->webview, saved->webview_pos);
+    else if (!self->reflow_via_webview && saved->reflow_block >= 0)
       fw_reflow_view_scroll_to_block (self->reflow_view,
                                        (guint) saved->reflow_block);
     fw_document_state_free (saved);
@@ -2588,6 +2590,25 @@ fw_window_save_state (FwWindow *self)
 {
   if (!self->file_path)
     return;
+
+  /* WebView-reflow path (EPUB): persist the cached reading position.
+   * Checked before the legacy-reflow branch because reflow_doc is set in
+   * both cases, but here reflow_view holds no document. */
+  if (self->reflow_via_webview && self->webview) {
+    const char *pos = fw_webview_get_cached_position (self->webview);
+    FwDocumentState state = {
+      .page            = 0,
+      .scroll_position = 0,
+      .zoom_level      = 1.0,
+      .zoom_mode       = (char *) "webview",
+      .view_mode       = (char *) "webview",
+      .rotation        = 0,
+      .reflow_block    = -1,
+      .webview_pos     = (char *) pos,
+    };
+    fw_state_save (self->file_path, &state);
+    return;
+  }
 
   /* Reflow path: only the reflow_block matters; everything else
    * defaults to "fixed-layout if you ever switch back". */

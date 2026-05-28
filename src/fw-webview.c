@@ -24,6 +24,10 @@
 
 #define FW_IMG_SCHEME "framework-img"
 
+/* Name of the script-message handler the in-page scroll listener posts
+ * to (window.webkit.messageHandlers.<name>.postMessage). */
+#define FW_POS_HANDLER "fwpos"
+
 struct _FwWebView {
   GtkWidget          parent_instance;
 
@@ -37,6 +41,9 @@ struct _FwWebView {
   gboolean           load_done;       /* TRUE once load-changed FINISHED */
   char              *pending_position;/* restored if load_done == FALSE */
   char              *pending_anchor;  /* ditto for scroll_to_anchor */
+  char              *last_position;   /* latest {anchor,scroll_y} JSON from
+                                       * the in-page scroll listener; read
+                                       * synchronously at save time */
 };
 
 enum {
@@ -237,6 +244,48 @@ on_load_changed (WebKitWebView *web G_GNUC_UNUSED,
   }
 }
 
+/* ── Position tracking ─────────────────────────────────────────────── */
+
+/* A debounced scroll/load listener (injected as a user script) posts the
+ * current {anchor, scroll_y} here as a JSON string.  We cache the latest
+ * so the save-on-teardown path can read it synchronously — the async
+ * fw_webview_get_position round-trip can't finish during dispose. */
+static void
+on_position_message (WebKitUserContentManager *ucm G_GNUC_UNUSED,
+                     JSCValue                 *value,
+                     gpointer                  user_data)
+{
+  FwWebView *self = FW_WEBVIEW (user_data);
+  if (!value || !jsc_value_is_string (value))
+    return;
+  g_free (self->last_position);
+  self->last_position = jsc_value_to_string (value);
+}
+
+/* User script: a passive, 200ms-debounced scroll listener (plus one shot
+ * on load) that reports the topmost element with an id and the scroll
+ * offset.  Mirrors the query fw_webview_get_position runs on demand. */
+static const char FW_POS_USER_SCRIPT[] =
+  "(function () {"
+  "  function snap() {"
+  "    var y = document.scrollingElement ? document.scrollingElement.scrollTop : window.scrollY;"
+  "    var a = null;"
+  "    var nodes = document.querySelectorAll('[id]');"
+  "    for (var i = 0; i < nodes.length; i++) {"
+  "      var r = nodes[i].getBoundingClientRect();"
+  "      if (r.top >= 0) { a = nodes[i].id; break; }"
+  "    }"
+  "    try { window.webkit.messageHandlers." FW_POS_HANDLER
+  "          .postMessage(JSON.stringify({ anchor: a, scroll_y: y })); } catch (e) {}"
+  "  }"
+  "  var t = null;"
+  "  window.addEventListener('scroll', function () {"
+  "    if (t) clearTimeout(t);"
+  "    t = setTimeout(snap, 200);"
+  "  }, { passive: true });"
+  "  window.addEventListener('load', snap);"
+  "})();";
+
 /* ── Widget machinery ──────────────────────────────────────────────── */
 
 static char *
@@ -256,6 +305,7 @@ fw_webview_dispose (GObject *object)
   g_clear_pointer (&self->images, g_hash_table_unref);
   g_clear_pointer (&self->pending_anchor, g_free);
   g_clear_pointer (&self->pending_position, g_free);
+  g_clear_pointer (&self->last_position, g_free);
   if (self->web) {
     gtk_widget_unparent (GTK_WIDGET (self->web));
     self->web    = NULL;
@@ -303,6 +353,23 @@ fw_webview_init (FwWebView *self)
 
   self->web    = WEBKIT_WEB_VIEW (webkit_web_view_new ());
   self->finder = webkit_web_view_get_find_controller (self->web);
+
+  /* Position tracking: register the script-message handler and inject the
+   * scroll listener that feeds it.  Must be set up before any load so the
+   * user script is installed for the first document. */
+  WebKitUserContentManager *ucm =
+    webkit_web_view_get_user_content_manager (self->web);
+  webkit_user_content_manager_register_script_message_handler (
+    ucm, FW_POS_HANDLER, NULL);
+  g_signal_connect (ucm, "script-message-received::" FW_POS_HANDLER,
+                    G_CALLBACK (on_position_message), self);
+  WebKitUserScript *pos_script = webkit_user_script_new (
+    FW_POS_USER_SCRIPT,
+    WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+    WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END,
+    NULL, NULL);
+  webkit_user_content_manager_add_script (ucm, pos_script);
+  webkit_user_script_unref (pos_script);
 
   /* JS is required for our scroll_to_anchor / restore_position helpers.
    * Local-storage and HTML5 database are off — viewer, not a browser. */
@@ -358,6 +425,9 @@ fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images)
   g_mutex_unlock (&registry_lock);
 
   self->load_done = FALSE;
+  /* Drop the previous document's cached position so a save before the
+   * new document scrolls can't persist a stale anchor against it. */
+  g_clear_pointer (&self->last_position, g_free);
   /* base_uri matches the framework-img: origin our images live in so
    * the document and images are same-origin.  Without this, WebKit's
    * mixed-origin rules silently drop the image fetches before they
@@ -489,6 +559,13 @@ fw_webview_restore_position (FwWebView *self, const char *json)
     "})()", json);
   webkit_web_view_evaluate_javascript (
     self->web, script, -1, NULL, NULL, NULL, NULL, NULL);
+}
+
+const char *
+fw_webview_get_cached_position (FwWebView *self)
+{
+  g_return_val_if_fail (FW_IS_WEBVIEW (self), NULL);
+  return self->last_position;
 }
 
 /* ── Search ────────────────────────────────────────────────────────── */

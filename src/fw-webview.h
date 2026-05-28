@@ -58,6 +58,14 @@ void       fw_webview_get_position       (FwWebView           *self,
 void       fw_webview_restore_position   (FwWebView    *self,
                                           const char   *json);
 
+/* Latest reading position as JSON `{"anchor":"...","scroll_y":N}`, kept
+ * current by a debounced in-page scroll listener that posts back to a
+ * script-message handler.  Borrowed; valid until the next load or
+ * dispose.  Returns NULL before the first scroll/load of the current
+ * document.  Synchronous — meant for the save-on-teardown path where the
+ * async fw_webview_get_position round-trip can't complete in time. */
+const char *fw_webview_get_cached_position (FwWebView  *self);
+
 /* WebKitFindController-backed search.  `needle` of NULL/empty clears
  * the highlight; the view emits "search-changed" once the match count
  * is known. */

@@ -21,6 +21,11 @@ typedef struct {
    * fixed-layout pipeline ignores this field; the reflow pipeline
    * ignores zoom_level / zoom_mode / view_mode / rotation. */
   int    reflow_block;
+  /* WebView-reflow only (EPUB, Phase 17): last reading position as a
+   * JSON string `{"anchor":"...","scroll_y":N}` produced by
+   * fw_webview_get_cached_position. NULL = not a webview doc (or never
+   * saved). Both the fixed-layout and legacy-reflow paths ignore it. */
+  char  *webview_pos;
 } FwDocumentState;
 
 void             fw_state_init    (void);

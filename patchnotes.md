@@ -2,6 +2,38 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.68.0 (2026-05-28)
+
+*Phase 17 opens: EPUB now renders through WebKitGTK 6.0 instead of the native `FwReflowView` block-model pipeline. The foliate-js-derived parsers stay; only the renderer changed. This is the first step of an incremental cutover (EPUB first; MOBI / AZW3 / FB2 / TXT follow). Phase 16's typography pillars are parked on a branch, because most of that work becomes CSS the engine handles natively.*
+
+### Why the pivot
+
+The native block-model reflow pipeline (a `GListModel` of `FwBlock` items driving a `GtkListView`, ported from Foliate's architecture) did not render real-world EPUBs. On a pristine v0.67.0 the test EPUB opened, but pagination fired once against a zero-sized viewport and never bound a single row. Foliate and Calibre both hand EPUB rendering to a web engine (WebKitGTK and QtWebEngine respectively), because EPUB is HTML and CSS underneath. Framework now does the same for EPUB.
+
+### What changed
+
+* **EPUB renders via WebKitGTK 6.0.** A new `FwWebView` widget hosts a `WebKitWebView`. The EPUB backend gained a `produce_html` path that stitches the spine into one HTML document, rewrites `<img>` references to a custom `framework-img://` URI scheme served from the in-memory image table, and injects a minimal reading stylesheet. Cover, TOC navigation (`scrollIntoView` on preserved anchor IDs), search (`WebKitFindController`), and page-scroll all route through the new view.
+* **Per-format dispatch.** The window's content stack gained a `"webview"` page alongside `"reflow"`. `fw_window_open_reflow` checks whether the backend implements `produce_html`: EPUB takes the WebView path; everything else (MOBI / AZW3 / FB2 / TXT) stays on the legacy `FwReflowView`. Fixed-layout (PDF / DjVu / comics / XPS) is untouched.
+* **Reading-position persistence for the WebView path.** A debounced in-page scroll listener posts the current anchor and scroll offset to a script-message handler; the window caches it and writes a `webview_pos` field into the per-document state on close, restoring it on reopen (queued until the load finishes). As with every other format, the save fires on window close, not on Ctrl+Q app-quit.
+
+### Security posture (please read)
+
+The WebKit pivot relaxes three hardening measures. All are deliberate and scoped to the threat model (a viewer for your own local library), and all are tracked for tightening in Phase 17.x:
+
+* **WebKit's bubblewrap sandbox is disabled** (`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS`), because it fails to set up on this Fedora 44 host ("Failed to make / slave: Operation not permitted").
+* **The Landlock EXECUTE drop was removed** from `fw-sandbox.c` (only the `MAKE_*` rights are still dropped), because dropping EXECUTE bricked WebKit's web-process spawn. Restoring it behind a path-beneath allow for `/usr/libexec/webkitgtk-6.0/*` is the Phase 17.x follow-up.
+* **JavaScript is enabled** on document content (required for the scroll / anchor / position helpers). EPUB-shipped `<script>` elements are stripped during HTML emit; inline event-handler attributes (`onclick=` and friends) are a known gap, also Phase 17.x.
+
+### Known deferrals
+
+* MOBI / AZW3 / FB2 / TXT still use the legacy `FwReflowView` until each gets its own `produce_html`.
+* The auto-reload file monitor does not yet cover the WebView path.
+* Publisher CSS is dropped (the built-in reading stylesheet is used instead); cross-chapter href links are not yet rewritten to in-doc fragments.
+
+### Parked
+
+Phase 16 Pillar 1 (en_US Knuth-Liang hyphenation, ASan-clean, verified on real EPUB block text) is preserved on the `parking/phase-16-hyphenation` branch (commit `88d2e72`). The WebView hyphenates natively via CSS `hyphens: auto`, so the standalone hyphenator is on ice unless client-side hyphenation outside a browser engine becomes useful again.
+
 ## v0.67.0 (2026-05-27)
 
 *Post-reflow-search hardening and polish: a full code-audit pass, format-coverage completeness (AZW3 TOC, .fb2.zip), two reading features, and a reproducible test corpus. No 1.0-release work yet (Phase 15 stays deferred).*

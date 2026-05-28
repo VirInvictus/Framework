@@ -110,6 +110,7 @@ fw_state_load (const char *path)
   state->view_mode       = g_strdup (json_object_get_string_member_with_default (entry, "view_mode", "continuous"));
   state->rotation        = (int) json_object_get_int_member_with_default (entry, "rotation", 0);
   state->reflow_block    = (int) json_object_get_int_member_with_default (entry, "reflow_block", -1);
+  state->webview_pos     = g_strdup (json_object_get_string_member_with_default (entry, "webview_pos", NULL));
 
   return state;
 }
@@ -130,6 +131,8 @@ fw_state_save (const char *path, const FwDocumentState *state)
   json_object_set_string_member (entry, "view_mode", state->view_mode ? state->view_mode : "continuous");
   json_object_set_int_member (entry, "rotation", state->rotation);
   json_object_set_int_member (entry, "reflow_block", state->reflow_block);
+  if (state->webview_pos)
+    json_object_set_string_member (entry, "webview_pos", state->webview_pos);
 
   g_autoptr (GDateTime) now = g_date_time_new_now_utc ();
   g_autofree char *timestamp = g_date_time_format_iso8601 (now);
@@ -237,5 +240,6 @@ fw_document_state_free (FwDocumentState *state)
     return;
   g_free (state->zoom_mode);
   g_free (state->view_mode);
+  g_free (state->webview_pos);
   g_free (state);
 }
