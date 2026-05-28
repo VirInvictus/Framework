@@ -56,6 +56,16 @@ struct _FwDocumentPdf {
   double       *page_widths;   /* in points */
   double       *page_heights;
 
+  /* Comic-only (CBZ/CB7/CBT): per-page render-zoom multiplier that
+   * normalizes every page to a common display height. MuPDF sizes
+   * image pages by each image's embedded DPI, so a comic with
+   * inconsistent DPI metadata reports same-pixel pages at very
+   * different point sizes; without this they'd render at wildly
+   * different scales. page_widths/page_heights already hold the
+   * normalized sizes; norm_scale folds the same factor into the render
+   * zoom so the texture matches. NULL for PDF/XPS (no normalization). */
+  double       *norm_scale;
+
   /* Phase 11 Tier 1: in-flight render cancellation via fz_cookie.
    * Each active render publishes its cookie pointer here under
    * cookies_lock. pdf_cancel_render iterates and writes cookie->abort = 1
@@ -97,6 +107,15 @@ build_transform (double zoom, int rotation)
  * stext-cache section below it textually). */
 typedef struct _StextEntry StextEntry;
 static void stext_entry_drop_with_ctx (FwDocumentPdf *self, StextEntry *e);
+
+/* qsort comparator for the comic height-normalization median. */
+static int
+cmp_double_pdf (const void *a, const void *b)
+{
+  double da = *(const double *) a;
+  double db = *(const double *) b;
+  return (da > db) - (da < db);
+}
 
 /* Render a page directly into a cairo ARGB32 surface with zero pixel copying.
  *
@@ -373,6 +392,40 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
     }
   }
 
+  /* Comic archives (CBZ/CB7/CBT) are one-image-per-page documents. MuPDF
+   * sizes each page by the image's embedded DPI, so inconsistent DPI
+   * metadata (common in scanlations) makes same-pixel pages report very
+   * different point sizes and render at wildly different scales. Aspect
+   * ratio is DPI-invariant, so normalize every page to the median page
+   * height: page_widths/page_heights become the normalized sizes, and
+   * norm_scale[i] folds the same factor into the render zoom so the
+   * texture matches. PDFs and XPS keep their real, meaningful sizes. */
+  {
+    const char *dot = path ? strrchr (path, '.') : NULL;
+    gboolean is_comic = dot && (g_ascii_strcasecmp (dot, ".cbz") == 0 ||
+                                g_ascii_strcasecmp (dot, ".cb7") == 0 ||
+                                g_ascii_strcasecmp (dot, ".cbt") == 0);
+    if (is_comic && self->page_count > 0) {
+      double *h = g_new (double, self->page_count);
+      for (int i = 0; i < self->page_count; i++)
+        h[i] = self->page_heights[i];
+      qsort (h, self->page_count, sizeof (double), cmp_double_pdf);
+      double ref_h = h[self->page_count / 2];
+      g_free (h);
+
+      if (ref_h > 0) {
+        self->norm_scale = g_new (double, self->page_count);
+        for (int i = 0; i < self->page_count; i++) {
+          double ph = self->page_heights[i];
+          double s  = (ph > 0) ? ref_h / ph : 1.0;
+          self->norm_scale[i]    = s;
+          self->page_widths[i]  *= s;   /* aspect-preserving */
+          self->page_heights[i]  = ref_h;
+        }
+      }
+    }
+  }
+
   return TRUE;
 }
 
@@ -422,6 +475,7 @@ pdf_close (FwDocument *doc)
   g_clear_pointer (&self->path, g_free);
   g_clear_pointer (&self->page_widths, g_free);
   g_clear_pointer (&self->page_heights, g_free);
+  g_clear_pointer (&self->norm_scale, g_free);
   self->page_count = 0;
 }
 
@@ -452,6 +506,12 @@ pdf_render_page (FwDocument *doc, int page, double zoom, int rotation)
   FwDocumentPdf *self = FW_DOCUMENT_PDF (doc);
   cairo_surface_t *surface = NULL;
   FW_TRACE_PDF ("render_page start: page=%d zoom=%.2f rot=%d", page, zoom, rotation);
+
+  /* Comic pages carry a per-page height-normalization factor (see
+   * pdf_open); fold it into the zoom so the texture matches the
+   * normalized layout size get_page_size reports. */
+  if (self->norm_scale && page >= 0 && page < self->page_count)
+    zoom *= self->norm_scale[page];
 
   /* Grab an independent render instance via round-robin.
    * Each instance has its own context + document — fully thread-safe.

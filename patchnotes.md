@@ -2,6 +2,14 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.70.0 (2026-05-28)
+
+*Comic pages with inconsistent embedded DPI now render at a uniform size, fixing the "every other page is a tiny thumbnail" look on some scanlated CBZs.*
+
+### Comic DPI normalization
+
+* **MuPDF-backed comics (CBZ / CB7 / CBT) normalize every page to a common display height.** MuPDF's image document sizes each page by the image's embedded DPI, so a comic whose pages carry inconsistent DPI metadata (common in scanlations) reported same-pixel pages at very different point sizes and rendered them at wildly different scales: one page filled the view while the next came out a thumbnail. Because aspect ratio is DPI-invariant, the backend now computes a per-page scale at open that normalizes every page to the median page height (each page's aspect preserved), folds that factor into the render zoom so the texture matches, and reports the normalized sizes to the layout. Pages render at a consistent size; spreads stay proportionally wider; the cover sits a touch wider than the body. PDFs and XPS keep their real, meaningful page sizes and are untouched. With sizing now consistent, the fit-width median normalization from v0.69.0 also works correctly on these comics.
+
 ## v0.69.0 (2026-05-28)
 
 *Fit-width now normalizes off the typical page, so an oversized cover or a centerfold spread no longer shrinks every normal page. Plus two fixes: Ctrl+Q now saves reading state, and a stale GTK CSS warning is gone.*
