@@ -26,6 +26,7 @@
 #include <archive_entry.h>
 #include <string.h>
 #include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
 #include <libxml/tree.h>
 
 /* ── Type definition ──────────────────────────────────────────────── */
@@ -40,6 +41,15 @@ struct _FwReflowDocumentEpub {
   GHashTable   *zip;        /* gchar* (zip-path) → GBytes (owned) */
   char         *path;
   char         *opf_dir;    /* directory portion of OPF path within ZIP */
+
+  /* WebView render path (Phase 17, produce_html).  Populated alongside
+   * the block-model walk so produce_html can stitch the spine without
+   * re-parsing the OPF.  These are immutable for the lifetime of the
+   * document — the URI scheme handler reads them from any thread. */
+  GPtrArray    *spine_paths;        /* gchar* resolved zip paths in order */
+  GHashTable   *zip_to_image_id;    /* gchar* zip-path → gchar* manifest-id (images only) */
+  GHashTable   *image_bytes;        /* gchar* manifest-id → GBytes (owned) */
+  char         *cover_image_id;     /* manifest id of the cover (NULL if none) */
 };
 
 static void fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface);
@@ -1092,7 +1102,9 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   }
 
   /* Push cover image as the first block — flagged FW_BLOCK_FLAG_COVER
-   * so FwReflowView gives it a full-viewport page. */
+   * so FwReflowView gives it a full-viewport page.  The cover_image_id
+   * field mirrors this for the produce_html (WebView) path so it can
+   * prepend the cover before the spine sections. */
   if (oc.cover_id) {
     const char *cover_href = g_hash_table_lookup (oc.manifest_href, oc.cover_id);
     if (cover_href) {
@@ -1102,9 +1114,12 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_list_store_append (self->blocks, cover);
       g_object_unref (cover);
     }
+    self->cover_image_id = g_strdup (oc.cover_id);
   }
 
-  /* Walk spine and parse each chapter's XHTML. */
+  /* Walk spine and parse each chapter's XHTML.  In parallel, mirror the
+   * resolved zip path into self->spine_paths so produce_html can stitch
+   * the spine later without re-walking the OPF. */
   for (guint i = 0; i < oc.spine->len; i++) {
     const char *idref = oc.spine->pdata[i];
     const char *href  = g_hash_table_lookup (oc.manifest_href, idref);
@@ -1118,6 +1133,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       continue;
     }
     parse_xhtml_chapter (self, href, cb);
+    g_ptr_array_add (self->spine_paths, g_strdup (href));
   }
 
   /* TOC: prefer NCX when present (EPUB 2 + most EPUB 3 books still
@@ -1143,7 +1159,12 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
 
   /* Decode every manifest image into the images hash. Keys: both the
    * resolved zip path (which is what xhtml_start writes into IMAGE
-   * blocks) and the manifest id (for hand-rolled callers). */
+   * blocks) and the manifest id (for hand-rolled callers).
+   *
+   * Same iteration also populates the produce_html-side tables:
+   * zip-path → manifest-id (for rewriting <img src> while stitching),
+   * and image_bytes keyed by manifest-id (the table fw_webview_load_html
+   * receives). */
   GHashTableIter it;
   gpointer k, v;
   g_hash_table_iter_init (&it, oc.manifest_type);
@@ -1166,6 +1187,8 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_warning ("epub: dropping image '%s': %s", href,
                  e ? e->message : "(unknown)");
     }
+    g_hash_table_insert (self->zip_to_image_id, g_strdup (href), g_strdup (id));
+    g_hash_table_insert (self->image_bytes,     g_strdup (id),   g_bytes_ref (b));
   }
 
   /* Fallback metadata. */
@@ -1214,6 +1237,226 @@ static GHashTable *epub_get_metadata (FwReflowDocument *doc) {
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
+/* ── produce_html: stitch spine into one HTML document ──────────────────
+ *
+ * Concatenates every spine chapter's <body> into a single HTML document
+ * the WebKitWebView can load in one call.  Image src attributes get
+ * resolved relative to their chapter's zip-directory and rewritten to
+ * `framework-img://<doc-id>/<manifest-id>`, the URI scheme fw-webview.c
+ * registers globally.  <script> and <link rel="stylesheet"> get
+ * stripped — the former for safety, the latter because we don't ship
+ * the EPUB's CSS resource graph through the URI scheme yet (Phase 17.x
+ * will add framework-css:; until then a small built-in reading
+ * stylesheet picks up the slack).
+ *
+ * Resolution rules mirror what a browser does:
+ *   - src starting with "/"  → archive-absolute, strip leading /
+ *   - else                   → resolved relative to the chapter's dir,
+ *                              with `.` and `..` segments normalised.
+ *
+ * The returned image table keys on manifest id (URI-safe XML
+ * name-tokens) and shares the existing per-image GBytes refs from
+ * self->image_bytes.  No copy. */
+
+typedef struct {
+  const char *doc_id;
+  const char *chapter_path;
+  GHashTable *zip_to_image_id;
+} HtmlPassCtx;
+
+static gboolean
+is_stylesheet_link (xmlNodePtr node)
+{
+  if (xmlStrcasecmp (node->name, BAD_CAST "link") != 0)
+    return FALSE;
+  xmlChar *rel = xmlGetProp (node, BAD_CAST "rel");
+  gboolean is = rel && g_ascii_strcasecmp ((const char *) rel, "stylesheet") == 0;
+  if (rel) xmlFree (rel);
+  return is;
+}
+
+static void
+rewrite_img_src (xmlNodePtr img, HtmlPassCtx *ctx)
+{
+  xmlChar *src = xmlGetProp (img, BAD_CAST "src");
+  if (!src) return;
+  g_autofree char *chapter_dir = dirname_zip (ctx->chapter_path);
+  g_autofree char *resolved =
+    resolve_zip_path (chapter_dir, (const char *) src);
+  xmlFree (src);
+  if (!resolved || !*resolved) return;
+  const char *image_id = g_hash_table_lookup (ctx->zip_to_image_id, resolved);
+  if (!image_id) return;       /* leave src alone; WebKit will 404 it */
+  g_autofree char *new_src =
+    g_strdup_printf ("framework-img://%s/%s", ctx->doc_id, image_id);
+  xmlSetProp (img, BAD_CAST "src", BAD_CAST new_src);
+}
+
+static void
+process_html_subtree (xmlNodePtr parent, HtmlPassCtx *ctx)
+{
+  xmlNodePtr c = parent->children;
+  while (c) {
+    xmlNodePtr next = c->next;
+    if (c->type == XML_ELEMENT_NODE) {
+      if (xmlStrcasecmp (c->name, BAD_CAST "script") == 0 ||
+          is_stylesheet_link (c)) {
+        xmlUnlinkNode (c);
+        xmlFreeNode  (c);
+      } else {
+        if (xmlStrcasecmp (c->name, BAD_CAST "img") == 0)
+          rewrite_img_src (c, ctx);
+        /* Recurse for nested content. */
+        process_html_subtree (c, ctx);
+      }
+    }
+    c = next;
+  }
+}
+
+/* Locate <body> inside an HTML tree.  Returns NULL when there isn't one
+ * (the chapter parsed to nothing renderable). */
+static xmlNodePtr
+find_body (xmlNodePtr root)
+{
+  for (xmlNodePtr n = root; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE &&
+        xmlStrcasecmp (n->name, BAD_CAST "body") == 0)
+      return n;
+    xmlNodePtr deeper = n->children ? find_body (n->children) : NULL;
+    if (deeper) return deeper;
+  }
+  return NULL;
+}
+
+/* Default reading CSS — minimal, just enough to make the EPUB readable
+ * before Phase 17.x adds theme variables / Reading Settings integration.
+ * Width-clamped reading column, sane line-height, default serif body,
+ * monospace for <pre>. */
+static const char EPUB_READING_CSS[] =
+  "html { color-scheme: light dark; }"
+  "body { max-width: 38em; margin: 1.5em auto; padding: 0 1.5em; "
+         "font-family: 'Atkinson Hyperlegible', system-ui, serif; "
+         "line-height: 1.55; }"
+  "section[data-spine] { margin: 0 0 2em 0; }"
+  "section.cover { display: flex; align-items: center; justify-content: center;"
+                  "min-height: 100vh; margin: 0; padding: 0; max-width: none; }"
+  "section.cover img { max-width: 100%; max-height: 96vh; height: auto; "
+                      "object-fit: contain; }"
+  "h1, h2, h3 { line-height: 1.2; }"
+  "img { max-width: 100%; height: auto; }"
+  "pre, code { font-family: ui-monospace, monospace; }"
+  "blockquote { border-left: 3px solid currentColor; "
+              "padding-left: 1em; opacity: 0.85; "
+              "margin: 1em 0 1em 1em; }";
+
+static gboolean
+epub_produce_html (FwReflowDocument  *doc,
+                   const char        *doc_id,
+                   char             **out_html,
+                   GHashTable       **out_images,
+                   GError           **error)
+{
+  FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
+  if (!self->spine_paths || self->spine_paths->len == 0) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                 "epub: spine is empty");
+    return FALSE;
+  }
+
+  GString *out = g_string_new (NULL);
+  const char *title = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "title")
+                        : NULL;
+  const char *lang  = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "lang")
+                        : NULL;
+
+  g_string_append (out, "<!DOCTYPE html>\n<html");
+  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
+  g_string_append (out, "><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *esc = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", esc);
+  }
+  g_string_append (out, "<style>");
+  g_string_append (out, EPUB_READING_CSS);
+  g_string_append (out, "</style></head><body>");
+
+  /* Cover image (when declared via EPUB 2 <meta name="cover" /> or
+   * EPUB 3 `properties="cover-image"`).  We only emit a standalone
+   * cover section when the manifest id resolves to an actual image —
+   * many EPUB 2 files point the cover meta at a cover XHTML page that
+   * already sits at the head of the spine, and emitting a broken-img
+   * placeholder before that page would leave the first viewport blank.
+   * Skipping the emission lets the spine walk render the cover XHTML
+   * naturally. */
+  if (self->cover_image_id &&
+      self->image_bytes &&
+      g_hash_table_contains (self->image_bytes, self->cover_image_id)) {
+    g_string_append_printf (out,
+      "<section class=\"cover\" id=\"cover\">"
+        "<img src=\"framework-img://%s/%s\" alt=\"Cover\">"
+      "</section>",
+      doc_id, self->cover_image_id);
+  }
+
+  /* For each spine entry, parse with libxml2's HTML parser, walk to
+   * <body>, rewrite img srcs, strip scripts/stylesheet links, dump
+   * the children into a <section> wrapper.  htmlNodeDump on each
+   * child avoids the wrapper-document boilerplate that
+   * htmlDocDumpMemory would emit. */
+  xmlBufferPtr buf = xmlBufferCreate ();
+  for (guint i = 0; i < self->spine_paths->len; i++) {
+    const char *zip_path = self->spine_paths->pdata[i];
+    GBytes *bytes = g_hash_table_lookup (self->zip, zip_path);
+    if (!bytes) continue;
+    gsize n;
+    const char *p = g_bytes_get_data (bytes, &n);
+
+    /* Explicit UTF-8: EPUB chapters are UTF-8 per spec, and without
+     * the encoding hint libxml2's auto-detection falls back to
+     * ISO-8859-1, which means every multi-byte UTF-8 sequence comes
+     * out doubly-encoded once htmlNodeDump re-serialises it
+     * (apostrophes turn into Mojibake like "â\x80\x99"). */
+    htmlDocPtr d = htmlReadMemory (
+      p, (int) n, NULL, "UTF-8",
+      HTML_PARSE_RECOVER | HTML_PARSE_NOERROR |
+      HTML_PARSE_NOWARNING | HTML_PARSE_NONET);
+    if (!d) continue;
+
+    xmlNodePtr root = xmlDocGetRootElement (d);
+    xmlNodePtr body = root ? find_body (root) : NULL;
+    if (body) {
+      HtmlPassCtx ctx = {
+        .doc_id          = doc_id,
+        .chapter_path    = zip_path,
+        .zip_to_image_id = self->zip_to_image_id,
+      };
+      process_html_subtree (body, &ctx);
+
+      g_string_append_printf (out, "<section data-spine=\"%u\" id=\"spine-%u\">", i, i);
+      for (xmlNodePtr c = body->children; c; c = c->next) {
+        xmlBufferEmpty (buf);
+        htmlNodeDump (buf, d, c);
+        g_string_append (out, (const char *) xmlBufferContent (buf));
+      }
+      g_string_append (out, "</section>");
+    }
+    xmlFreeDoc (d);
+  }
+  xmlBufferFree (buf);
+
+  g_string_append (out, "</body></html>");
+
+  if (out_images)
+    *out_images = self->image_bytes
+                    ? g_hash_table_ref (self->image_bytes)
+                    : NULL;
+  *out_html = g_string_free (out, FALSE);
+  return TRUE;
+}
+
 static void
 fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
 {
@@ -1224,6 +1467,7 @@ fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
   iface->get_toc               = epub_get_toc;
   iface->find_block_by_anchor  = epub_find_block_by_anchor;
   iface->get_metadata          = epub_get_metadata;
+  iface->produce_html          = epub_produce_html;
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */
@@ -1240,6 +1484,10 @@ fw_reflow_document_epub_finalize (GObject *object)
   g_clear_pointer (&self->zip,      g_hash_table_unref);
   g_clear_pointer (&self->path,     g_free);
   g_clear_pointer (&self->opf_dir,  g_free);
+  g_clear_pointer (&self->spine_paths,     g_ptr_array_unref);
+  g_clear_pointer (&self->zip_to_image_id, g_hash_table_unref);
+  g_clear_pointer (&self->image_bytes,     g_hash_table_unref);
+  g_clear_pointer (&self->cover_image_id,  g_free);
   G_OBJECT_CLASS (fw_reflow_document_epub_parent_class)->finalize (object);
 }
 
@@ -1263,6 +1511,12 @@ fw_reflow_document_epub_init (FwReflowDocumentEpub *self)
   self->zip      = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free,
                                           (GDestroyNotify) g_bytes_unref);
+  self->spine_paths     = g_ptr_array_new_with_free_func (g_free);
+  self->zip_to_image_id = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                  g_free, g_free);
+  self->image_bytes     = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                  g_free,
+                                                  (GDestroyNotify) g_bytes_unref);
 }
 
 FwReflowDocumentEpub *

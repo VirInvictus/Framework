@@ -341,6 +341,34 @@ fw_reflow_document_get_metadata (FwReflowDocument *self)
   return iface->get_metadata ? iface->get_metadata (self) : NULL;
 }
 
+gboolean
+fw_reflow_document_supports_html (FwReflowDocument *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_DOCUMENT (self), FALSE);
+  FwReflowDocumentInterface *iface = FW_REFLOW_DOCUMENT_GET_IFACE (self);
+  return iface->produce_html != NULL;
+}
+
+gboolean
+fw_reflow_document_produce_html (FwReflowDocument  *self,
+                                 const char        *doc_id,
+                                 char             **out_html,
+                                 GHashTable       **out_images,
+                                 GError           **error)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_DOCUMENT (self), FALSE);
+  g_return_val_if_fail (doc_id != NULL, FALSE);
+  g_return_val_if_fail (out_html != NULL, FALSE);
+
+  FwReflowDocumentInterface *iface = FW_REFLOW_DOCUMENT_GET_IFACE (self);
+  if (!iface->produce_html) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                 "reflow backend does not implement produce_html");
+    return FALSE;
+  }
+  return iface->produce_html (self, doc_id, out_html, out_images, error);
+}
+
 /* ── Path probe + factory ─────────────────────────────────────────── */
 
 static gboolean

@@ -118,7 +118,8 @@ You can also drop a file directly onto the window to open it.
 | mupdf (1.24+) | PDF / CBZ / XPS rendering (and fallback ebook layout) |
 | djvulibre (3.5.28+) | DjVu rendering |
 | libarchive (3.6+) | CBR (RAR) decompression and EPUB (ZIP) reading |
-| libxml-2.0 (2.9+) | XHTML / FB2 / OPF parsing for the native reflow pipeline |
+| libxml-2.0 (2.9+) | XHTML / FB2 / OPF parsing for the reflow parsers |
+| webkitgtk-6.0 (2.46+) | Reflow rendering (EPUB now; MOBI / AZW3 / FB2 / TXT incrementally). Fixed-layout formats are unchanged. |
 | fontconfig | Bundled-font registration for reflow text |
 | cairo (1.18+) | Surface management |
 | glib (2.82+) | Data structures, threading |
@@ -129,8 +130,9 @@ On Fedora:
 
 ```bash
 sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
-                 libarchive-devel libxml2-devel fontconfig-devel cairo-devel \
-                 glib2-devel json-glib-devel meson gcc
+                 libarchive-devel libxml2-devel webkitgtk6.0-devel \
+                 fontconfig-devel cairo-devel glib2-devel json-glib-devel \
+                 meson gcc
 ```
 
 ## Building

@@ -19,6 +19,12 @@ djvu_dep       = dependency('ddjvuapi',    version: '>= 3.5.28')
 archive_dep    = dependency('libarchive', version: '>= 3.6')
 fontconfig_dep = dependency('fontconfig')
 libxml_dep     = dependency('libxml-2.0',  version: '>= 2.9')
+# Reflow rendering tier: WebKitGTK 6.0 renders EPUB (and incrementally the
+# other reflow formats) via the in-runtime web engine. Foliate uses the
+# same library for the same reason: EPUB is HTML+CSS underneath, and
+# reusing WebKit's layout/typography is a massive win over the prior
+# block-model pipeline. Shipped in the GNOME 50 Platform runtime.
+webkit_dep     = dependency('webkitgtk-6.0', version: '>= 2.46')
 m_dep          = cc.find_library('m', required: false)
 
 # Source list, partitioned so tests can link against the engine without
@@ -47,6 +53,7 @@ framework_lib_sources = files(
   'fw-debug.c',
   'fw-sandbox.c',
   'fw-fonts.c',
+  'fw-webview.c',
 )
 
 framework_main_sources = files('main.c')
@@ -62,6 +69,7 @@ framework_deps = [
   archive_dep,
   fontconfig_dep,
   libxml_dep,
+  webkit_dep,
   m_dep,
 ]
 

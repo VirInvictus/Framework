@@ -70,12 +70,21 @@ fw_sandbox_drop_execute (void)
     return;
   }
 
-  /* Drop EXECUTE everywhere on the filesystem, plus the make-* rules
-   * a viewer never needs. WRITE_FILE stays allowed so save-attachment,
-   * print spool writes, and state.json persistence continue to work. */
+  /* Drop the make-* filesystem rules a viewer never needs.
+   *
+   * EXECUTE was in this set until v0.68: a malicious document
+   * exploiting a parser (MuPDF, DjVuLibre, libarchive) couldn't reach
+   * a shell.  WebKitGTK (added in v0.68 for the EPUB reflow path)
+   * spawns its own multi-process renderer + network process via
+   * fork-exec on `/usr/libexec/webkitgtk-6.0/WebKit*Process` at runtime
+   * lazily, so an unconditional EXECUTE drop bricked the WebView
+   * (refused with EACCES at first load).  Restoring EXECUTE drop
+   * needs path-beneath rules allowing those binaries (and their
+   * dependencies under /usr/lib*) — tracked as a Phase 17.x item.
+   * WRITE_FILE stays allowed so save-attachment, print spool writes,
+   * and state.json persistence continue to work. */
   __u64 fs_access =
-      LANDLOCK_ACCESS_FS_EXECUTE
-    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+      LANDLOCK_ACCESS_FS_MAKE_CHAR
     | LANDLOCK_ACCESS_FS_MAKE_BLOCK
     | LANDLOCK_ACCESS_FS_MAKE_SOCK
     | LANDLOCK_ACCESS_FS_MAKE_FIFO
@@ -101,7 +110,7 @@ fw_sandbox_drop_execute (void)
   if (fw_landlock_restrict_self (ruleset_fd, 0) != 0) {
     FW_TRACE_WINDOW ("landlock_restrict_self failed (errno=%d)", errno);
   } else {
-    FW_TRACE_WINDOW ("landlock applied: dropped EXECUTE + MAKE_* (abi=%d)", abi);
+    FW_TRACE_WINDOW ("landlock applied: dropped MAKE_* (abi=%d)", abi);
   }
   close (ruleset_fd);
 }

@@ -8,6 +8,7 @@
 #include "fw-debug.h"
 #include "fw-sandbox.h"
 
+#include <glib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -129,13 +130,42 @@ main (int argc, char *argv[])
 
   fw_debug_init ();
 
+  /* WebKitGTK 6.0 (the EPUB reflow renderer added in v0.68) spawns its
+   * web/network/dbus-proxy subprocesses inside a bubblewrap-based
+   * mount-namespace sandbox.  On hosts where unprivileged user-namespace
+   * sandboxing isn't available (AppArmor profiles blocking it, sysctl
+   * kernel.unprivileged_userns_clone=0, some container configurations,
+   * the user's Fedora 44 desktop today), that setup fails with
+   * "bwrap: Failed to make / slave: Operation not permitted" and the
+   * process aborts.
+   *
+   * Framework is a viewer for trusted documents from the user's own
+   * library — not an arbitrary-URL browser — so we set the documented
+   * sandbox-bypass env-var.  WebKit's filesystem reads still go through
+   * the inherited Landlock ruleset (MAKE_*-restricted) so a malicious
+   * EPUB exploiting a WebKit bug can't plant device nodes or symlinks.
+   * The env-var must be set before any WebKit symbol is referenced.
+   *
+   * If the user has set WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS in
+   * their shell environment, respect that (don't clobber). */
+  g_setenv ("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1", FALSE);
+
+  /* DMA-BUF renderer leaves stale buffers on the WebKitWebView during
+   * continuous scroll / page-turn on Wayland (text from earlier
+   * viewports overdrawing the new content after ~2-3 scrolls).
+   * Disabling the DMA-BUF path falls back to the shared-memory
+   * compositor, which redraws cleanly every frame at a slight
+   * fill-rate cost.  Reading workloads are not GPU-bound; the
+   * trade-off is invisible.  Same env-var pattern Foliate uses. */
+  g_setenv ("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
+
   /* Apply Landlock LSM hardening before launching the app loop.
-   * Drops EXECUTE + MAKE_* filesystem rights so a malicious document
-   * exploiting a backend (MuPDF, DjVuLibre, libarchive) can't
-   * escalate to spawning a shell or planting a backdoor file.
-   * Read/write_file stay allowed so state.json, save-attachments,
-   * and print spool writes continue to work. No-op on non-Linux
-   * and on kernels without Landlock support. */
+   * Drops MAKE_* filesystem rights so a malicious document exploiting
+   * a backend can't plant device nodes or fifos.  EXECUTE used to be in
+   * this set; removed in v0.68 because WebKitGTK fork-execs its child
+   * processes — see fw-sandbox.c for the path-beneath plan to bring
+   * EXECUTE back behind a narrow allowlist.  No-op on non-Linux and on
+   * kernels without Landlock support. */
   fw_sandbox_drop_execute ();
 
   g_autoptr (FwApplication) app = fw_application_new ();

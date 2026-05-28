@@ -2,8 +2,10 @@
 #
 # Flatpak manifest for Framework. Two third-party libraries (MuPDF and
 # DjVuLibre) are not in the GNOME runtime and are built as modules.
-# libarchive comes from the freedesktop runtime that GNOME 50 is layered on,
-# so it does not need a module.
+# libarchive and webkitgtk-6.0 come from the GNOME 50 runtime (the latter
+# is what renders reflow formats since v0.68.0), so they do not need
+# modules.  If a future Flathub build complains that webkitgtk-6.0's
+# headers are missing, add it as a `simple-deps` module here.
 #
 # Local development build:
 #   flatpak-builder --user --install --force-clean \

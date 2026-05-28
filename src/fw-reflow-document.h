@@ -93,6 +93,29 @@ struct _FwReflowDocumentInterface {
                                         const char       *anchor_id);
 
   GHashTable  *(*get_metadata)     (FwReflowDocument *self);
+
+  /* Render the document as a single self-contained HTML string for the
+   * WebKitGTK reader.  Backends that implement this method opt in to
+   * the WebView render path; the window dispatches them there instead
+   * of through the FwReflowView GtkListView pipeline.
+   *
+   * `doc_id` is the per-FwWebView identifier (host portion of
+   * `framework-img://<doc-id>/<image-id>` URIs); embed it directly in
+   * the rewritten image src attributes so WebKit's scheme handler can
+   * route resolutions back to the right view.
+   *
+   * On success: *out_html is g_strdup'd HTML (caller frees); *out_images
+   * is a fresh GHashTable<gchar* image_id, GBytes*> the caller hands to
+   * fw_webview_load_html (which takes a hash-table ref).  Either may be
+   * NULL when the document has no images.
+   *
+   * On failure: returns FALSE with *error set; the out-params are
+   * untouched. */
+  gboolean     (*produce_html)     (FwReflowDocument  *self,
+                                    const char        *doc_id,
+                                    char             **out_html,
+                                    GHashTable       **out_images,
+                                    GError           **error);
 };
 
 /* ── Search hit ───────────────────────────────────────────────────── */
@@ -125,6 +148,20 @@ guint        fw_reflow_document_find_block_by_anchor(FwReflowDocument *self,
 GArray      *fw_reflow_document_search              (FwReflowDocument *self,
                                                      const char       *needle);
 GHashTable  *fw_reflow_document_get_metadata        (FwReflowDocument *self);
+
+/* Optional: returns TRUE iff the backend implements `produce_html`.  The
+ * window dispatch uses this to decide whether to route the document to
+ * the WebView render path. */
+gboolean     fw_reflow_document_supports_html       (FwReflowDocument *self);
+
+/* Returns TRUE on success; out-params set per the vtable contract.  When
+ * the backend has no produce_html implementation, returns FALSE with
+ * G_IO_ERROR_NOT_SUPPORTED. */
+gboolean     fw_reflow_document_produce_html        (FwReflowDocument  *self,
+                                                     const char        *doc_id,
+                                                     char             **out_html,
+                                                     GHashTable       **out_images,
+                                                     GError           **error);
 
 /* ── Path → reflow-eligible? ──────────────────────────────────────── */
 

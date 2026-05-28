@@ -1,0 +1,74 @@
+/* fw-webview.h — WebKitGTK-backed reader widget for reflow documents.
+ *
+ * Composite GtkWidget that hosts a WebKitWebView. Each FwWebView owns
+ * an image lookup table (image_id → GBytes) that backs the
+ * `framework-img:` URI scheme registered globally on the default
+ * WebKitWebContext at first construction.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#pragma once
+
+#include <gtk/gtk.h>
+
+G_BEGIN_DECLS
+
+#define FW_TYPE_WEBVIEW (fw_webview_get_type ())
+
+G_DECLARE_FINAL_TYPE (FwWebView, fw_webview, FW, WEBVIEW, GtkWidget)
+
+GtkWidget *fw_webview_new                (void);
+
+/* Load an HTML document plus the image table the framework-img: scheme
+ * will resolve against.  `images` is GHashTable<gchar* image_id, GBytes*>;
+ * FwWebView takes a reference (g_hash_table_ref) and drops it on next
+ * load or on dispose.  Pass NULL to clear. `html` is the complete
+ * document; its `<img>` tags should already have been rewritten by the
+ * caller to point at `framework-img://<doc-id>/<image-id>` (the doc-id
+ * for this view is exposed via fw_webview_get_doc_id). */
+void       fw_webview_load_html          (FwWebView    *self,
+                                          const char   *html,
+                                          GHashTable   *images);
+
+/* Per-view UUID-shaped string used as the host part of framework-img://
+ * URIs.  Borrowed; valid for the lifetime of the FwWebView. */
+const char *fw_webview_get_doc_id        (FwWebView    *self);
+
+/* Scroll to the element with the given DOM id.  No-op if anchor is NULL
+ * or the element isn't found. */
+void       fw_webview_scroll_to_anchor   (FwWebView    *self,
+                                          const char   *anchor);
+
+/* dir == -1 page-back, +1 page-forward.  Mapped to a Page Up/Down style
+ * window.scrollBy call. */
+void       fw_webview_scroll_by_page     (FwWebView    *self,
+                                          int           dir);
+
+/* Asynchronously fetch the current reading position as JSON.  Callback
+ * receives a g_strdup'd JSON string `{"anchor":"...", "scroll_y":N}` the
+ * caller must free, or NULL on failure. */
+typedef void (*FwWebViewPositionCb) (const char *json, gpointer user_data);
+void       fw_webview_get_position       (FwWebView           *self,
+                                          FwWebViewPositionCb  cb,
+                                          gpointer             user_data);
+
+/* Restore a previously-saved position JSON.  Queues until after the next
+ * page load completes if necessary. */
+void       fw_webview_restore_position   (FwWebView    *self,
+                                          const char   *json);
+
+/* WebKitFindController-backed search.  `needle` of NULL/empty clears
+ * the highlight; the view emits "search-changed" once the match count
+ * is known. */
+void       fw_webview_set_search         (FwWebView    *self,
+                                          const char   *needle);
+void       fw_webview_find_next          (FwWebView    *self);
+void       fw_webview_find_previous      (FwWebView    *self);
+void       fw_webview_clear_search       (FwWebView    *self);
+
+/* Total match count for the active search, populated after the
+ * `search-changed` signal fires. */
+guint      fw_webview_get_hit_count      (FwWebView    *self);
+
+G_END_DECLS

@@ -13,6 +13,7 @@
 #include "fw-reflow-document.h"
 #include "fw-reflow-view.h"
 #include "fw-reflow-sidebar.h"
+#include "fw-webview.h"
 #include "fw-state.h"
 #include "fw-debug.h"
 #include <gdk/gdk.h>
@@ -46,12 +47,21 @@ struct _FwWindow {
   AdwToastOverlay      *toast_overlay;  /* wraps content; hosts AdwToasts */
   AdwOverlaySplitView  *split_view;
   FwSidebar            *sidebar;
-  GtkStack             *content_stack;  /* "empty" | "document" | "reflow" */
+  GtkStack             *content_stack;  /* "empty" | "document" | "reflow" | "webview" */
   GtkScrolledWindow    *scroll;
   FwView               *view;
   FwReflowDocument     *reflow_doc;     /* set when a reflow format is open */
   FwReflowView         *reflow_view;
   FwReflowSidebar      *reflow_sidebar;
+  /* WebKitGTK-backed reader (Phase 17).  Each open reflow document
+   * picks a render path: backends implementing produce_html go to the
+   * webview, the rest stay on FwReflowView.  `reflow_via_webview` is
+   * the active dispatch flag for the current document; toggled inside
+   * fw_window_open_reflow and consulted by the search and sidebar
+   * routing code. */
+  FwWebView            *webview;
+  gboolean              reflow_via_webview;
+  gulong                webview_search_handler;
   GtkScrolledWindow    *sidebar_scroll; /* host for the active sidebar widget */
   GtkLabel             *reflow_page_label;  /* "Page X / Y" — header chrome */
   FwSearch             *search;
@@ -224,7 +234,9 @@ prev_page_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_scroll_by_page (self->webview, -1);
+  else if (self->reflow_doc)
     fw_reflow_view_scroll_by_page (self->reflow_view, -1);
   else
     go_to_page (self, self->current_page - 1);
@@ -235,7 +247,9 @@ next_page_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_scroll_by_page (self->webview, +1);
+  else if (self->reflow_doc)
     fw_reflow_view_scroll_by_page (self->reflow_view, +1);
   else
     go_to_page (self, self->current_page + 1);
@@ -375,7 +389,13 @@ update_search_count_label (FwWindow *self)
 
   int count, current;
   gboolean running = FALSE;
-  if (self->reflow_doc) {
+  if (self->reflow_via_webview && self->webview) {
+    /* WebKit's find controller doesn't expose a current-index API; we
+     * report only the total.  The header still updates as the user
+     * cycles through matches via WebKit's own visual selection. */
+    count   = (int) fw_webview_get_hit_count (self->webview);
+    current = count > 0 ? 0 : -1;
+  } else if (self->reflow_doc) {
     count   = self->reflow_hits ? (int) self->reflow_hits->len : 0;
     current = self->reflow_active;
   } else if (self->search) {
@@ -489,6 +509,14 @@ on_search_entry_changed (GtkSearchEntry *entry, gpointer user_data)
   FwWindow *self = FW_WINDOW (user_data);
   const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
 
+  if (self->reflow_via_webview && self->webview) {
+    if (!text || !*text)
+      fw_webview_clear_search (self->webview);
+    else
+      fw_webview_set_search (self->webview, text);
+    return;
+  }
+
   if (self->reflow_doc) {
     reflow_search_run (self, text);
     return;
@@ -510,7 +538,9 @@ on_search_entry_next (GtkSearchEntry *entry, gpointer user_data)
 {
   (void) entry;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_find_next (self->webview);
+  else if (self->reflow_doc)
     reflow_search_step (self, +1);
   else if (self->search)
     fw_search_next (self->search);
@@ -521,7 +551,9 @@ on_search_entry_previous (GtkSearchEntry *entry, gpointer user_data)
 {
   (void) entry;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_find_previous (self->webview);
+  else if (self->reflow_doc)
     reflow_search_step (self, -1);
   else if (self->search)
     fw_search_prev (self->search);
@@ -540,7 +572,9 @@ search_prev_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_find_previous (self->webview);
+  else if (self->reflow_doc)
     reflow_search_step (self, -1);
   else if (self->search)
     fw_search_prev (self->search);
@@ -551,7 +585,9 @@ search_next_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  if (self->reflow_doc)
+  if (self->reflow_via_webview && self->webview)
+    fw_webview_find_next (self->webview);
+  else if (self->reflow_doc)
     reflow_search_step (self, +1);
   else if (self->search)
     fw_search_next (self->search);
@@ -561,7 +597,9 @@ static void act_find_next (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   FwWindow *w = d;
-  if (w->reflow_doc)
+  if (w->reflow_via_webview && w->webview)
+    fw_webview_find_next (w->webview);
+  else if (w->reflow_doc)
     reflow_search_step (w, +1);
   else if (w->search)
     fw_search_next (w->search);
@@ -571,7 +609,9 @@ static void act_find_prev (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   FwWindow *w = d;
-  if (w->reflow_doc)
+  if (w->reflow_via_webview && w->webview)
+    fw_webview_find_previous (w->webview);
+  else if (w->reflow_doc)
     reflow_search_step (w, -1);
   else if (w->search)
     fw_search_prev (w->search);
@@ -744,18 +784,21 @@ static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a
 static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
 static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
-  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, +1);
-  else               go_to_page (w, w->current_page + 1);
+  if (w->reflow_via_webview && w->webview) fw_webview_scroll_by_page (w->webview, +1);
+  else if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, +1);
+  else                    go_to_page (w, w->current_page + 1);
 }
 static void act_prev_page  (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
-  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, -1);
-  else               go_to_page (w, w->current_page - 1);
+  if (w->reflow_via_webview && w->webview) fw_webview_scroll_by_page (w->webview, -1);
+  else if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, -1);
+  else                    go_to_page (w, w->current_page - 1);
 }
 static void act_first_page (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
-  if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, 0);
-  else               go_to_page (w, 0);
+  if (w->reflow_via_webview && w->webview) fw_webview_scroll_to_anchor (w->webview, "spine-0");
+  else if (w->reflow_doc) fw_reflow_view_scroll_by_page (w->reflow_view, 0);
+  else                    go_to_page (w, 0);
 }
 static void act_last_page  (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
@@ -1473,10 +1516,16 @@ on_key_pressed (GtkEventControllerKey *controller,
   if (self->reflow_doc) {
     switch (keyval) {
     case GDK_KEY_Left:
-      fw_reflow_view_scroll_by_page (self->reflow_view, -1);
+      if (self->reflow_via_webview && self->webview)
+        fw_webview_scroll_by_page (self->webview, -1);
+      else
+        fw_reflow_view_scroll_by_page (self->reflow_view, -1);
       return TRUE;
     case GDK_KEY_Right:
-      fw_reflow_view_scroll_by_page (self->reflow_view, +1);
+      if (self->reflow_via_webview && self->webview)
+        fw_webview_scroll_by_page (self->webview, +1);
+      else
+        fw_reflow_view_scroll_by_page (self->reflow_view, +1);
       return TRUE;
     case GDK_KEY_F10:
       if (self->settings) {
@@ -1827,13 +1876,22 @@ fw_window_constructed (GObject *object)
   g_signal_connect (self->reflow_view, "page-changed",
                     G_CALLBACK (on_reflow_page_changed), self);
 
-  /* Stack flips between the empty state and the rendered document. */
+  /* WebKitGTK-backed reader for produce_html-capable backends (EPUB
+   * today; MOBI/AZW3/FB2/TXT incrementally). Constructed eagerly so the
+   * WebKit web process exists by the time the first document opens
+   * (saves the ~200ms cold-start hit on first open). */
+  self->webview = FW_WEBVIEW (fw_webview_new ());
+
+  /* Stack flips between the empty state and whichever reader path the
+   * active document takes (fixed-layout MuPDF / DjVu / comics → "document",
+   * reflow via FwReflowView → "reflow", reflow via WebKit → "webview"). */
   self->content_stack = GTK_STACK (gtk_stack_new ());
   gtk_stack_set_transition_type (self->content_stack,
                                   GTK_STACK_TRANSITION_TYPE_CROSSFADE);
   gtk_stack_add_named (self->content_stack, GTK_WIDGET (empty), "empty");
   gtk_stack_add_named (self->content_stack, GTK_WIDGET (overlay), "document");
   gtk_stack_add_named (self->content_stack, GTK_WIDGET (self->reflow_view), "reflow");
+  gtk_stack_add_named (self->content_stack, GTK_WIDGET (self->webview),     "webview");
   gtk_stack_set_visible_child_name (self->content_stack, "empty");
   gtk_widget_set_vexpand (GTK_WIDGET (self->content_stack), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->content_stack), TRUE);
@@ -1845,6 +1903,14 @@ fw_window_constructed (GObject *object)
   self->reflow_sidebar = fw_reflow_sidebar_new ();
   g_signal_connect (self->reflow_sidebar, "anchor-requested",
                     G_CALLBACK (on_reflow_sidebar_anchor_requested), self);
+
+  /* Keep the header bar's search count label fresh when WebKit's find
+   * controller reports a new match total.  on_webview_search_changed
+   * defers to update_search_count_label, which already knows how to
+   * read out of self->webview when reflow_via_webview is TRUE. */
+  self->webview_search_handler = g_signal_connect_swapped (
+    self->webview, "search-changed",
+    G_CALLBACK (update_search_count_label), self);
 
   self->sidebar_scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (self->sidebar_scroll,
@@ -2069,6 +2135,14 @@ on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar G_GNUC_UNUSED,
                                     gpointer         user_data)
 {
   FwWindow *self = FW_WINDOW (user_data);
+  if (self->reflow_via_webview && self->webview) {
+    /* TOC anchors land at the DOM id of the matching element.  Within
+     * a stitched-spine document, EPUB-side IDs (chapter1, sec1.3, …)
+     * are preserved verbatim by epub_produce_html, so the same anchor
+     * string the sidebar gave us resolves natively. */
+    fw_webview_scroll_to_anchor (self->webview, anchor);
+    return;
+  }
   if (self->reflow_view)
     fw_reflow_view_scroll_to_anchor (self->reflow_view, anchor);
 }
@@ -2239,6 +2313,12 @@ fw_window_close_active_document (FwWindow *self)
 
   if (self->reflow_view)
     fw_reflow_view_set_document (self->reflow_view, NULL);
+  if (self->webview && self->reflow_via_webview) {
+    /* Clear the WebView's content and drop the image-table ref so
+     * the next document doesn't pick up stale image URIs. */
+    fw_webview_load_html (self->webview, "<html><body></body></html>", NULL);
+  }
+  self->reflow_via_webview = FALSE;
   g_clear_object (&self->reflow_doc);
   g_clear_pointer (&self->reflow_hits, g_array_unref);
   self->reflow_active = -1;
@@ -2263,10 +2343,39 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   self->reflow_doc = doc;
   self->file_path  = g_strdup (path);
 
-  fw_reflow_view_set_document (self->reflow_view, self->reflow_doc);
+  /* Phase 17 dispatch: backends that implement produce_html (currently
+   * EPUB) go through the WebKitGTK reader.  Anything else stays on the
+   * FwReflowView block-model pipeline until its produce_html lands. */
+  gboolean want_webview =
+    self->webview && fw_reflow_document_supports_html (self->reflow_doc);
+
+  if (want_webview) {
+    g_autofree char *html   = NULL;
+    GHashTable     *images  = NULL;
+    g_autoptr (GError) html_err = NULL;
+    if (!fw_reflow_document_produce_html (self->reflow_doc,
+                                          fw_webview_get_doc_id (self->webview),
+                                          &html, &images, &html_err)) {
+      g_warning ("produce_html failed: %s",
+                 html_err ? html_err->message : "(unknown)");
+      want_webview = FALSE;
+    } else {
+      fw_webview_load_html (self->webview, html, images);
+      self->reflow_via_webview = TRUE;
+      if (images)
+        g_hash_table_unref (images);   /* fw_webview_load_html took a ref */
+    }
+  }
+
+  if (!want_webview) {
+    fw_reflow_view_set_document (self->reflow_view, self->reflow_doc);
+    self->reflow_via_webview = FALSE;
+  }
 
   if (self->content_stack)
-    gtk_stack_set_visible_child_name (self->content_stack, "reflow");
+    gtk_stack_set_visible_child_name (
+      self->content_stack,
+      self->reflow_via_webview ? "webview" : "reflow");
 
   g_autofree char *basename = g_path_get_basename (path);
   gtk_label_set_text (self->title_label, basename);
@@ -2278,7 +2387,10 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   if (self->page_entry)
     gtk_widget_set_visible (GTK_WIDGET (self->page_entry), FALSE);
   if (self->reflow_page_label)
-    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label), TRUE);
+    /* Hide for the webview path — WebKit-rendered HTML has no notion
+     * of pages; the old FwReflowView path still exposes "Page X / Y". */
+    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label),
+                             !self->reflow_via_webview);
   if (self->zoom_entry) {
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),    FALSE);
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button),  FALSE);
@@ -2305,10 +2417,11 @@ fw_window_open_reflow (FwWindow *self, const char *path)
 
   /* Restore reading position. fw_reflow_view_scroll_to_block queues
    * the target if pagination hasn't run yet, so this works even when
-   * the listview hasn't been allocated. */
+   * the listview hasn't been allocated.  The webview path doesn't yet
+   * persist position; Phase 17.x adds webview_pos to the state schema. */
   FwDocumentState *saved = fw_state_load (path);
   if (saved) {
-    if (saved->reflow_block >= 0)
+    if (!self->reflow_via_webview && saved->reflow_block >= 0)
       fw_reflow_view_scroll_to_block (self->reflow_view,
                                        (guint) saved->reflow_block);
     fw_document_state_free (saved);
