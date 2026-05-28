@@ -1146,6 +1146,26 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
 
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_size);
 
+  /* Typography group — paragraph-level rendering choices. Adds will
+   * land here as the rest of Phase 16 lands (OpenType features,
+   * reading themes, measure). */
+  AdwPreferencesGroup *g_typo =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_typo, "Typography");
+
+  AdwSwitchRow *hyph_row = ADW_SWITCH_ROW (adw_switch_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (hyph_row),
+                                 "Hyphenation");
+  adw_action_row_set_subtitle (ADW_ACTION_ROW (hyph_row),
+    "Inject soft hyphens at Knuth-Liang break points so justified "
+    "lines stop producing rivers. English documents only; non-English "
+    "books are unaffected.");
+  g_settings_bind (self->settings, "reading-hyphenate",
+                   hyph_row, "active", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_typo, GTK_WIDGET (hyph_row));
+
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_typo);
+
   /* Layout group — two-column toggle. */
   AdwPreferencesGroup *g_layout =
     ADW_PREFERENCES_GROUP (adw_preferences_group_new ());

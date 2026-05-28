@@ -1,0 +1,37 @@
+Hyphenation patterns for American English
+=========================================
+
+The files in this directory are the en_US TeX hyphenation patterns from
+the hyph-utf8 project, vendored verbatim from the upstream texlive
+distribution at:
+
+  texlive/texmf-dist/tex/generic/hyph-utf8/patterns/txt/
+
+Files
+-----
+
+  hyph-en-us.pat.txt   4938 hyphenation patterns (Knuth-Liang format)
+  hyph-en-us.hyp.txt     14 exception words
+
+Origin and copyright
+--------------------
+
+  title:     Hyphenation patterns for American English
+  copyright: Copyright (C) 1990, 2004, 2005 Gerard D.C. Kuiken
+  upstream:  https://github.com/hyphenation/tex-hyphen
+  homepage:  http://www.hyphenation.org/tex
+  tag:       en-us
+  version:   2005-05-30
+  author:    Gerard D.C. Kuiken
+  hyphenmins (typesetting): left=2, right=3
+
+License
+-------
+
+  Copying and distribution of this file, with or without modification,
+  are permitted in any medium without royalty provided the copyright
+  notice and this notice are preserved.
+
+This permissive notice is compatible with Framework's GPL-3.0-or-later
+license. The patterns are loaded at runtime by src/fw-hyphenate.c to
+inject soft hyphens (U+00AD) into reflow-rendered text.

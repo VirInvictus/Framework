@@ -37,4 +37,11 @@ foreach family : ['OpenDyslexic', 'AtkinsonHyperlegible', 'CrimsonPro']
   )
 endforeach
 
+# Hyphenation patterns (Phase 16 Pillar 1). en_US TeX patterns from
+# hyph-utf8, vendored verbatim with original license preserved.
+# Loaded at runtime by src/fw-hyphenate.c to inject soft hyphens.
+install_subdir('hyphenation',
+  install_dir: get_option('datadir') / 'framework',
+)
+
 subdir('icons')

@@ -217,6 +217,14 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - **Plato**: e-ink-specific UI; `framebuffer/` direct-to-fb rendering; single-threaded `Rc<Context>` model (loses our parallelism).
 - **mupdf-gl**: single-threaded design; in-tree custom UI toolkit.
 
+## Phase 16: High-grade reflow typography
+*A reading-quality pass over the reflow pipeline (EPUB / FB2 / MOBI / AZW3 / TXT only; fixed-layout formats don't reflow). Intended as the last feature work before the Phase 15 1.0 push. The foundation is already solid (justified body, configurable family/size/line-height, bundled CrimsonPro / Atkinson Hyperlegible / OpenDyslexic, scaled headings); this takes it from good to fine-typesetting. Scoped and signed off with Brandon; shipped as four independently-verifiable sub-slices.*
+
+- [ ] **Pillar 1 — Hyphenation + better wrap.** Switch body wrap from `PANGO_WRAP_WORD_CHAR` (breaks mid-word) to `WORD`, and inject soft hyphens (U+00AD) at computed break points so justified text stops producing rivers/loose lines. Pango does not auto-hyphenate Latin (it only breaks at hyphens already in the text), so we compute the points ourselves: **vendor a small public-domain Knuth-Liang hyphenator (~100 LOC) + the en_US TeX hyphenation patterns (public-domain data)** in-tree (no system dep; works in the Flatpak sandbox; matches the bundle-don't-rely-on-system ethos). New `reading-hyphenate` GSetting (default on). Inject at the reflow walk / bind so it interacts correctly with the highlight splicer and inline markup.
+- [ ] **Pillar 2 — OpenType features.** Default-on kerning + standard ligatures; expose CrimsonPro's old-style (text) figures and true small-caps for headings / run-ins, via CSS `font-feature-settings` on the reflow classes. No dependency.
+- [ ] **Pillar 3 — Reading themes.** `reading-theme` GSetting (default / sepia / light / dark) driving contrast-tuned background + text + link-accent colours on the reflow view, distinct from the fixed-layout invert (Ctrl+I). No dependency.
+- [ ] **Pillar 4 — Measure + vertical rhythm.** Derive the reading-column width from an optimal measure (~66 characters) at the current font size rather than the fixed 720 px cap, and put the heading sizes on a modular scale with consistent paragraph/heading rhythm. Touches `recompute_pagination` (keys off column width) and two-column mode, so verify pagination there.
+
 ## Phase 15: The 1.0 Release (Concrete)
 *Getting it out the door. Moved to the end after the 0.x sprint outgrew its original landing slot — Brandon explicitly does not want flathub submission until the rest of the roadmap is closed out.*
 

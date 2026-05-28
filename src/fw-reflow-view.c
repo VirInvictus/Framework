@@ -11,6 +11,7 @@
 
 #include "fw-reflow-view.h"
 #include "fw-config.h"
+#include "fw-hyphenate.h"
 #include <gio/gio.h>
 #include <string.h>
 
@@ -73,6 +74,13 @@ struct _FwReflowView {
   GArray             *search_hits;       /* GArray<FwReflowHit>, owned */
   GHashTable         *search_by_block;   /* FwBlock* → GArray<HlSpan> */
   int                 search_active;
+
+  /* Hyphenation: TRUE when the user's reading-hyphenate GSetting is on
+   * AND the document's declared language is one we have patterns for
+   * (English-or-unknown). Recomputed when the document or setting
+   * changes; consulted per-bind to decide whether the body markup
+   * goes through hyphenate_markup. */
+  gboolean            hyphenate_enabled;
 };
 
 enum {
@@ -219,6 +227,91 @@ highlight_block_markup (FwReflowView *self, FwBlock *block, const char *raw)
   return splice_highlights (raw, is_markup, spans, (guint) self->search_active);
 }
 
+/* ── Soft-hyphen injection ────────────────────────────────────────────
+ * Walks the (possibly markup) text run-by-run, leaving tags/entities
+ * alone and feeding each ASCII-letter run through fw_hyphenate_word.
+ * U+00AD soft hyphens are inserted at each break point; case in the
+ * output is the case of the original bytes, not the lowercased copy
+ * passed to the hyphenator. Returns NULL when nothing changed so the
+ * caller can keep the prior pointer without copying.
+ *
+ * Run order matters: this runs AFTER the highlight splicer. The
+ * highlight splice can break a word into two short pieces around a
+ * <span>; each piece is then individually too short for the
+ * hyphenator's leftmin+rightmin, so search-highlighted words won't
+ * pick up internal hyphens. Acceptable trade-off — keeping the
+ * canonical block text un-hyphenated lets search offsets and the
+ * splicer share one coordinate space. */
+static char *
+hyphenate_markup (const char *src, gboolean is_markup)
+{
+  if (!src || !*src)
+    return NULL;
+  GString *out = g_string_new (NULL);
+  gboolean changed = FALSE;
+  const char *p = src;
+  while (*p) {
+    /* Inline tag: copy verbatim — Pango span boundaries and attribute
+     * values must not be touched. */
+    if (is_markup && *p == '<') {
+      const char *gt = strchr (p, '>');
+      if (!gt) { g_string_append (out, p); break; }
+      g_string_append_len (out, p, gt - p + 1);
+      p = gt + 1;
+      continue;
+    }
+    /* Pango entity: copy verbatim. Same length budget the splicer
+     * uses (12 bytes between & and ;). Bare '&' falls through to
+     * the non-letter emit below. */
+    if (is_markup && *p == '&') {
+      const char *sc = strchr (p, ';');
+      if (sc && sc - p <= 12 && sc != p + 1) {
+        g_string_append_len (out, p, sc - p + 1);
+        p = sc + 1;
+        continue;
+      }
+    }
+    /* ASCII-letter run = candidate word. Apostrophes, digits, UTF-8
+     * non-ASCII, and punctuation all terminate the run; the run is
+     * fed to the hyphenator as-is (lowercased). */
+    const char *ws = p;
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+      p++;
+    int wl = (int) (p - ws);
+    if (wl > 0) {
+      char lower[96];
+      if (wl <= (int) sizeof lower) {
+        for (int i = 0; i < wl; i++) {
+          char c = ws[i];
+          lower[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+        }
+        int pos[16];
+        int n = fw_hyphenate_word (lower, wl, 2, 3, pos, 16);
+        if (n > 0) {
+          int last = 0;
+          for (int i = 0; i < n; i++) {
+            g_string_append_len (out, ws + last, pos[i] - last);
+            g_string_append    (out, "\xc2\xad");      /* U+00AD */
+            last = pos[i];
+          }
+          g_string_append_len (out, ws + last, wl - last);
+          changed = TRUE;
+          continue;
+        }
+      }
+      g_string_append_len (out, ws, wl);
+      continue;
+    }
+    g_string_append_c (out, *p);
+    p++;
+  }
+  if (!changed) {
+    g_string_free (out, TRUE);
+    return NULL;
+  }
+  return g_string_free (out, FALSE);
+}
+
 /* Force the currently-bound rows to re-run the bind handler (and thus
  * pick up highlight changes) without touching scroll position or
  * emitting page-changed — toggling the slice size round-trips an
@@ -299,6 +392,11 @@ make_text_label (void)
 {
   GtkLabel *label = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_wrap (label, TRUE);
+  /* Soft-hyphen-driven breaks (Phase 16 Pillar 1) feed Pango via the
+   * bind handler. Stay on WORD_CHAR so unbreakable tokens (URLs,
+   * code-like runs) still wrap somehow instead of overflowing — soft
+   * hyphens already give Pango enough preferred break points that
+   * char-fallback almost never triggers in normal prose. */
   gtk_label_set_wrap_mode (label, PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign (label, 0.0);
   gtk_label_set_yalign (label, 0.0);
@@ -404,13 +502,23 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
   gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
   gtk_label_set_xalign (label, 0.0);
 
-  /* Search highlight: splice match spans into the body; the per-kind
-   * prefix / indent / dropcap decorations below wrap the result. `hl`
-   * is NULL (and `body` falls back to the raw text) when this block has
-   * no matches. */
+  /* Build the body markup through the bind-time pipeline:
+   *   raw text → (highlight splice) → (soft-hyphen injection) → per-kind decoration
+   * `hl` is NULL when there are no search matches in this block; `hyph`
+   * is NULL when no break points were added (typical for blocks that
+   * are all-short or all-non-letters). `body` always points at the
+   * latest non-NULL stage. Hyphenation is skipped for CODE / CHAPTER
+   * (plain text, no body prose) and when the doc's language isn't
+   * covered by the bundled patterns. */
   const char *raw = fw_block_get_text (block) ?: "";
-  g_autofree char *hl = highlight_block_markup (self, block, raw);
-  const char *body = hl ? hl : raw;
+  g_autofree char *hl  = highlight_block_markup (self, block, raw);
+  FwBlockKind body_kind = fw_block_get_kind (block);
+  gboolean    body_is_markup_kind = (body_kind != FW_BLOCK_CODE &&
+                                     body_kind != FW_BLOCK_CHAPTER);
+  g_autofree char *hyph = NULL;
+  if (self->hyphenate_enabled && body_is_markup_kind)
+    hyph = hyphenate_markup (hl ? hl : raw, TRUE);
+  const char *body = hyph ? hyph : (hl ? hl : raw);
 
   switch (fw_block_get_kind (block)) {
     case FW_BLOCK_HEADING: {
@@ -731,12 +839,36 @@ reload_css (FwReflowView *self)
   gtk_css_provider_load_from_string (self->css, css);
 }
 
+/* Recompute the cached hyphenate_enabled bool from (setting × document
+ * language). The setting alone isn't enough: a French EPUB shouldn't
+ * pick up en_US break points. If the effective state changes, kick
+ * the slice so the currently-bound rows pick up the new pipeline. */
+static void
+recompute_hyphenate_enabled (FwReflowView *self)
+{
+  gboolean want = FALSE;
+  if (self->settings && self->document &&
+      g_settings_get_boolean (self->settings, "reading-hyphenate")) {
+    const char *lang = fw_reflow_document_get_language (self->document);
+    want = fw_hyphenate_supports_lang (lang);
+  }
+  if (self->hyphenate_enabled != want) {
+    self->hyphenate_enabled = want;
+    refresh_visible_rows (self);
+  }
+}
+
 static void
 on_reading_setting_changed (GSettings   *settings G_GNUC_UNUSED,
-                            const char  *key      G_GNUC_UNUSED,
+                            const char  *key,
                             gpointer     user_data)
 {
-  reload_css (FW_REFLOW_VIEW (user_data));
+  FwReflowView *self = FW_REFLOW_VIEW (user_data);
+  /* Hyphenation toggle never affects CSS, but the others all might —
+   * cheaper to regenerate unconditionally than to enumerate. */
+  reload_css (self);
+  if (g_strcmp0 (key, "reading-hyphenate") == 0)
+    recompute_hyphenate_enabled (self);
 }
 
 static void
@@ -790,6 +922,8 @@ make_measure_widget_for (FwReflowView *self, FwBlock *block)
 
   GtkLabel *label = GTK_LABEL (gtk_label_new (NULL));
   gtk_label_set_wrap     (label, TRUE);
+  /* Mirror make_text_label's wrap mode so pagination measurement
+   * matches the bind-time widget's break behaviour. */
   gtk_label_set_wrap_mode (label, PANGO_WRAP_WORD_CHAR);
   gtk_label_set_xalign   (label, 0.0);
   gtk_label_set_yalign   (label, 0.0);
@@ -1221,6 +1355,10 @@ fw_reflow_view_set_document (FwReflowView *self, FwReflowDocument *doc)
 
   if (self->pages)
     g_array_set_size (self->pages, 0);
+
+  /* New document may carry a different language; re-evaluate whether
+   * the bind pipeline should run the hyphenation pass for its blocks. */
+  recompute_hyphenate_enabled (self);
 
   queue_repaginate (self);
 }

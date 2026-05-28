@@ -93,6 +93,12 @@ struct _FwReflowDocumentInterface {
                                         const char       *anchor_id);
 
   GHashTable  *(*get_metadata)     (FwReflowDocument *self);
+
+  /* BCP-47-ish language tag (e.g. "en", "en-US", "fr"), borrowed for
+   * the document's lifetime. NULL = unknown (treated as English by
+   * the hyphenation gate). Optional: backends that don't carry the
+   * language can leave this NULL or omit it entirely. */
+  const char  *(*get_language)     (FwReflowDocument *self);
 };
 
 /* ── Search hit ───────────────────────────────────────────────────── */
@@ -125,6 +131,7 @@ guint        fw_reflow_document_find_block_by_anchor(FwReflowDocument *self,
 GArray      *fw_reflow_document_search              (FwReflowDocument *self,
                                                      const char       *needle);
 GHashTable  *fw_reflow_document_get_metadata        (FwReflowDocument *self);
+const char  *fw_reflow_document_get_language        (FwReflowDocument *self);
 
 /* ── Path → reflow-eligible? ──────────────────────────────────────── */
 

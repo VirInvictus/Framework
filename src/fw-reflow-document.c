@@ -341,6 +341,25 @@ fw_reflow_document_get_metadata (FwReflowDocument *self)
   return iface->get_metadata ? iface->get_metadata (self) : NULL;
 }
 
+const char *
+fw_reflow_document_get_language (FwReflowDocument *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_DOCUMENT (self), NULL);
+  FwReflowDocumentInterface *iface = FW_REFLOW_DOCUMENT_GET_IFACE (self);
+  if (iface->get_language)
+    return iface->get_language (self);
+  /* Default: each backend already stores the document language under
+   * the "lang" key of its metadata table (EPUB's dc:language, FB2's
+   * <lang>, MOBI's EXTH 524). The returned pointer is borrowed for
+   * the document lifetime — backends own the hash and its strings. */
+  if (iface->get_metadata) {
+    GHashTable *meta = iface->get_metadata (self);
+    if (meta)
+      return g_hash_table_lookup (meta, "lang");
+  }
+  return NULL;
+}
+
 /* ── Path probe + factory ─────────────────────────────────────────── */
 
 static gboolean

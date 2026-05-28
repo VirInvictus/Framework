@@ -159,6 +159,23 @@
       </description>
     </key>
 
+    <key name="reading-hyphenate" type="b">
+      <default>true</default>
+      <summary>Insert soft hyphens in reflow body text (English only)</summary>
+      <description>
+        When true, paragraph text in reflow documents (EPUB / FB2 /
+        MOBI / AZW3 / TXT) gets Knuth-Liang en_US hyphenation: soft
+        hyphens (U+00AD) are injected at computed break points before
+        Pango lays out the line. Justified text loses its rivers and
+        loose lines without breaking mid-word.
+
+        Only applied when the document declares an English language
+        (en, en-US, en-GB, etc.) or no language at all; documents in
+        known non-English languages skip the hyphenation pass even
+        when this is true. Toggleable from Reading Settings.
+      </description>
+    </key>
+
     <key name="prefer-fixed-layout" type="b">
       <default>false</default>
       <summary>Open ebooks as fixed pages instead of reflowed text</summary>

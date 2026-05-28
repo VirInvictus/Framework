@@ -47,6 +47,7 @@ framework_lib_sources = files(
   'fw-debug.c',
   'fw-sandbox.c',
   'fw-fonts.c',
+  'fw-hyphenate.c',
 )
 
 framework_main_sources = files('main.c')
