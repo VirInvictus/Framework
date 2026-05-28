@@ -41,6 +41,7 @@ struct _FwWebView {
   gboolean           load_done;       /* TRUE once load-changed FINISHED */
   char              *pending_position;/* restored if load_done == FALSE */
   char              *pending_anchor;  /* ditto for scroll_to_anchor */
+  char              *pending_style;   /* reading-style JS, run on load */
   char              *last_position;   /* latest {anchor,scroll_y} JSON from
                                        * the in-page scroll listener; read
                                        * synchronously at save time */
@@ -227,6 +228,11 @@ flush_pending_after_load (FwWebView *self)
     g_autofree char *json = g_steal_pointer (&self->pending_position);
     fw_webview_restore_position (self, json);
   }
+  if (self->pending_style) {
+    g_autofree char *js = g_steal_pointer (&self->pending_style);
+    webkit_web_view_evaluate_javascript (
+      self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
+  }
 }
 
 static void
@@ -305,6 +311,7 @@ fw_webview_dispose (GObject *object)
   g_clear_pointer (&self->images, g_hash_table_unref);
   g_clear_pointer (&self->pending_anchor, g_free);
   g_clear_pointer (&self->pending_position, g_free);
+  g_clear_pointer (&self->pending_style, g_free);
   g_clear_pointer (&self->last_position, g_free);
   if (self->web) {
     gtk_widget_unparent (GTK_WIDGET (self->web));
@@ -428,6 +435,7 @@ fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images)
   /* Drop the previous document's cached position so a save before the
    * new document scrolls can't persist a stale anchor against it. */
   g_clear_pointer (&self->last_position, g_free);
+  g_clear_pointer (&self->pending_style, g_free);
   /* base_uri matches the framework-img: origin our images live in so
    * the document and images are same-origin.  Without this, WebKit's
    * mixed-origin rules silently drop the image fetches before they
@@ -566,6 +574,56 @@ fw_webview_get_cached_position (FwWebView *self)
 {
   g_return_val_if_fail (FW_IS_WEBVIEW (self), NULL);
   return self->last_position;
+}
+
+/* Append a `r.setProperty('--name', '<value>')` call, escaping the value
+ * for a single-quoted JS string literal (CSS values are letters, digits,
+ * #, %, commas, spaces, dots, quotes — only ' and \ need escaping). */
+static void
+append_set_prop (GString *js, const char *name, const char *value)
+{
+  if (!value)
+    return;
+  g_string_append_printf (js, "r.setProperty('%s','", name);
+  for (const char *p = value; *p; p++) {
+    if (*p == '\'' || *p == '\\')
+      g_string_append_c (js, '\\');
+    g_string_append_c (js, *p);
+  }
+  g_string_append (js, "');");
+}
+
+void
+fw_webview_set_reading_style (FwWebView *self, const FwReadingStyle *s)
+{
+  g_return_if_fail (FW_IS_WEBVIEW (self));
+  g_return_if_fail (s != NULL);
+
+  g_autoptr (GString) js = g_string_new (
+    "(function(){var r=document.documentElement.style;");
+  append_set_prop (js, "--body-font", s->body_font);
+  append_set_prop (js, "--mono-font", s->mono_font);
+  if (s->font_size_pt > 0) {
+    g_autofree char *v = g_strdup_printf ("%.1fpt", s->font_size_pt);
+    append_set_prop (js, "--font-size", v);
+  }
+  if (s->line_height > 0) {
+    g_autofree char *v = g_strdup_printf ("%.3f", s->line_height);
+    append_set_prop (js, "--line-height", v);
+  }
+  append_set_prop (js, "--fg",   s->fg);
+  append_set_prop (js, "--bg",   s->bg);
+  append_set_prop (js, "--link", s->link);
+  g_string_append (js, "})();");
+
+  if (!self->load_done) {
+    /* Latest style wins; flushed after load-changed FINISHED. */
+    g_free (self->pending_style);
+    self->pending_style = g_string_free (g_steal_pointer (&js), FALSE);
+    return;
+  }
+  webkit_web_view_evaluate_javascript (
+    self->web, js->str, -1, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* ── Search ────────────────────────────────────────────────────────── */

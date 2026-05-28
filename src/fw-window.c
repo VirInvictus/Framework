@@ -139,6 +139,13 @@ static void on_kinetic_setting_changed     (GSettings *settings,
 static void on_prefer_fixed_setting_changed (GSettings *settings,
                                              const char *key,
                                              gpointer user_data);
+static void apply_reading_style              (FwWindow *self);
+static void on_reading_style_changed         (GSettings *settings,
+                                              const char *key,
+                                              gpointer user_data);
+static void on_reading_dark_changed          (GObject *style_manager,
+                                              GParamSpec *pspec,
+                                              gpointer user_data);
 static void on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar,
                                                 const char      *anchor,
                                                 gpointer         user_data);
@@ -1133,6 +1140,33 @@ on_preset_clicked (GtkButton *btn, gpointer user_data)
   prefs_apply_preset (self, preset);
 }
 
+/* Combo row selection index maps 1:1 to the reading-theme enum
+ * (system=0, light=1, sepia=2, dark=3). */
+static void
+on_theme_combo_changed (AdwComboRow *row, GParamSpec *pspec, gpointer user_data)
+{
+  (void) pspec;
+  FwWindow *self = FW_WINDOW (user_data);
+  g_settings_set_enum (self->settings, "reading-theme",
+                       (int) adw_combo_row_get_selected (row));
+}
+
+static const char *const READING_FONT_FAMILIES[] = {
+  "Crimson Pro", "Atkinson Hyperlegible", "OpenDyslexic",
+};
+
+static void
+on_reading_font_combo_changed (AdwComboRow *row, GParamSpec *pspec,
+                               gpointer user_data)
+{
+  (void) pspec;
+  FwWindow *self = FW_WINDOW (user_data);
+  guint i = adw_combo_row_get_selected (row);
+  if (i < G_N_ELEMENTS (READING_FONT_FAMILIES))
+    g_settings_set_string (self->settings, "reading-font-family",
+                           READING_FONT_FAMILIES[i]);
+}
+
 static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a; (void)p;
@@ -1152,12 +1186,58 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
   GtkWidget *page = adw_preferences_page_new ();
   adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
 
+  /* Appearance group — reading theme (EPUB / WebKit path). */
+  AdwPreferencesGroup *g_appear =
+    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
+  adw_preferences_group_set_title (g_appear, "Appearance");
+  adw_preferences_group_set_description (g_appear,
+    "Color theme for EPUB documents. Applies live.");
+
+  AdwComboRow *theme_row = ADW_COMBO_ROW (adw_combo_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (theme_row), "Theme");
+  /* Order matches the ReadingTheme enum: system, light, sepia, dark. */
+  const char *theme_labels[] = {
+    "Follow System", "Light", "Sepia", "Dark", NULL
+  };
+  GtkStringList *theme_model = gtk_string_list_new (theme_labels);
+  adw_combo_row_set_model (theme_row, G_LIST_MODEL (theme_model));
+  adw_combo_row_set_selected (theme_row,
+    (guint) g_settings_get_enum (self->settings, "reading-theme"));
+  /* Connect after the initial set so it doesn't fire on open. */
+  g_signal_connect (theme_row, "notify::selected",
+                    G_CALLBACK (on_theme_combo_changed), self);
+  adw_preferences_group_add (g_appear, GTK_WIDGET (theme_row));
+  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_appear);
+
   /* Font group */
   AdwPreferencesGroup *g_font =
     ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
   adw_preferences_group_set_title (g_font, "Fonts");
   adw_preferences_group_set_description (g_font,
-    "Empty fields fall back to the system serif and monospace defaults.");
+    "Pick a bundled reading font, or type any installed family below. "
+    "Empty falls back to the bundled serif.");
+
+  /* Reading font — combo over the three bundled families. Writes
+   * reading-font-family; the entry row below mirrors it and accepts
+   * custom families. */
+  AdwComboRow *font_row = ADW_COMBO_ROW (adw_combo_row_new ());
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (font_row), "Reading font");
+  const char *font_labels[] = {
+    "Crimson Pro (serif)", "Atkinson Hyperlegible", "OpenDyslexic", NULL
+  };
+  GtkStringList *font_model = gtk_string_list_new (font_labels);
+  adw_combo_row_set_model (font_row, G_LIST_MODEL (font_model));
+  /* Preselect the matching family; leave at 0 (not written) when custom. */
+  g_autofree char *cur_family = g_settings_get_string (self->settings,
+                                                       "reading-font-family");
+  for (guint i = 0; i < G_N_ELEMENTS (READING_FONT_FAMILIES); i++)
+    if (g_strcmp0 (cur_family, READING_FONT_FAMILIES[i]) == 0) {
+      adw_combo_row_set_selected (font_row, i);
+      break;
+    }
+  g_signal_connect (font_row, "notify::selected",
+                    G_CALLBACK (on_reading_font_combo_changed), self);
+  adw_preferences_group_add (g_font, GTK_WIDGET (font_row));
 
   /* Body family — AdwEntryRow bound to the GSetting. */
   AdwEntryRow *body_row = ADW_ENTRY_ROW (adw_entry_row_new ());
@@ -2045,6 +2125,20 @@ fw_window_constructed (GObject *object)
     self->settings_kinetic_handler = g_signal_connect (
       self->settings, "changed::kinetic-scrolling",
       G_CALLBACK (on_kinetic_setting_changed), self);
+
+    /* EPUB (WebView) reading typography + theme: re-push live on any
+     * relevant setting change, and on the system light/dark flip when
+     * the theme is set to follow the system. */
+    const char *style_keys[] = {
+      "changed::reading-theme", "changed::reading-font-family",
+      "changed::reading-monospace-family", "changed::reading-font-size",
+      "changed::reading-line-height",
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS (style_keys); i++)
+      g_signal_connect (self->settings, style_keys[i],
+                        G_CALLBACK (on_reading_style_changed), self);
+    g_signal_connect (adw_style_manager_get_default (), "notify::dark",
+                      G_CALLBACK (on_reading_dark_changed), self);
   }
 
   /* ── Arrow key scrolling & Ctrl+Scroll zoom ── */
@@ -2335,6 +2429,76 @@ fw_window_close_active_document (FwWindow *self)
   g_clear_pointer (&self->file_path, g_free);
 }
 
+/* Resolve the reading-theme setting (following the system light/dark
+ * preference when set to "system") to CSS colors. The dark theme is
+ * Kanagawa Dragon-flavored. */
+static void
+reading_theme_colors (FwWindow *self,
+                      const char **fg, const char **bg, const char **link)
+{
+  int theme = g_settings_get_enum (self->settings, "reading-theme");
+  if (theme == 0)  /* system */
+    theme = adw_style_manager_get_dark (adw_style_manager_get_default ())
+              ? 3 : 1;
+  switch (theme) {
+    case 2:  *fg = "#5b4636"; *bg = "#f4ecd8"; *link = "#8a5a2b"; break; /* sepia */
+    case 3:  *fg = "#c5c9c5"; *bg = "#181616"; *link = "#8ba4b0"; break; /* Kanagawa dark */
+    default: *fg = "#1a1a1a"; *bg = "#fdfdfb"; *link = "#1a5fb4"; break; /* light */
+  }
+}
+
+/* Push the current reading typography + theme onto the WebView. No-op
+ * unless an EPUB is showing through the WebView. fw_webview_set_reading_style
+ * queues until the load finishes, so this is safe to call right after
+ * load_html. */
+static void
+apply_reading_style (FwWindow *self)
+{
+  if (!self->reflow_via_webview || !self->webview)
+    return;
+
+  g_autofree char *family = g_settings_get_string (self->settings,
+                                                   "reading-font-family");
+  g_autofree char *mono   = g_settings_get_string (self->settings,
+                                                   "reading-monospace-family");
+  /* Empty family leaves the stylesheet's serif default (Crimson Pro). */
+  g_autofree char *body_css = (family && *family)
+    ? g_strdup_printf ("'%s', Georgia, serif", family) : NULL;
+  g_autofree char *mono_css = (mono && *mono)
+    ? g_strdup_printf ("'%s', monospace", mono) : NULL;
+
+  const char *fg, *bg, *link;
+  reading_theme_colors (self, &fg, &bg, &link);
+
+  FwReadingStyle style = {
+    .body_font    = body_css,
+    .mono_font    = mono_css,
+    .font_size_pt = g_settings_get_double (self->settings, "reading-font-size"),
+    .line_height  = g_settings_get_double (self->settings, "reading-line-height"),
+    .fg = fg, .bg = bg, .link = link,
+  };
+  fw_webview_set_reading_style (self->webview, &style);
+}
+
+static void
+on_reading_style_changed (GSettings *settings, const char *key,
+                          gpointer user_data)
+{
+  (void) settings; (void) key;
+  apply_reading_style (FW_WINDOW (user_data));
+}
+
+static void
+on_reading_dark_changed (GObject *style_manager, GParamSpec *pspec,
+                         gpointer user_data)
+{
+  (void) style_manager; (void) pspec;
+  FwWindow *self = FW_WINDOW (user_data);
+  /* Only the "system" theme tracks the libadwaita dark preference. */
+  if (g_settings_get_enum (self->settings, "reading-theme") == 0)
+    apply_reading_style (self);
+}
+
 static gboolean
 fw_window_open_reflow (FwWindow *self, const char *path)
 {
@@ -2371,6 +2535,7 @@ fw_window_open_reflow (FwWindow *self, const char *path)
     } else {
       fw_webview_load_html (self->webview, html, images);
       self->reflow_via_webview = TRUE;
+      apply_reading_style (self);   /* font + theme; queues until load */
       if (images)
         g_hash_table_unref (images);   /* fw_webview_load_html took a ref */
     }

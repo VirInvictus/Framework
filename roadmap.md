@@ -222,12 +222,13 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 *Native-engine typography refinements for the `FwReflowView` pipeline. Started, then superseded by the Phase 17 WebKit pivot, which gets most of this as CSS for free. Pillar 1 is preserved on a branch in case client-side hyphenation outside a browser engine is ever wanted again.*
 
 - [~] **Pillar 1 (en_US hyphenation).** Knuth-Liang trie over the vendored hyph-en-us patterns. Built, ASan-clean, verified on real EPUB block text, then parked on `parking/phase-16-hyphenation` (commit `88d2e72`). The WebView path hyphenates via CSS `hyphens: auto`.
-- Remaining pillars (OpenType features, themes, measure / column width) were not started. On the WebKit foundation they become `font-feature-settings`, CSS variables, and `max-width`, all handled by the engine.
+- Remaining pillars (OpenType features, themes, measure / column width) were not started on the native pipeline. On the WebKit foundation they become CSS the engine handles natively, and the reading-typography slice shipped there in v0.71.0 (see Phase 17 below).
 
 ## Phase 17: WebKit Reflow Renderer
 *Replace the `FwReflowView` block-model renderer with a `WebKitWebView`, keeping the foliate-js-derived parsers. Incremental cutover: EPUB first, then MOBI / AZW3, then FB2, then TXT. Once all four are on WebKit, `FwReflowView` and the renderer halves of each backend get deleted. Rationale and the full step plan are in the v0.68.0 patchnote.*
 
 - [x] **EPUB via WebKitGTK 6.0** (v0.68.0): `FwWebView` widget; `produce_html` on the EPUB backend (spine stitch + `framework-img://` scheme + reading CSS); per-format dispatch in `fw_window_open_reflow`; TOC / search / scroll routing; `webview_pos` reading-position persistence.
+- [x] **EPUB reading typography + themes** (v0.71.0): `EPUB_READING_CSS` exposes `:root` custom properties; `fw_webview_set_reading_style` pushes font family / size / line-height and theme colors live via JS. Serif default (Crimson Pro); Light / Sepia / Kanagawa-Dragon Dark / Follow-System themes (`reading-theme` enum, AdwStyleManager-driven for system); bundled-font picker + theme dropdown in Reading Settings; Ctrl+ / Ctrl- size shortcuts routed to the WebView. This is the Phase 16 typography work realized as CSS.
 - [ ] **MOBI / AZW3 `produce_html`** (Phase 17.2): the existing KF7/KF8 HTML reconstruction becomes the producer.
 - [ ] **FB2 `produce_html`** (Phase 17.3): the libxml2 walker pivots from emitting blocks to emitting HTML.
 - [ ] **TXT `produce_html`** (Phase 17.4): wrap in `<pre>` or paragraph-per-blank-line.

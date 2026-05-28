@@ -1333,11 +1333,22 @@ find_body (xmlNodePtr root)
  * before Phase 17.x adds theme variables / Reading Settings integration.
  * Width-clamped reading column, sane line-height, default serif body,
  * monospace for <pre>. */
+/* The :root custom properties are the typography/theme knobs. These
+ * defaults (serif body, light theme) render a sane book on first paint;
+ * the window overrides them live from GSettings via
+ * fw_webview_set_reading_style (font, size, line-height, theme colors). */
 static const char EPUB_READING_CSS[] =
-  "html { color-scheme: light dark; }"
-  "body { max-width: 38em; margin: 1.5em auto; padding: 0 1.5em; "
-         "font-family: 'Atkinson Hyperlegible', system-ui, serif; "
-         "line-height: 1.55; }"
+  ":root {"
+  "  --fg: #1a1a1a; --bg: #fdfdfb; --link: #1a5fb4;"
+  "  --body-font: 'Crimson Pro', Georgia, 'Times New Roman', serif;"
+  "  --mono-font: ui-monospace, monospace;"
+  "  --font-size: 13pt; --line-height: 1.55; --measure: 38em;"
+  "}"
+  "html { background: var(--bg); color: var(--fg); }"
+  "body { max-width: var(--measure); margin: 1.5em auto; padding: 0 1.5em;"
+  "       font-family: var(--body-font); font-size: var(--font-size);"
+  "       line-height: var(--line-height); }"
+  "a { color: var(--link); }"
   "section[data-spine] { margin: 0 0 2em 0; }"
   "section.cover { display: flex; align-items: center; justify-content: center;"
                   "min-height: 100vh; margin: 0; padding: 0; max-width: none; }"
@@ -1345,7 +1356,7 @@ static const char EPUB_READING_CSS[] =
                       "object-fit: contain; }"
   "h1, h2, h3 { line-height: 1.2; }"
   "img { max-width: 100%; height: auto; }"
-  "pre, code { font-family: ui-monospace, monospace; }"
+  "pre, code { font-family: var(--mono-font); }"
   "blockquote { border-left: 3px solid currentColor; "
               "padding-left: 1em; opacity: 0.85; "
               "margin: 1em 0 1em 1em; }";

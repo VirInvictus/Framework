@@ -2,6 +2,19 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.71.0 (2026-05-28)
+
+*EPUB reading typography: a serif default, font and color-theme controls, all applied live through WebKitGTK.*
+
+### EPUB typography and themes
+
+* **Serif by default.** EPUB body text now renders in Crimson Pro (a bundled OFL reading serif) instead of the previous sans default.
+* **Reading themes.** Reading Settings gains an Appearance group with a theme control: Light, Sepia, a Kanagawa Dragon-flavored Dark, and Follow System (which tracks the libadwaita light/dark preference). The theme sets the page background, text, and link colors.
+* **Font picker.** Reading Settings gains a dropdown over the three bundled OFL families (Crimson Pro, Atkinson Hyperlegible, OpenDyslexic); the free-text family field stays for any other installed font.
+* **Live updates.** Theme, font family, font size (including the Ctrl+ / Ctrl- shortcuts), and line-height all restyle the open EPUB instantly with no reopen: the window pushes the values onto the document's `:root` CSS custom properties through the WebView.
+
+This realizes most of the parked Phase 16 typography work as CSS the WebKit engine handles natively. The other reflow formats (MOBI / AZW3 / FB2 / TXT) still use the legacy view and are not themed yet.
+
 ## v0.70.0 (2026-05-28)
 
 *Comic pages with inconsistent embedded DPI now render at a uniform size, fixing the "every other page is a tiny thumbnail" look on some scanlated CBZs.*

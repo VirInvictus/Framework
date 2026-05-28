@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <schemalist gettext-domain="framework">
+
+  <enum id="io.github.virinvictus.framework.ReadingTheme">
+    <value nick="system" value="0"/>
+    <value nick="light"  value="1"/>
+    <value nick="sepia"  value="2"/>
+    <value nick="dark"   value="3"/>
+  </enum>
+
   <schema id="io.github.virinvictus.framework" path="/io/github/virinvictus/framework/">
 
     <key name="kinetic-scrolling" type="b">
@@ -143,6 +151,20 @@
         in reflow documents. Empty string falls back to the system
         monospace alias. Set to a locally-installed monospace family
         (Iosevka, JetBrains Mono, etc.) to override.
+      </description>
+    </key>
+
+    <key name="reading-theme" enum="io.github.virinvictus.framework.ReadingTheme">
+      <default>'system'</default>
+      <summary>Color theme for EPUB reading (WebKit reflow path)</summary>
+      <description>
+        Reading theme for EPUB documents rendered through WebKitGTK.
+        'system' follows the libadwaita light/dark preference; 'light'
+        is dark text on near-white; 'sepia' is warm paper; 'dark' is a
+        Kanagawa Dragon-flavored dark. Sets CSS background / foreground /
+        link colors; applied live without reopening the document.
+        Other reflow formats (MOBI / AZW3 / FB2 / TXT) on the legacy
+        view ignore this for now.
       </description>
     </key>
 

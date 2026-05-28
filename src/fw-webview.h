@@ -58,6 +58,22 @@ void       fw_webview_get_position       (FwWebView           *self,
 void       fw_webview_restore_position   (FwWebView    *self,
                                           const char   *json);
 
+/* Reading typography + theme, pushed live onto the document's `:root`
+ * CSS custom properties (no reload). Any string left NULL or size <= 0
+ * is left unchanged. Queued until the load finishes if it isn't ready. */
+typedef struct {
+  const char *body_font;    /* CSS font-family list */
+  const char *mono_font;    /* CSS font-family list for code */
+  double      font_size_pt; /* body font size in points */
+  double      line_height;  /* unitless multiplier */
+  const char *fg;           /* CSS foreground color */
+  const char *bg;           /* CSS background color */
+  const char *link;         /* CSS link color */
+} FwReadingStyle;
+
+void       fw_webview_set_reading_style  (FwWebView           *self,
+                                          const FwReadingStyle *style);
+
 /* Latest reading position as JSON `{"anchor":"...","scroll_y":N}`, kept
  * current by a debounced in-page scroll listener that posts back to a
  * script-message handler.  Borrowed; valid until the next load or
