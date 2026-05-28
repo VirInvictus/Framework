@@ -32,6 +32,11 @@ struct _FwView {
   double      *page_y_offsets;   /* cumulative y offset per page */
   double       total_height;
   double       max_width;
+  /* Median width (raw points, rotation-adjusted) of the "body" pages —
+   * every page except the cover (page 0) and spreads. fit-width keys
+   * off this so an anomalous cover or centerfold doesn't shrink the
+   * whole document. Recomputed in recompute_layout. */
+  double       typical_width;
 
   /* Pair-partner array, populated by recompute_layout when
    * facing-pages is on. pair_partner[i] == i means standalone (cover,
@@ -337,6 +342,14 @@ view_pair_first (FwView *self, int i)
   return (i < j) ? i : j;
 }
 
+static int
+cmp_double (const void *a, const void *b)
+{
+  double da = *(const double *) a;
+  double db = *(const double *) b;
+  return (da > db) - (da < db);
+}
+
 static void
 recompute_layout (FwView *self)
 {
@@ -355,6 +368,10 @@ recompute_layout (FwView *self)
   self->total_height = 0;
   self->max_width    = 0;
 
+  /* Raw (pre-zoom, rotation-adjusted) widths, kept for the typical-width
+   * median below. */
+  g_autofree double *raw_widths = g_new (double, self->page_count);
+
   /* Per-page intrinsic geometry first — y_offsets are computed in a
    * second pass so facing-pages can pair adjacent rows. */
   for (int i = 0; i < self->page_count; i++) {
@@ -367,6 +384,8 @@ recompute_layout (FwView *self)
       w = h;
       h = tmp;
     }
+
+    raw_widths[i] = w;
 
     /* Margin crop applies the same fractional trim to every page —
      * page_widths / page_heights become the *visible* size. The
@@ -385,6 +404,39 @@ recompute_layout (FwView *self)
 
     self->page_widths[i]  = w * self->zoom * crop_w_factor;
     self->page_heights[i] = h * self->zoom * crop_h_factor;
+  }
+
+  /* Typical body-page width — median of every page except the cover
+   * (page 0) and spreads. view_page_is_spread needs page_widths /
+   * page_heights, which the loop above just populated. fit-width keys
+   * off this so a large cover or a centerfold can't shrink the rest of
+   * the document. If filtering leaves nothing (single-page or
+   * all-spread doc), fall back to the median of all pages. */
+  {
+    g_autofree double *samples = g_new (double, self->page_count);
+    int n = 0;
+    for (int k = 0; k < self->page_count; k++)
+      if (k != 0 && !view_page_is_spread (self, k))
+        samples[n++] = raw_widths[k];
+    if (n == 0)
+      for (int k = 0; k < self->page_count; k++)
+        samples[n++] = raw_widths[k];
+    if (n > 0) {
+      qsort (samples, n, sizeof (double), cmp_double);
+      double median = samples[n / 2];
+      double maxw   = samples[n - 1];
+      /* If the body pages vary wildly the median isn't a trustworthy fit
+       * basis. This happens with comic images that carry inconsistent
+       * embedded DPI (MuPDF reports same-pixel pages at very different
+       * point sizes); keying fit-width off the median would then blow up
+       * the odd-DPI pages. Fall back to fitting page 0 (typical_width = 0
+       * routes to that in fw_view_fit_width_zoom). Real page-size
+       * variation among body pages is small once the cover and spreads
+       * are excluded, so this only trips on bad metadata. */
+      self->typical_width = (median > 0 && maxw / median > 2.0) ? 0 : median;
+    } else {
+      self->typical_width = 0;
+    }
   }
 
   /* Build pair_partner first (depends only on page sizes, not y), so
@@ -1396,33 +1448,29 @@ fw_view_fit_width_zoom (FwView *self, int viewport_w)
   if (viewport_w <= 0)
     viewport_w = 900;
 
-  /* Fit the *current* visible page rather than the widest page in the
-   * document. Picking the widest works fine for technical PDFs where
-   * every page is the same size, but on a comic CBZ with even one
-   * centerfold spread (~2x normal width) it makes every normal page
-   * render at ~35% — there's empty viewport on either side and the
-   * user has to manually zoom in. With current-page sizing, normal
-   * pages fill the viewport; landing on a wider page is then
-   * horizontally scrollable until the user hits Ctrl+1 again.
-   *
-   * page_y_offsets is built by recompute_layout; if it's not ready
-   * yet (initial open before allocation), fall back to page 0. */
-  int page = 0;
-  if (self->page_y_offsets && self->vadjustment) {
-    int current = fw_view_get_current_page (self);
-    if (current >= 0 && current < self->page_count)
-      page = current;
+  /* Fit the typical body page — the median width of every page except
+   * the cover and spreads (computed in recompute_layout). Fitting the
+   * widest page shrinks every normal page when a doc has one centerfold;
+   * fitting the *current* page (the old behaviour) mis-sizes the whole
+   * book whenever the page you land on — page 0 on open, i.e. the cover
+   * — is itself the anomaly. The median body page keeps normal pages
+   * filling the viewport; covers and spreads overflow and stay
+   * horizontally scrollable. Works the same for PDF / DjVu / comics. */
+  double basis = self->typical_width;
+  if (basis <= 0) {
+    /* recompute_layout hasn't run yet (open before allocation): fall
+     * back to page 0's raw width. */
+    double w, h;
+    fw_document_get_page_size (self->document, 0, &w, &h);
+    if (self->rotation == 90 || self->rotation == 270) {
+      double tmp = w; w = h; h = tmp;
+    }
+    basis = w;
   }
-
-  double w, h;
-  fw_document_get_page_size (self->document, page, &w, &h);
-  if (self->rotation == 90 || self->rotation == 270) {
-    double tmp = w; w = h; h = tmp;
-  }
-  if (w <= 0)
+  if (basis <= 0)
     return 1.0;
 
-  return (double) viewport_w / w;
+  return (double) viewport_w / basis;
 }
 
 double

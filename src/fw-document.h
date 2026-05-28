@@ -281,6 +281,11 @@ gboolean         fw_document_get_content_bbox    (FwDocument *self,
 gboolean         fw_document_is_spread_filename  (FwDocument *self,
                                                    int         page);
 
+/* Emit the interface "geometry-changed" signal. Backends call this
+ * (on the main thread) once their page sizes become more accurate
+ * than what they reported at open. */
+void             fw_document_emit_geometry_changed (FwDocument *self);
+
 /* ── Factory ──────────────────────────────────────────────────────── */
 
 FwDocument *fw_document_new_for_path (const char  *path,

@@ -122,7 +122,17 @@ quit_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
 {
   (void) action;
   (void) parameter;
-  g_application_quit (G_APPLICATION (user_data));
+  /* Close each window rather than calling g_application_quit directly:
+   * g_application_quit returns straight from the main loop without
+   * emitting close-request, so per-document state (reading position,
+   * zoom, rotation) never gets saved.  gtk_window_close fires
+   * close-request — where fw_window saves state — and once the last
+   * window is gone the application auto-quits (nothing holds it). */
+  GtkApplication *app = GTK_APPLICATION (user_data);
+  GList *windows = g_list_copy (gtk_application_get_windows (app));
+  for (GList *l = windows; l; l = l->next)
+    gtk_window_close (GTK_WINDOW (l->data));
+  g_list_free (windows);
 }
 
 static void

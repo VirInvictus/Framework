@@ -83,6 +83,11 @@ struct _FwWindow {
   int                   rotation;
   int                   current_page;
   gboolean              invert_colors;
+  /* TRUE while the zoom is tracking fit-width (set by the fit-width
+   * action / deferred apply, cleared by any explicit zoom). Lets a
+   * late page-geometry update — the CBR background probe — re-apply
+   * fit-width without clobbering a manual zoom. */
+  gboolean              fit_width_active;
   char                 *file_path;   /* absolute path of current document */
 
   /* Deferred restore */
@@ -160,6 +165,9 @@ set_zoom (FwWindow *self, double zoom)
   if (zoom > 10.0) zoom = 10.0;
   FW_TRACE_WINDOW ("set_zoom: %.2f", zoom);
   self->zoom = zoom;
+  /* Any explicit zoom drops fit-width tracking; the fit-width callers
+   * re-arm it right after they call set_zoom. */
+  self->fit_width_active = FALSE;
   update_zoom_entry (self);
 
   if (self->cache)
@@ -780,7 +788,7 @@ static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) {
     set_zoom (w, 1.0);
   }
 }
-static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); }
+static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); w->fit_width_active = TRUE; }
 static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
 static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
@@ -2089,6 +2097,7 @@ apply_fit_width_tick (GtkWidget *widget, GdkFrameClock *clock,
 
   double fit_zoom = fw_view_fit_width_zoom (self->view, vw);
   set_zoom (self, fit_zoom);
+  self->fit_width_active = TRUE;
 
   /* Remove ourselves — return FALSE stops the tick callback */
   (void) widget;
@@ -2436,6 +2445,29 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   return TRUE;
 }
 
+/* A backend refined its page geometry after open (the CBR probe).
+ * Relayout so the view adopts the corrected sizes, then re-apply
+ * fit-width if we were tracking it — so an anomalous cover/spread no
+ * longer determines the zoom for the whole book. */
+static void
+on_doc_geometry_changed (FwDocument *doc, gpointer user_data)
+{
+  (void) doc;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->view)
+    return;
+
+  fw_view_set_zoom (self->view, self->zoom);  /* forces recompute_layout */
+
+  if (self->fit_width_active && self->scroll) {
+    int vw = gtk_widget_get_width (GTK_WIDGET (self->scroll));
+    if (vw > 0) {
+      set_zoom (self, fw_view_fit_width_zoom (self->view, vw));
+      self->fit_width_active = TRUE;  /* set_zoom cleared it */
+    }
+  }
+}
+
 void
 fw_window_open_file (FwWindow *self, const char *path)
 {
@@ -2532,6 +2564,12 @@ fw_window_open_file (FwWindow *self, const char *path)
   fw_cache_set_scale_factor (self->cache,
     gtk_widget_get_scale_factor (GTK_WIDGET (self)));
   fw_view_set_document (self->view, self->document, self->cache);
+
+  /* Some backends (CBR) refine their page sizes after open via a
+   * background probe. Relayout and re-fit when that lands. Connected on
+   * the document, which is freed on close, so the handler dies with it. */
+  g_signal_connect (self->document, "geometry-changed",
+                    G_CALLBACK (on_doc_geometry_changed), self);
 
   /* Hand the new document to search; clear any prior query. */
   fw_search_set_document (self->search, self->document);

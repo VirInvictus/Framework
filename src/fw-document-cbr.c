@@ -78,6 +78,14 @@ struct _FwDocumentCbr {
    * couldn't agree on a prefix and the filename signal is disabled. */
   char         *common_prefix;
   int           max_spread_digits;
+
+  /* Background dimension probe (v0.69). At open every page defaults to
+   * the cover's size (see cbr_open); a one-shot worker decompresses the
+   * archive once to learn real per-page dimensions, then posts them back
+   * and emits "geometry-changed" so fit-width can normalize off the
+   * typical body page instead of an oversized cover or spread. Guarded
+   * so it runs at most once per document. */
+  gboolean      dims_probed;
 };
 
 static void fw_document_cbr_iface_init (FwDocumentInterface *iface);
@@ -384,6 +392,164 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 
 /* ── FwDocumentInterface implementation ───────────────────────────── */
 
+/* ── Background dimension probe ───────────────────────────────────── */
+
+typedef struct {
+  int     n;
+  double *widths;
+  double *heights;
+} CbrDims;
+
+static void
+cbr_dims_free (CbrDims *d)
+{
+  if (!d)
+    return;
+  g_free (d->widths);
+  g_free (d->heights);
+  g_free (d);
+}
+
+/* Worker thread: one sequential pass over the archive, reading each
+ * image's real dimensions via a MuPDF header decode. The reader is
+ * independent (the file is read-only), so this runs alongside render
+ * workers; ctx access is serialized on ctx_lock. Archive order need not
+ * match page (filename-sorted) order, so dims are placed by name lookup.
+ * Bails out on cancel_flag. */
+static void
+cbr_probe_dims_thread (GTask        *task,
+                       gpointer      source,
+                       gpointer      task_data,
+                       GCancellable *cancellable)
+{
+  (void) task_data; (void) cancellable;
+  FwDocumentCbr *self = source;
+
+  CbrDims *d = g_new0 (CbrDims, 1);
+  d->n       = self->page_count;
+  d->widths  = g_new (double, self->page_count);
+  d->heights = g_new (double, self->page_count);
+  /* Seed with the open-time defaults so any entry we can't read keeps a
+   * sane size. */
+  for (int i = 0; i < self->page_count; i++) {
+    d->widths[i]  = self->page_widths[i];
+    d->heights[i] = self->page_heights[i];
+  }
+
+  /* name → page index, so an archive-order walk lands dims on the right
+   * (sorted) page. */
+  GHashTable *name_to_page = g_hash_table_new (g_str_hash, g_str_equal);
+  for (int i = 0; i < self->page_count; i++)
+    g_hash_table_insert (name_to_page, self->entries[i].name,
+                         GINT_TO_POINTER (i + 1));
+
+  struct archive *a = cbr_open_reader (self);
+  if (a) {
+    struct archive_entry *entry;
+    while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
+      if (g_atomic_int_get (&self->cancel_flag))
+        break;
+      const char *name = archive_entry_pathname (entry);
+      gpointer slot = name ? g_hash_table_lookup (name_to_page, name) : NULL;
+      if (!slot) {
+        archive_read_data_skip (a);
+        continue;
+      }
+      int page = GPOINTER_TO_INT (slot) - 1;
+      gint64 sz = archive_entry_size (entry);
+      if (sz <= 0 || sz > 256 * 1024 * 1024) {
+        archive_read_data_skip (a);
+        continue;
+      }
+      guint8 *bytes = g_malloc ((size_t) sz);
+      size_t total = 0;
+      gboolean ok = TRUE;
+      while (total < (size_t) sz) {
+        la_ssize_t got = archive_read_data (a, bytes + total,
+                                            (size_t) sz - total);
+        if (got <= 0) { ok = FALSE; break; }
+        total += (size_t) got;
+      }
+      if (ok) {
+        g_mutex_lock (&self->ctx_lock);
+        fz_buffer *buf = NULL;
+        fz_image  *img = NULL;
+        fz_try (self->ctx) {
+          buf = fz_new_buffer_from_copied_data (self->ctx, bytes, (size_t) sz);
+          img = fz_new_image_from_buffer (self->ctx, buf);
+          if (img->w > 0 && img->h > 0) {
+            d->widths[page]  = (double) img->w;
+            d->heights[page] = (double) img->h;
+          }
+        }
+        fz_always (self->ctx) {
+          if (img) fz_drop_image  (self->ctx, img);
+          if (buf) fz_drop_buffer (self->ctx, buf);
+        }
+        fz_catch (self->ctx) {
+          /* keep the seeded default for this page */
+        }
+        g_mutex_unlock (&self->ctx_lock);
+      }
+      g_free (bytes);
+    }
+    archive_read_free (a);
+  }
+
+  g_hash_table_destroy (name_to_page);
+  g_task_return_pointer (task, d, (GDestroyNotify) cbr_dims_free);
+}
+
+/* Main thread: install the probed dimensions and, if any page changed
+ * from its open-time default, tell the view to relayout + re-fit. The
+ * write mirrors the render path's page_widths update, so it takes
+ * ctx_lock to serialize against in-flight render writes. */
+static void
+cbr_probe_dims_done (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+  (void) user_data;
+  FwDocumentCbr *self = FW_DOCUMENT_CBR (source);
+  CbrDims *d = g_task_propagate_pointer (G_TASK (res), NULL);
+  if (!d)
+    return;
+
+  gboolean cancelled = g_atomic_int_get (&self->cancel_flag);
+  if (!cancelled && d->n == self->page_count) {
+    g_mutex_lock (&self->ctx_lock);
+    for (int i = 0; i < self->page_count; i++) {
+      self->page_widths[i]  = d->widths[i];
+      self->page_heights[i] = d->heights[i];
+    }
+    g_mutex_unlock (&self->ctx_lock);
+  }
+  cbr_dims_free (d);
+
+  /* Always signal, not just when these differ from the open-time
+   * defaults: the render path also writes page sizes from worker
+   * threads, so by now self->page_widths may already match — but the
+   * *view's* layout still holds the defaults and only refreshes on this
+   * signal. The relayout is a no-op (invisible) when sizes match and
+   * corrects the typical-page fit when they don't. */
+  if (!cancelled) {
+    FW_TRACE_DOC ("cbr probe done: page sizes finalized → geometry-changed");
+    fw_document_emit_geometry_changed (FW_DOCUMENT (self));
+  }
+}
+
+static void
+cbr_start_dims_probe (FwDocumentCbr *self)
+{
+  if (self->dims_probed || self->page_count <= 1)
+    return;
+  self->dims_probed = TRUE;
+  /* GTask refs `self` for the task's lifetime, so dispose (and the
+   * cbr_close that frees entries / path) can't run until the probe
+   * completes — the worker's reads of those fields stay valid. */
+  GTask *task = g_task_new (self, NULL, cbr_probe_dims_done, NULL);
+  g_task_run_in_thread (task, cbr_probe_dims_thread);
+  g_object_unref (task);
+}
+
 static gboolean
 cbr_open (FwDocument *doc, const char *path, GError **error)
 {
@@ -498,6 +664,12 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
 
   FW_TRACE_DOC ("cbr open: '%s' %d pages, default size %.0fx%.0f",
                 path, self->page_count, default_w, default_h);
+
+  /* Learn real per-page dimensions in the background so fit-width can
+   * normalize off the typical page (the open-time default above assumes
+   * every page matches the cover). */
+  cbr_start_dims_probe (self);
+
   return TRUE;
 }
 
@@ -505,6 +677,13 @@ static void
 cbr_close (FwDocument *doc)
 {
   FwDocumentCbr *self = FW_DOCUMENT_CBR (doc);
+
+  /* Stop any in-flight background dimension probe before tearing down
+   * the entries / path it reads. The GTask holds a ref on self, so
+   * dispose (hence this close) can't actually run mid-probe — but on a
+   * scrubbing-triggered close the flag lets the worker bail early
+   * instead of finishing a pointless full decompress. */
+  g_atomic_int_set (&self->cancel_flag, 1);
 
   /* Drop the per-page bytes cache before any of the surrounding state.
    * GBytes destroy via the hash's GDestroyNotify. */

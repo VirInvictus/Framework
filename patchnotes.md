@@ -2,6 +2,20 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.69.0 (2026-05-28)
+
+*Fit-width now normalizes off the typical page, so an oversized cover or a centerfold spread no longer shrinks every normal page. Plus two fixes: Ctrl+Q now saves reading state, and a stale GTK CSS warning is gone.*
+
+### Fit-width page-size normalization
+
+* **Fit-width keys off the median body page, not the current or widest page.** Fixed-layout documents (PDF, DjVu, comics, XPS) often carry an anomalous page or two: a wraparound cover wider than the body, or a centerfold spread at double width. Fit-width previously sized to whatever page you were on, so on open it sized to page 0 (the cover); if that was the anomaly, every normal page rendered too small with empty margins on either side. Fit-width now computes the median width of the body pages (excluding the cover and any spread, detected by aspect ratio or the CBR filename signal) and fits that, so the bulk of the document fills the viewport. Covers and spreads overflow and stay horizontally scrollable, as before. Backend-agnostic; uniform-size documents (technical PDFs) are unaffected. A variance guard falls back to fitting page 0 when body-page sizes vary too wildly to trust (some scanlation CBZs carry inconsistent embedded DPI, which makes MuPDF report same-pixel pages at very different sizes).
+* **CBR learns real page sizes in the background.** The CBR (RAR) backend defaults every page to the cover's dimensions at open (RAR is a sequential stream, so probing each page up front would be quadratic). A one-shot background pass now decompresses the archive once to read true per-page dimensions, then signals the view to relayout and re-apply fit-width if it is still active. A CBR opens instantly at a first approximation, then snaps to the correct typical-page fit a beat later. No added open latency; the probe cancels if the document closes first.
+
+### Fixes
+
+* **Ctrl+Q / Ctrl+W now saves per-document state.** The quit action called `g_application_quit` directly, which bypasses the window close handler, so reading position, zoom, and rotation were lost on quit (every format, not just reflow). Quit now closes the open windows, running the same save path as clicking the window close button.
+* **Removed an invalid CSS rule in the reflow view.** The horizontal-rule styling used percentage margins, which GTK CSS rejects ("Percentages are not allowed here" fired on every reflow-document open). The rule is now a fixed-width centered divider: the warning is gone and the rule renders as intended.
+
 ## v0.68.0 (2026-05-28)
 
 *Phase 17 opens: EPUB now renders through WebKitGTK 6.0 instead of the native `FwReflowView` block-model pipeline. The foliate-js-derived parsers stay; only the renderer changed. This is the first step of an incremental cutover (EPUB first; MOBI / AZW3 / FB2 / TXT follow). Phase 16's typography pillars are parked on a branch, because most of that work becomes CSS the engine handles natively.*

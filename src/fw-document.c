@@ -105,10 +105,31 @@ fw_attachment_free_indirect (gpointer data)
 
 G_DEFINE_INTERFACE (FwDocument, fw_document, G_TYPE_OBJECT)
 
+static guint signals[1];  /* GEOMETRY_CHANGED */
+
 static void
 fw_document_default_init (FwDocumentInterface *iface)
 {
   (void) iface;
+
+  /* Emitted when a backend refines its page geometry after open — e.g.
+   * the CBR backend, which defaults every page to the cover's size at
+   * open and only learns real per-page dimensions from a background
+   * probe. Consumers (the view / window) relayout and re-apply
+   * fit-width. Backends with accurate sizes at open (PDF/DjVu/MuPDF)
+   * never emit it. */
+  signals[0] = g_signal_new ("geometry-changed",
+                             FW_TYPE_DOCUMENT,
+                             G_SIGNAL_RUN_LAST,
+                             0, NULL, NULL, NULL,
+                             G_TYPE_NONE, 0);
+}
+
+void
+fw_document_emit_geometry_changed (FwDocument *self)
+{
+  g_return_if_fail (FW_IS_DOCUMENT (self));
+  g_signal_emit (self, signals[0], 0);
 }
 
 /* ── Public API — delegates to vtable ─────────────────────────────── */
@@ -324,10 +345,12 @@ fw_document_new_for_path (const char *path, GError **error)
   FwDocument *doc = NULL;
   const char *backend_label;
 
-  /* MuPDF dispatches PDF, CBZ/CBR/CB7/CBT, EPUB, FB2, MOBI, XPS via
+  /* MuPDF dispatches PDF, CBZ/CB7/CBT, EPUB, FB2, MOBI, XPS via
    * fz_register_document_handlers + fz_open_document. The PDF backend's
    * open() path is format-agnostic — anything MuPDF recognizes opens here.
-   * DjVu remains separate because DjVuLibre is its own library. */
+   * MuPDF gives ZIP/7z/tar comics fast random page access; only RAR
+   * (no central directory) needs the sequential libarchive backend. DjVu
+   * remains separate because DjVuLibre is its own library. */
   if (g_ascii_strcasecmp (dot, ".pdf") == 0) {
     doc = FW_DOCUMENT (fw_document_pdf_new ());
     backend_label = "PDF (MuPDF)";

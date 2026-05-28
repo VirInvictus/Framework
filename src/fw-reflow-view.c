@@ -400,9 +400,12 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
     gtk_widget_remove_css_class (text_w, buf);
   }
 
-  /* Default per-bind alignment. Headings/code override below. */
+  /* Default per-bind alignment. Headings/code override below. The
+   * widget is recycled, so reset halign too — only the HR case centers
+   * the (fixed-width) label; every other block fills the column. */
   gtk_label_set_justify (label, GTK_JUSTIFY_FILL);
   gtk_label_set_xalign (label, 0.0);
+  gtk_widget_set_halign (text_w, GTK_ALIGN_FILL);
 
   /* Search highlight: splice match spans into the body; the per-kind
    * prefix / indent / dropcap decorations below wrap the result. `hl`
@@ -453,6 +456,7 @@ on_factory_bind (GtkSignalListItemFactory *factory G_GNUC_UNUSED,
        * matching foliate's `<hr>` styling. Centered with side
        * margins so it doesn't reach edge-to-edge. */
       gtk_widget_add_css_class (text_w, "reflow-hr");
+      gtk_widget_set_halign (text_w, GTK_ALIGN_CENTER);
       gtk_label_set_use_markup (label, FALSE);
       gtk_label_set_text (label, "");
       break;
@@ -585,16 +589,17 @@ static const char REFLOW_STATIC_CSS[] =
   "    margin-top: 8px;"
   "    margin-bottom: 8px;"
   "}"
-  /* Horizontal rule: empty label with a centered thin line. Side
-   * margins make it shorter than the column; vertical margins give
-   * breathing room from neighbouring blocks. */
+  /* Horizontal rule: empty label with a centered thin line. The label
+   * is given halign=center at bind time (GTK CSS has no percentage
+   * margins), so min-width here fixes the rule's length and it sits
+   * centered in the reading column. Vertical margins give breathing
+   * room from neighbouring blocks. */
   ".reflow-hr {"
   "    min-height: 1px;"
+  "    min-width: 220px;"
   "    border-bottom: 1px solid alpha(currentColor, 0.25);"
   "    margin-top: 1.0em;"
   "    margin-bottom: 1.0em;"
-  "    margin-left: 30%;"
-  "    margin-right: 30%;"
   "}"
   /* Figure caption: smaller italic, centered, slightly muted —
    * print-typography idiom for figcaption text under an image. */
