@@ -22,6 +22,7 @@
  */
 
 #include "fw-reflow-document-fb2.h"
+#include "fw-reflow-html.h"
 
 #include <string.h>
 #include <archive.h>
@@ -35,7 +36,12 @@ struct _FwReflowDocumentFb2 {
   GListStore   *toc;        /* GListStore<FwReflowTocItem> */
   GHashTable   *metadata;   /* gchar* → gchar* */
   GHashTable   *images;     /* gchar* (id) → GdkTexture* (owned) */
+  /* Same keys as `images`, raw decoded bytes for the WebView path. */
+  GHashTable   *image_bytes;/* gchar* (id) → GBytes* (owned) */
   GHashTable   *anchors;    /* gchar* (anchor_id) → guint position+1 */
+  /* Parsed FB2 tree, retained for produce_html (the WebView path
+   * transforms FB2 XML to HTML); freed in finalize. */
+  xmlDocPtr     xdoc;
   char         *path;
 };
 
@@ -582,12 +588,16 @@ fb2_walk_binaries (Fb2WalkCtx *cc, xmlNode *root)
     if (!bytes || out_len == 0) continue;
 
     g_autoptr (GBytes) gb = g_bytes_new (bytes, out_len);
+    /* Keep the raw bytes for the WebView path regardless of texture
+     * decode (WebKit has its own decoders). */
+    g_hash_table_insert (cc->doc->image_bytes, g_strdup (id),
+                         g_bytes_ref (gb));
     g_autoptr (GError) e = NULL;
     GdkTexture *tex = gdk_texture_new_from_bytes (gb, &e);
     if (tex)
       g_hash_table_insert (cc->doc->images, g_strdup (id), tex);
     else
-      g_warning ("fb2: dropping image '%s': %s",
+      g_warning ("fb2: dropping image texture '%s': %s",
                  id, e ? e->message : "(unknown)");
   }
 }
@@ -713,7 +723,8 @@ fb2_open (FwReflowDocument *doc, const char *path, GError **error)
   if (cc.author_middle) g_string_free (cc.author_middle, TRUE);
   if (cc.author_last)   g_string_free (cc.author_last, TRUE);
   g_ptr_array_free (cc.open_inlines, TRUE);
-  xmlFreeDoc (xdoc);
+  /* Retain the parsed tree for produce_html (WebView path). */
+  self->xdoc = xdoc;
 
   /* Round out metadata. */
   if (!g_hash_table_contains (self->metadata, "title")) {
@@ -773,6 +784,198 @@ fb2_get_metadata (FwReflowDocument *doc)
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
+/* ── produce_html: transform the FB2 tree to HTML for the WebView ── */
+
+typedef struct {
+  const char *doc_id;
+  GHashTable *image_bytes;
+} Fb2HtmlCtx;
+
+/* FB2 inline element → HTML tag, or NULL to pass children through
+ * (style / span / a and friends carry no styling we honour here). */
+static const char *
+fb2_html_inline_tag (const char *l)
+{
+  if (g_str_equal (l, "emphasis"))      return "em";
+  if (g_str_equal (l, "strong"))        return "strong";
+  if (g_str_equal (l, "code"))          return "code";
+  if (g_str_equal (l, "sub"))           return "sub";
+  if (g_str_equal (l, "sup"))           return "sup";
+  if (g_str_equal (l, "strikethrough")) return "s";
+  return NULL;
+}
+
+static const char *
+fb2_attr_id (xmlNode *n)
+{
+  for (xmlAttr *a = n->properties; a; a = a->next)
+    if (g_ascii_strcasecmp ((const char *) a->name, "id") == 0 && a->children)
+      return (const char *) a->children->content;
+  return NULL;
+}
+
+static void fb2_emit_node     (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth);
+static void fb2_emit_children (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth);
+
+static void
+fb2_emit_escaped (GString *out, const char *s)
+{
+  g_autofree char *e = g_markup_escape_text (s, -1);
+  g_string_append (out, e);
+}
+
+/* <title>/<subtitle> wrap <p> lines; render them inline, joined by <br>,
+ * so the heading is one <hN> rather than nested paragraphs. */
+static void
+fb2_emit_heading_inner (GString *out, xmlNode *n, Fb2HtmlCtx *ctx)
+{
+  gboolean first = TRUE;
+  for (xmlNode *c = n->children; c; c = c->next) {
+    if (c->type == XML_TEXT_NODE && c->content) {
+      fb2_emit_escaped (out, (const char *) c->content);
+    } else if (c->type == XML_ELEMENT_NODE) {
+      g_autofree char *l = g_ascii_strdown ((const char *) c->name, -1);
+      if (g_str_equal (l, "p")) {
+        if (!first) g_string_append (out, "<br>");
+        fb2_emit_children (out, c, ctx, 0);
+        first = FALSE;
+      } else if (g_str_equal (l, "empty-line")) {
+        g_string_append (out, "<br>");
+      } else {
+        fb2_emit_node (out, c, ctx, 0);
+      }
+    }
+  }
+}
+
+static void
+fb2_emit_node (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth)
+{
+  if (n->type == XML_TEXT_NODE) {
+    if (n->content) fb2_emit_escaped (out, (const char *) n->content);
+    return;
+  }
+  if (n->type != XML_ELEMENT_NODE) return;
+  g_autofree char *l = g_ascii_strdown ((const char *) n->name, -1);
+
+  if (g_str_equal (l, "section")) {
+    const char *id = fb2_attr_id (n);
+    g_string_append (out, "<section");
+    if (id && *id) {
+      g_autofree char *e = g_markup_escape_text (id, -1);
+      g_string_append_printf (out, " id=\"%s\"", e);
+    }
+    g_string_append_c (out, '>');
+    fb2_emit_children (out, n, ctx, depth + 1);
+    g_string_append (out, "</section>");
+    return;
+  }
+  if (g_str_equal (l, "title") || g_str_equal (l, "subtitle")) {
+    int lvl = CLAMP (g_str_equal (l, "subtitle") ? depth + 1 : depth, 1, 6);
+    g_string_append_printf (out, "<h%d>", lvl);
+    fb2_emit_heading_inner (out, n, ctx);
+    g_string_append_printf (out, "</h%d>", lvl);
+    return;
+  }
+  if (g_str_equal (l, "p") || g_str_equal (l, "text-author")) {
+    g_string_append (out, "<p>");
+    fb2_emit_children (out, n, ctx, depth);
+    g_string_append (out, "</p>");
+    return;
+  }
+  if (g_str_equal (l, "empty-line")) { g_string_append (out, "<hr>"); return; }
+  if (g_str_equal (l, "v")) {
+    fb2_emit_children (out, n, ctx, depth);
+    g_string_append (out, "<br>");
+    return;
+  }
+  if (g_str_equal (l, "epigraph") || g_str_equal (l, "cite") ||
+      g_str_equal (l, "poem") || g_str_equal (l, "annotation")) {
+    g_string_append (out, "<blockquote>");
+    fb2_emit_children (out, n, ctx, depth);
+    g_string_append (out, "</blockquote>");
+    return;
+  }
+  if (g_str_equal (l, "stanza")) {           /* inside a poem blockquote */
+    fb2_emit_children (out, n, ctx, depth);
+    return;
+  }
+  if (g_str_equal (l, "image")) {
+    const char *href = fb2_get_href (n);
+    const char *id = href ? (href[0] == '#' ? href + 1 : href) : NULL;
+    if (id && ctx->image_bytes && g_hash_table_contains (ctx->image_bytes, id)) {
+      g_autofree char *e = g_markup_escape_text (id, -1);
+      g_string_append_printf (out, "<img src=\"framework-img://%s/%s\">",
+                              ctx->doc_id, e);
+    }
+    return;
+  }
+
+  const char *itag = fb2_html_inline_tag (l);
+  if (itag) {
+    g_string_append_printf (out, "<%s>", itag);
+    fb2_emit_children (out, n, ctx, depth);
+    g_string_append_printf (out, "</%s>", itag);
+    return;
+  }
+  /* Unknown / passthrough (style, span, a, ...): keep the text. */
+  fb2_emit_children (out, n, ctx, depth);
+}
+
+static void
+fb2_emit_children (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth)
+{
+  for (xmlNode *c = n->children; c; c = c->next)
+    fb2_emit_node (out, c, ctx, depth);
+}
+
+static gboolean
+fb2_produce_html (FwReflowDocument *doc, const char *doc_id,
+                  char **out_html, GHashTable **out_images, GError **error)
+{
+  FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
+  xmlNode *root = self->xdoc ? xmlDocGetRootElement (self->xdoc) : NULL;
+  if (!root) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "fb2: no parsed tree");
+    return FALSE;
+  }
+
+  const char *title = g_hash_table_lookup (self->metadata, "title");
+  const char *lang  = g_hash_table_lookup (self->metadata, "lang");
+
+  GString *out = g_string_new ("<!DOCTYPE html>\n<html");
+  if (lang && *lang) {
+    g_autofree char *e = g_markup_escape_text (lang, -1);
+    g_string_append_printf (out, " lang=\"%s\"", e);
+  }
+  g_string_append (out, "><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *e = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", e);
+  }
+  g_string_append (out, "<style>");
+  g_string_append (out, fw_reflow_reading_css ());
+  g_string_append (out, "</style></head><body>");
+
+  Fb2HtmlCtx ctx = { .doc_id = doc_id, .image_bytes = self->image_bytes };
+  /* FB2 may carry several <body> elements (main text + footnote bodies);
+   * emit each as its own spine section. */
+  for (xmlNode *n = root->children; n; n = n->next) {
+    if (n->type == XML_ELEMENT_NODE &&
+        g_ascii_strcasecmp ((const char *) n->name, "body") == 0) {
+      g_string_append (out, "<section data-spine=\"0\">");
+      fb2_emit_children (out, n, &ctx, 0);
+      g_string_append (out, "</section>");
+    }
+  }
+  g_string_append (out, "</body></html>");
+
+  if (out_images)
+    *out_images = self->image_bytes ? g_hash_table_ref (self->image_bytes) : NULL;
+  *out_html = g_string_free (out, FALSE);
+  return TRUE;
+}
+
 static void
 fw_reflow_document_fb2_iface_init (FwReflowDocumentInterface *iface)
 {
@@ -783,6 +986,7 @@ fw_reflow_document_fb2_iface_init (FwReflowDocumentInterface *iface)
   iface->get_toc               = fb2_get_toc;
   iface->find_block_by_anchor  = fb2_find_block_by_anchor;
   iface->get_metadata          = fb2_get_metadata;
+  iface->produce_html          = fb2_produce_html;
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────── */
@@ -795,7 +999,9 @@ fw_reflow_document_fb2_finalize (GObject *object)
   g_clear_object (&self->toc);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
   g_clear_pointer (&self->images,   g_hash_table_unref);
+  g_clear_pointer (&self->image_bytes, g_hash_table_unref);
   g_clear_pointer (&self->anchors,  g_hash_table_unref);
+  g_clear_pointer (&self->xdoc,     xmlFreeDoc);
   g_clear_pointer (&self->path,     g_free);
   G_OBJECT_CLASS (fw_reflow_document_fb2_parent_class)->finalize (object);
 }
@@ -815,6 +1021,8 @@ fw_reflow_document_fb2_init (FwReflowDocumentFb2 *self)
                                           g_free, g_free);
   self->images   = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free, g_object_unref);
+  self->image_bytes = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                             g_free, (GDestroyNotify) g_bytes_unref);
   self->anchors  = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free, NULL);
 }

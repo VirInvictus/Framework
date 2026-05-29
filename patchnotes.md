@@ -2,6 +2,17 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.73.0 (2026-05-28)
+
+*FB2 (FictionBook) now renders through WebKitGTK too. Phase 17.3.*
+
+### FB2 on WebKit
+
+* **FB2 renders via WebKitGTK**, joining EPUB and MOBI/AZW3 on the WebView path and inheriting the serif default, the reading themes, live typography, and reading-position persistence. FB2 is FictionBook XML rather than HTML, so the backend transforms its parsed tree to HTML: sections (carrying their ids as scroll anchors), titles and subtitles to headings by depth, paragraphs, emphasis / strong / code / sub / sup, poems and verses to blockquotes with line breaks, citations and epigraphs to blockquotes, empty-lines to rules, and `<image>` to the `framework-img:` scheme. The base64 `<binary>` images are retained as raw bytes for the WebView's image scheme.
+* The shared `fw-reflow-html` reading stylesheet is reused, so FB2 looks consistent with the other reflow formats.
+
+Only TXT remains on the legacy `FwReflowView`; once it migrates (Phase 17.4), the block-model view and the renderer halves of every backend can be removed (17.5).
+
 ## v0.72.0 (2026-05-28)
 
 *MOBI and AZW3 now render through WebKitGTK, inheriting the EPUB reading typography and themes. Phase 17.2.*

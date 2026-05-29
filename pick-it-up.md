@@ -1,7 +1,7 @@
-<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.72.0.
+<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.73.0.
      Delete or refresh when the next chunk lands. -->
 
-# Framework: Pick-It-Up Notes (after v0.72.0)
+# Framework: Pick-It-Up Notes (after v0.73.0)
 
 Resume point for the EPUB / reflow / comic work. Everything below is on
 `main` and pushed unless stated otherwise.
@@ -10,7 +10,7 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 ## 1. Where things stand
 
-- **Branch / version:** `main`, clean working tree, at **v0.72.0**,
+- **Branch / version:** `main`, clean working tree, at **v0.73.0**,
   pushed to `origin/main`.
 - **Parked branch:** `parking/phase-16-hyphenation` (`88d2e72`) still
   exists. en_US Knuth-Liang hyphenation for the *native* reflow path,
@@ -32,6 +32,11 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
     bytes; img refs resolved for KF7 zero-padded `recindex` + KF8 base-32
     `kindle:embed:`; synthetic cover for EXTH-only covers. MOBI/AZW3
     inherit the v0.71 typography + themes.
+  - **v0.73.0** FB2 renders via WebKit (Phase 17.3): `fb2_produce_html`
+    transforms FB2 XML to HTML (sections with id anchors, titles to
+    headings by depth, inline emphasis/strong/etc., poems/citations to
+    blockquotes, `<image>` to `framework-img:`); retains the xmlDoc + raw
+    `<binary>` bytes; reuses the shared reading CSS.
 
 ---
 
@@ -103,19 +108,23 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 Priority-ish order; all are Phase 17.x in `roadmap.md`.
 
-1. **FB2 -> `produce_html`** (17.3). The next format to migrate. The
-   libxml2 FB2 walker (`fw-reflow-document-fb2.c`) currently emits the
-   block model; give it a `produce_html` that emits stitched HTML +
-   image table (FB2 images are base64 `<binary>` elements referenced by
-   `l:href="#id"`). Mirror `mobi_produce_html` / `epub_produce_html` and
-   reuse the shared `fw-reflow-html` module + its img-resolver callback.
-   Then **TXT -> `produce_html`** (17.4): trivial wrap in `<pre>` or
-   paragraph-per-blank-line.
-   (DONE v0.72.0: **MOBI / AZW3 -> `produce_html`**, Phase 17.2; see
-   `mobi_produce_html` and the shared `fw-reflow-html` module.)
-3. **Delete `FwReflowView`** (17.5) once all four reflow formats are on
-   WebKit. Drops `get_block_model` / `get_image` / block-model search and
-   the renderer halves of each backend. Big cleanup.
+1. **TXT -> `produce_html`** (17.4). The last format on the legacy view.
+   `fw-reflow-document-txt.c` currently emits the block model; give it a
+   `produce_html` that wraps the text (paragraph-per-blank-line, or
+   `<pre>` for code-ish text) with the shared reading CSS. Smallest of
+   the four; no images. Then ALL reflow formats are on WebKit.
+   (DONE: **MOBI/AZW3** v0.72.0 / Phase 17.2; **FB2** v0.73.0 / Phase
+   17.3. See `mobi_produce_html`, `fb2_produce_html`, and the shared
+   `fw-reflow-html` module.)
+2. **Delete `FwReflowView`** (17.5) once TXT lands and all four reflow
+   formats are on WebKit. Drops `get_block_model` / `get_image` /
+   block-model search and the renderer halves of each backend, plus
+   `FwReflowView` / `FwReflowSidebar` and the `fw-reflow-view.c`
+   typography/pagination code. Big cleanup; verify nothing else uses the
+   block model first.
+   NOTE: there is no FB2 file in the corpus; v0.73.0 was verified on a
+   hand-built `/tmp/test.fb2` (HTML-transform inspection) + the proven
+   WebView path. Real-world FB2 wants a real file when one turns up.
 4. **Security tightening** (17.x): restore the Landlock EXECUTE drop
    behind a path-beneath allow for `/usr/libexec/webkitgtk-6.0/*`; scrub
    inline event-handler attributes (`onclick=` etc.) during HTML emit;
