@@ -186,7 +186,7 @@ One document per window. Multiple files open multiple windows.
 
 Framework is a study in standing on shoulders. Every concrete pattern below names the upstream project, the file:line we studied, the Framework version it shipped in, and the source file where the borrow lives — full chain of attribution so anyone can audit the lineage. Per-technique attribution lives here; per-source-file SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
-The four projects in the opening "what this is" line — **SumatraPDF**, **zathura-pdf-mupdf** / **Zathura**, **YACReader**, and **Foliate** (with its parser library **foliate-js**) — are the explicit foundations: I picked the parts I liked most and glued them into one viewer. **Sioyek**, **Plato**, **MComix**, and **Komikku** contributed targeted patterns or design references on top of that.
+The four projects in the opening "what this is" line — **SumatraPDF**, **zathura-pdf-mupdf** / **Zathura**, **YACReader**, and **Foliate** (with its parser library **foliate-js**) — are the explicit foundations: I picked the parts I liked most and glued them into one viewer. **Sioyek**, **Plato**, **MComix**, **Komikku**, and **Calibre** contributed targeted patterns or design references on top of that. The reflow renderer is built on **md4c** (vendored) for Markdown.
 
 ### [SumatraPDF](https://www.sumatrapdfreader.org/) &mdash; *spiritual foundation, cache & threading*
 Copyright © 2006–2024 the SumatraPDF project authors. Licensed [GPL-3.0](https://github.com/sumatrapdfreader/sumatrapdf/blob/master/COPYING) (compatible).
@@ -233,6 +233,13 @@ Foliate is the serious GNOME ebook reader; foliate-js is its parser library. The
 - **WebKitGTK renderer for EPUB** (v0.68.0, Phase 17; `src/fw-webview.c`): Foliate renders EPUB by handing its content to a web engine rather than reconstructing layout itself, because EPUB is HTML and CSS underneath. Framework follows the same approach for EPUB, keeping the foliate-js-derived spine / manifest / NCX parsers and feeding their stitched-HTML output to a `WebKitWebView`. The other reflow formats move to this path incrementally.
 - **Reading-position persistence** (v0.50.0; `src/fw-state.c`) &mdash; first-block index of active page survives across sessions. Pattern from Foliate's reader.js.
 
+### [Calibre](https://calibre-ebook.com/) &mdash; *web-engine-for-ebooks design (Phase 17)*
+Copyright © Kovid Goyal et al. Licensed [GPL-3.0](https://github.com/kovidgoyal/calibre/blob/master/LICENSE.rst) (compatible).
+
+Calibre's e-book viewer renders EPUB by handing its (HTML+CSS) content to a web engine (QtWebEngine) rather than reconstructing layout itself. That is the design Framework adopted in the Phase 17 pivot; the commit that started it is literally titled "moving from foliate to calibre as an epub base." Design/technique reference, not a code copy: Calibre's viewer is Python/JS on Qt, Framework's is C on WebKitGTK.
+
+- **WebKitGTK reflow renderer** (v0.68.0+; `src/fw-webview.c`, `src/fw-reflow-html.c`) &mdash; every reflowable format (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown) is converted to one stitched HTML document and rendered in a `WebKitWebView`, the same web-engine strategy Calibre's viewer and Foliate both use. Framework keeps the foliate-js-derived parsers and md4c, and feeds their HTML to the engine; typography and themes are CSS.
+
 ### [Sioyek](https://sioyek.info/) &mdash; *zoom transitions, async search, threading hybrid*
 Copyright © Ali Mostafavi. Licensed [GPL-3.0](https://github.com/ahrm/sioyek/blob/main/LICENSE) (compatible).
 
@@ -264,6 +271,10 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 - **Facing pages with cover-standalone** (v0.27; `src/fw-view.c::view_page_is_paired`) &mdash; F10 toggle pairs pages 1+2, 3+4, etc., with page 0 as the standalone cover. Mirrors how a physical book opens.
 - **Phase 13.1 reader-pager pattern reference** (planned) &mdash; secondary reference for the Foliate-style EPUB reflow rewrite, alongside foliate-js itself. See `.komikku/komikku/reader/pager/`.
 
+### Bundled libraries (vendored source)
+
+- **[md4c](https://github.com/mity/md4c)** (0.5.2): Markdown-to-HTML, GitHub dialect (tables, task lists, strikethrough, autolinks). Copyright © Martin Mitáš. Licensed [MIT](https://github.com/mity/md4c/blob/master/LICENSE.md) (compatible). Vendored in `src/md4c/` (parser + HTML renderer + entity table), built as a separate static library; the upstream `LICENSE.md` and the per-file MIT headers are preserved unchanged. Drives the Markdown reflow backend; `MD_FLAG_NOHTML` disables raw-HTML passthrough so an untrusted `.md` can't inject script into the WebView.
+
 ### Rendering engines (system libraries, no source vendored)
 
 - **[MuPDF](https://mupdf.com/)** — PDF / XPS / EPUB / MOBI / FB2 / CBZ rendering, structured-text extraction, font/image stores. Copyright © Artifex Software. Licensed [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html). The shipping binary is effectively AGPL because of this link — see the [License](#license) section.
@@ -293,7 +304,7 @@ Framework's source code is licensed under the [GNU General Public License, versi
 
 Because Framework links against [MuPDF](https://mupdf.com/) (AGPL-3.0), the **shipping binary** is effectively AGPL-3.0 &mdash; redistributors must make corresponding source available. Framework's *source* remains GPL-3-or-later: when distributing source, recipients may choose any GPL version 3 or later.
 
-When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Foliate, Komikku) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator). Zlib techniques (Zathura, zathura-pdf-mupdf), MIT techniques (foliate-js), and GPL-2-or-later techniques (MComix) are also cleanly compatible. Plato (AGPL-3.0) is technique-reference only — no code is copied. The original authors are credited in the [Influences](#influences-and-borrowed-techniques) section above and our SPDX headers stay `GPL-3.0-or-later` regardless of source.
+When techniques from GPL-3 sources (SumatraPDF, Sioyek, YACReader, Foliate, Komikku, Calibre) are incorporated, the resulting combined work is distributable under GPL-3 (the common denominator). Zlib techniques (Zathura, zathura-pdf-mupdf), MIT code (foliate-js techniques; the vendored md4c library), and GPL-2-or-later techniques (MComix) are also cleanly compatible. Plato (AGPL-3.0) is technique-reference only — no code is copied. The original authors are credited in the [Influences](#influences-and-borrowed-techniques) section above and our SPDX headers stay `GPL-3.0-or-later` regardless of source.
 
 ## Support
 

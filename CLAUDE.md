@@ -156,6 +156,7 @@ Framework is **GPL-3.0-or-later**. All borrowed-code attributions go in `README.
 | foliate-js | MIT | yes | MIT is GPL-compatible; attribution preserved per OFL/MIT conventions. |
 | md4c (vendored, `src/md4c/`) | MIT | yes | Markdown→HTML library bundled into the build (v0.75). MIT is GPL-compatible; the original `LICENSE.md` is kept in `src/md4c/` and the files retain their MIT headers (not relicensed). Credited in the README dependency table. |
 | Komikku | GPL-3.0-or-later | yes | Fully compatible with Framework's license. |
+| Calibre | GPL-3.0 | yes | Design/technique reference for the web-engine-EPUB approach (the Phase 17 WebKit pivot, per the `c05d3f9` commit). No code copied (Calibre's viewer is Python/JS-on-Qt; ours is C-on-WebKitGTK). GPL-3 is the common denominator with GPL-3-or-later anyway. |
 | MComix | GPL-2.0+ | yes | Compatible; combined work distributed as GPL-3.0-or-later. |
 | YACReader | GPL-3.0 | yes | Same as Sumatra. |
 | Plato | **AGPL-3.0** | **NO source copies** | Technique reference only. Copying code would force Framework to AGPL. |

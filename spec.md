@@ -54,13 +54,17 @@ Framework uses a backend abstraction layer to support multiple document formats 
 └─────────┘  └──────────┘  └───────────┘
 ```
 
-**MuPDF backend (`fw-document-pdf.c`).** Links against `libmupdf`. Despite the file name, this is the *MuPDF* backend, not specifically the PDF backend — `fz_register_document_handlers` + `fz_open_document` dispatch internally by content. It handles **PDF, CBZ, CB7, CBT, XPS, EPUB, FB2, MOBI**. Reflowable formats (EPUB / FB2 / MOBI) get an `fz_layout_document(600, 900, 11)` pass per render-instance open. The render path is zero-copy into the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr` (v1.6 technique borrowed from zathura-pdf-mupdf).
+**MuPDF backend (`fw-document-pdf.c`).** Links against `libmupdf`. Despite the file name, this is the *MuPDF* backend, not specifically the PDF backend — `fz_register_document_handlers` + `fz_open_document` dispatch internally by content. It handles **PDF, CBZ, CB7, CBT, XPS** as the fixed-layout primary, and **EPUB / FB2 / MOBI** only as a *fallback* (those reach the WebKit reflow pipeline first; see §2.4). The render path is zero-copy into the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr` (v1.6 technique borrowed from zathura-pdf-mupdf). For comic formats it normalizes per-page sizes against inconsistent embedded DPI (v0.70).
 
 **DjVuLibre backend (`fw-document-djvu.c`).** Links against `libdjvu` (ddjvuapi). Handles DjVu files via DjVuLibre's own page rendering, with `DDJVU_FORMAT_RGBMASK32` matched to cairo ARGB32 layout for zero-copy writes. Single mutex for the API; abort queue keeps `ddjvuapi` from CPU-locking under high-velocity scrubbing.
 
 **libarchive backend (`fw-document-cbr.c`).** Links against `libarchive` (BSD-licensed; no `libunrar` licensing trap). Handles CBR archives (and any RAR/7z/tar of images by virtue of libarchive's format support). Render path: extract entry bytes → `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (the same v1.6 zero-copy pattern). Single mutex per archive — libarchive readers can't be safely shared across threads, and the streaming-RAR cost makes per-render archive opens dominate anyway.
 
-**Backend selection.** Determined at file open time by extension. `.pdf` / `.cbz` / `.cb7` / `.cbt` / `.xps` / `.oxps` / `.epub` / `.fb2` / `.mobi` → MuPDF. `.djvu` / `.djv` → DjVuLibre. `.cbr` → libarchive.
+**Backend selection.** The window first checks `fw_reflow_path_is_supported` (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown); those open through the WebKit **reflow** pipeline (§2.4) and only fall back to MuPDF if the reflow parser refuses the file. Otherwise the fixed-layout factory picks by extension: `.pdf` / `.cbz` / `.cb7` / `.cbt` / `.xps` / `.oxps` → MuPDF; `.djvu` / `.djv` → DjVuLibre; `.cbr` → libarchive.
+
+### 2.4 Reflow pipeline (WebKitGTK, Phase 17)
+
+Reflowable formats are converted to a single stitched HTML document and rendered in a `WebKitWebView` (`fw-webview.c`), the web-engine strategy Calibre's viewer and Foliate both use. The `FwReflowDocument` backends parse each format and emit HTML via `produce_html`: EPUB/MOBI/AZW3 (foliate-js-derived parsers), FB2 (libxml2 walker), TXT (paragraph splitter), Markdown (vendored md4c, GitHub dialect). A shared module (`fw-reflow-html.c`) supplies the reading stylesheet and the `<img>`→`framework-img:` rewrite. Typography (serif default, font size, line height) and themes (Light / Sepia / Kanagawa-Dragon-Dark / Follow-System) are CSS custom properties pushed live onto the document `:root`. This replaced the earlier native-GTK block-model renderer (`FwReflowView`), removed in v0.76.
 
 ### 2.2 The Velocity-Driven Cache Engine
 
@@ -371,10 +375,22 @@ Sumatra defaults adapted to GNOME conventions. All shortcuts visible in the Keyb
 
 ### 5.1 Supported Formats
 
-| Format | Backend | Extensions | MIME Types |
-|--------|---------|------------|------------|
-| PDF | MuPDF (libmupdf) | `.pdf` | `application/pdf` |
-| DjVu | DjVuLibre (libdjvu) | `.djvu`, `.djv` | `image/vnd.djvu`, `image/x-djvu` |
+Two pipelines: **fixed-layout** (rasterized pages through the velocity cache) and **reflow** (converted to HTML and rendered in a `WebKitWebView`, Phase 17).
+
+| Format | Backend | Pipeline | Extensions |
+|--------|---------|----------|------------|
+| PDF | MuPDF (libmupdf) | fixed-layout | `.pdf` |
+| XPS | MuPDF | fixed-layout | `.xps`, `.oxps` |
+| DjVu | DjVuLibre (libdjvu) | fixed-layout | `.djvu`, `.djv` |
+| Comics (ZIP/7z/tar) | MuPDF | fixed-layout | `.cbz`, `.cb7`, `.cbt` |
+| Comics (RAR) | libarchive | fixed-layout | `.cbr` |
+| EPUB | foliate-js-derived parser → WebKitGTK | reflow | `.epub` |
+| MOBI / AZW3 | foliate-js-derived parser → WebKitGTK | reflow | `.mobi`, `.prc`, `.azw`, `.azw3` |
+| FB2 | libxml2 walker → WebKitGTK | reflow | `.fb2`, `.fb2.zip` |
+| TXT | paragraph splitter → WebKitGTK | reflow | `.txt` |
+| Markdown | md4c (vendored) → WebKitGTK | reflow | `.md`, `.markdown` |
+
+Reflow formats fall back to MuPDF's fixed-layout rasterization if the reflow parser refuses the file. The MuPDF reflow path is the fallback, not the default (Phase 17).
 
 ### 5.2 Desktop Integration
 
@@ -440,12 +456,17 @@ Stored via GSettings. Schema: `io.github.virinvictus.framework` (adjust namespac
 |------------|----------------|---------|
 | gtk4 | 4.16+ | UI toolkit (GNOME 48 ships 4.16; GNOME 50 will ship 4.18+) |
 | libadwaita | 1.7+ | GNOME design patterns |
-| mupdf | 1.24+ | PDF rendering |
+| mupdf | 1.24+ | PDF / XPS / comic rendering |
 | djvulibre | 3.5.28+ | DjVu rendering |
+| libarchive | 3.6+ | CBR (RAR) decompression |
+| webkitgtk-6.0 | 2.46+ | Reflow rendering (EPUB/MOBI/AZW3/FB2/TXT/Markdown) |
+| libxml2 | 2.x | HTML/XML parsing for the reflow + FB2 backends |
+| fontconfig | 2.x | Registering the bundled reading fonts |
 | cairo | 1.18+ | Surface management, compositing |
 | glib | 2.82+ | Data structures, threading, I/O |
 | json-glib | 1.10+ | State persistence |
 | meson | 1.4+ | Build system |
+| md4c | vendored (MIT) | Markdown→HTML; bundled in `src/md4c/`, no system dep |
 
 ### Runtime Dependencies
 
@@ -469,11 +490,19 @@ framework/
 │   ├── fw-view.c/h             # FwView (custom GtkScrollable, paints all visible pages)
 │   ├── fw-cache.c/h            # Three-tier velocity-driven pre-cache engine
 │   ├── fw-document.c/h         # Abstract FwDocument interface + factory
-│   ├── fw-document-pdf.c/h     # MuPDF backend (PDF, CBZ/CB7/CBT, XPS, EPUB, FB2, MOBI)
+│   ├── fw-document-pdf.c/h     # MuPDF backend (PDF, CBZ/CB7/CBT, XPS; EPUB/FB2/MOBI fallback)
 │   ├── fw-document-djvu.c/h    # DjVuLibre backend
 │   ├── fw-document-cbr.c/h     # libarchive backend (CBR, plus any RAR/7z/tar of images)
+│   ├── fw-webview.c/h          # WebKitWebView reflow renderer + framework-img: scheme
+│   ├── fw-reflow-document.c/h  # FwReflowDocument interface + reflow factory
+│   ├── fw-reflow-html.c/h      # Shared reading CSS + HTML emit helpers (reflow)
+│   ├── fw-reflow-document-{epub,mobi,fb2,txt,md}.c/h  # per-format reflow backends
+│   ├── fw-mobi-parser.c/h      # PalmDB/PalmDOC/KF7/KF8 byte-format parser
+│   ├── md4c/                   # Vendored md4c (MIT): Markdown to HTML
 │   ├── fw-sidebar.c/h          # TOC sidebar (GtkListView + GtkTreeListModel)
-│   ├── fw-search.c/h           # Async search controller
+│   ├── fw-search.c/h           # Async search controller (fixed-layout)
+│   ├── fw-fonts.c/h            # Registers bundled reading fonts with FontConfig
+│   ├── fw-sandbox.c/h          # Landlock LSM hardening
 │   ├── fw-state.c/h            # Per-document state persistence (LRU JSON)
 │   └── fw-debug.c/h            # Runtime trace domains (FW_DEBUG=1 → timestamped logs)
 ├── data/
@@ -577,7 +606,7 @@ Explicitly out of scope for v1.0 and likely forever:
 - **Not a converter.** No export, no save-as, no format conversion.
 - **Not a browser.** No tabs, no multi-document management within a single window. Multiple files = multiple windows.
 - **Not an image viewer.** No standalone JPEG, PNG, TIFF, SVG support. (Comic-book archives are framed images-as-pages — that's a different use case.)
-- **Not a serious ebook reader.** Framework *opens* EPUB / FB2 / MOBI through MuPDF's reflowable-format support, but pagination is whatever MuPDF's default layout (`fz_layout_document(600, 900, 11)`) produces and it does **not re-flow on zoom or window resize**. For dedicated ebook reading with proper reflow and font customization, [Foliate](https://johnfactotum.github.io/foliate/) is the right tool. Framework is the right tool when you want one viewer that opens fixed-layout PDFs, comics, and an ebook on the side without switching apps.
+- **Not a full ebook reader.** As of Phase 17, EPUB / MOBI / AZW3 / FB2 / TXT / Markdown render through WebKitGTK with real reflow, a serif reading font, light/sepia/dark themes, font-size and line-height control, TOC navigation, and in-text search: a genuine reading experience, not just "it opens." What Framework still doesn't do: a library, annotations, dictionary/lookup, sync, or per-publisher CSS. For a dedicated ebook workflow [Foliate](https://johnfactotum.github.io/foliate/) remains more complete; Framework is the right tool when you want one viewer for fixed-layout PDFs, comics, and ebooks without switching apps.
 
 ---
 
@@ -591,8 +620,8 @@ These are explicitly deferred. Do not implement before 1.0. Listed here only to 
 - **Single-page view mode** for general documents (the current default is continuous vertical scroll). Facing-pages, manga, and webtoon modes shipped in v0.27 — see Phase 13 in `roadmap.md`.
 - **Smooth pinch-to-zoom** on touchscreens.
 - **Configurable keybindings** via GSettings.
-- **Fractal-style EPUB reflow.** Bypass MuPDF's fixed-layout engine for reflowables and map structural blocks into a `GListModel` rendered via `GtkListView` with native GTK widgets (`GtkLabel` + Pango). True reflow on resize and native text selection. Tracked in roadmap Phase 13.
-- **Auto-reload on file change** (the SumatraPDF / zathura LaTeX/Typst killer feature) via `GFileMonitor`. Tracked in roadmap Phase 14.
+- ~~**Fractal-style EPUB reflow.**~~ **Shipped, then superseded.** The native-GTK block-model reflow renderer shipped in Phase 13.1 (v0.40+), then the Phase 17 pivot (v0.68+) replaced it with WebKitGTK and the block-model path was removed in v0.76. See §2.4 and roadmap Phase 17.
+- ~~**Auto-reload on file change.**~~ Shipped v0.21 (`GFileMonitor`); fixed-layout only (the reflow/WebView path does not yet re-watch; a Phase 17.x follow-up).
 
 ---
 
@@ -605,7 +634,7 @@ Framework v1.0 is done when all of the following hold. As of v0.21.0, only the r
 | ✅ | Opens a 500-page PDF and reaches scroll-without-stutter on a mid-range machine (Ryzen 5 / 16 GB RAM). |
 | ✅ | DjVu files open and render correctly. |
 | ✅ | CBZ / CB7 / CBT / CBR comic-book archives open and render correctly. |
-| ✅ | EPUB / FB2 / MOBI open through MuPDF's reflowable-format support (with the no-resize-reflow caveat in §13). |
+| ✅ | EPUB / MOBI / AZW3 / FB2 / TXT / Markdown reflow through WebKitGTK with serif typography, themes, TOC, and search (Phase 17). |
 | ✅ | All UI controls described in this spec are present and functional. |
 | ✅ | All keyboard shortcuts work; the Keyboard Shortcuts dialog (`Ctrl+?` / `F1`) lists them. |
 | ✅ | Per-document state persists across sessions, LRU-pruned. |
