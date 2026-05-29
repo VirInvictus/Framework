@@ -2,6 +2,18 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.75.0 (2026-05-28)
+
+*Markdown (`.md` / `.markdown`) is now a supported format, rendered through WebKitGTK.*
+
+### Markdown support
+
+* **`.md` / `.markdown` files render via WebKitGTK** with GitHub-flavored Markdown: headings, tables, fenced code blocks, inline code, task-list checkboxes, strikethrough, blockquotes, and autolinks. Conversion uses md4c (a small MIT C library, vendored in `src/md4c/`); its HTML is wrapped with the shared reading stylesheet and handed to the WebView, so Markdown inherits the serif default, the Light / Sepia / Kanagawa-Dragon-Dark / Follow-System themes, and live typography like the other reflow formats.
+* **Hardened against injection:** raw inline HTML in a Markdown file is disabled (`MD_FLAG_NOHTML`), so a `<script>` in an untrusted `.md` is escaped to text rather than executed in the JS-enabled WebView.
+* The shared reading stylesheet gained theme-adaptive styling (via `color-mix`) for tables, code blocks, inline code, task lists, and horizontal rules, benefiting any reflow format that uses those constructs.
+
+Current limits: local image references (`![](pic.png)`) don't load yet, and code blocks aren't syntax-highlighted (CSS-styled only). Both are candidate follow-ups.
+
 ## v0.74.0 (2026-05-28)
 
 *TXT now renders through WebKitGTK, completing the reflow-format migration. Phase 17.4.*

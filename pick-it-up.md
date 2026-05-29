@@ -42,6 +42,11 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
   - **v0.74.0** TXT renders via WebKit (Phase 17.4): `txt_produce_html`
     emits a `<p>` per blank-line paragraph (hard newlines to `<br>`),
     shared reading CSS. Completes the reflow migration.
+  - **v0.75.0** Markdown support (net-new format): `FwReflowDocumentMd`
+    + vendored **md4c** (MIT, `src/md4c/`, GitHub dialect, `MD_FLAG_NOHTML`).
+    `.md`/`.markdown` registered in the factory, file dialog, desktop
+    MIME. Shared reading CSS extended (theme-adaptive tables / code /
+    task lists / hr via `color-mix`).
 
 ---
 
@@ -114,9 +119,13 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 Priority-ish order; all are Phase 17.x in `roadmap.md`.
 
 1. **Delete `FwReflowView`** (17.5): the big cleanup, now unblocked.
-   All five reflow formats are on the WebView, so the block-model path
-   is dead code. This needs a PLAN before coding (it's broad + touches
-   several files). Scope to map out first:
+   All six reflow formats (EPUB/MOBI/AZW3/FB2/TXT/Markdown) are on the
+   WebView, so the block-model path is dead code. This needs a PLAN
+   before coding (it's broad + touches several files). Alongside it, do
+   the **doc reconciliation**: `spec.md`, parts of `README.md`, and the
+   `FwReflowView`/block-model prose in `CLAUDE.md` still describe the
+   pre-Phase-17 pipeline and lag the WebKit reality (v0.72-0.75); the
+   CLAUDE.md backend list has a note flagging this. Scope to map first:
    - Drop the `FwReflowDocument` vtable slots only the block path used:
      `get_block_model`, `get_image`, `find_block_by_anchor`, plus the
      block-model `fw_reflow_document_search` (the WebView uses

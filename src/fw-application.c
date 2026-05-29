@@ -98,12 +98,15 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   gtk_file_filter_add_pattern (filter, "*.azw3");
   gtk_file_filter_add_pattern (filter, "*.prc");
   gtk_file_filter_add_pattern (filter, "*.txt");
+  gtk_file_filter_add_pattern (filter, "*.md");
+  gtk_file_filter_add_pattern (filter, "*.markdown");
   gtk_file_filter_add_mime_type (filter, "application/oxps");
   gtk_file_filter_add_mime_type (filter, "application/vnd.ms-xpsdocument");
   gtk_file_filter_add_mime_type (filter, "application/epub+zip");
   gtk_file_filter_add_mime_type (filter, "application/x-fictionbook+xml");
   gtk_file_filter_add_mime_type (filter, "application/x-mobipocket-ebook");
   gtk_file_filter_add_mime_type (filter, "text/plain");
+  gtk_file_filter_add_mime_type (filter, "text/markdown");
 
   GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
   g_list_store_append (filters, filter);

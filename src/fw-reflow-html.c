@@ -28,7 +28,27 @@ static const char READING_CSS[] =
                       "object-fit: contain; }"
   "h1, h2, h3 { line-height: 1.2; }"
   "img { max-width: 100%; height: auto; }"
-  "pre, code { font-family: var(--mono-font); }"
+  "hr { border: none; border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);"
+  "     margin: 1.6em auto; width: 40%; }"
+  /* Code: a subtle theme-adaptive tint (color-mix off currentColor keeps
+   * it readable in every theme). Inline code hugs the text; fenced
+   * blocks scroll horizontally rather than forcing the column wide. */
+  "code, pre { font-family: var(--mono-font); }"
+  "code { background: color-mix(in srgb, currentColor 8%, transparent);"
+  "       padding: 0.1em 0.3em; border-radius: 4px; font-size: 0.9em; }"
+  "pre { background: color-mix(in srgb, currentColor 6%, transparent);"
+  "      padding: 0.8em 1em; border-radius: 6px; overflow-x: auto;"
+  "      line-height: 1.45; }"
+  "pre code { background: none; padding: 0; border-radius: 0; font-size: 0.88em; }"
+  /* GFM tables: collapsed borders, padded cells, a faint header fill. */
+  "table { border-collapse: collapse; margin: 1em 0; width: 100%; }"
+  "th, td { border: 1px solid color-mix(in srgb, currentColor 22%, transparent);"
+  "         padding: 0.4em 0.7em; }"
+  "th { background: color-mix(in srgb, currentColor 8%, transparent);"
+  "     text-align: left; }"
+  /* GFM task lists: drop the bullet, align the checkbox. */
+  "li.task-list-item { list-style: none; margin-left: -1.3em; }"
+  "li.task-list-item input { margin-right: 0.5em; }"
   "blockquote { border-left: 3px solid currentColor; "
               "padding-left: 1em; opacity: 0.85; "
               "margin: 1em 0 1em 1em; }";

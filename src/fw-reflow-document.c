@@ -8,6 +8,7 @@
 #include "fw-reflow-document-fb2.h"
 #include "fw-reflow-document-epub.h"
 #include "fw-reflow-document-mobi.h"
+#include "fw-reflow-document-md.h"
 
 #include <string.h>
 
@@ -403,6 +404,8 @@ fw_reflow_path_is_supported (const char *path)
    *   MOBI / PRC — KF7 (v0.52.0) and KF8 (v0.55.0)
    *   AZW / AZW3 — KF8 (v0.55.0) */
   return path_has_ext (path, "txt") ||
+         path_has_ext (path, "md") ||
+         path_has_ext (path, "markdown") ||
          path_has_ext (path, "fb2") ||
          path_has_suffix_ci (path, ".fb2.zip") ||
          path_has_ext (path, "epub") ||
@@ -421,6 +424,8 @@ fw_reflow_document_new_for_path (const char *path, GError **error)
 
   if (path_has_ext (path, "txt"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_txt_new ());
+  else if (path_has_ext (path, "md") || path_has_ext (path, "markdown"))
+    doc = FW_REFLOW_DOCUMENT (fw_reflow_document_md_new ());
   else if (path_has_ext (path, "fb2") || path_has_suffix_ci (path, ".fb2.zip"))
     doc = FW_REFLOW_DOCUMENT (fw_reflow_document_fb2_new ());
   else if (path_has_ext (path, "epub"))

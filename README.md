@@ -13,7 +13,7 @@
 
 # Framework
 
-A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, and **AZW3** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
+A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, **AZW3**, and **Markdown** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
@@ -36,7 +36,7 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
-| **Native Ebook Reflow** | EPUB renders through WebKitGTK (Phase 17); FB2, MOBI, and AZW3 render as native GTK widgets (not rasterized pages) through a Foliate-style block model with real text wrapping, justification, first-line indent, chapter titles, lists, drop caps, and live font-size adjustment. Format parsers are C ports of foliate-js either way. Falls back to MuPDF fixed layout if a document won't parse. |
+| **Reflowable formats via WebKitGTK** | EPUB, MOBI/AZW3, FB2, TXT, and Markdown render through WebKitGTK (Phase 17): real text reflow with a serif reading font, light/sepia/dark themes, and live typography. The foliate-js-derived parsers (EPUB/MOBI/AZW3/FB2) and md4c (Markdown) feed stitched HTML to the WebView. Falls back to MuPDF fixed layout if an ebook won't parse. |
 
 ## Screenshot
 
@@ -119,7 +119,8 @@ You can also drop a file directly onto the window to open it.
 | djvulibre (3.5.28+) | DjVu rendering |
 | libarchive (3.6+) | CBR (RAR) decompression and EPUB (ZIP) reading |
 | libxml-2.0 (2.9+) | XHTML / FB2 / OPF parsing for the reflow parsers |
-| webkitgtk-6.0 (2.46+) | Reflow rendering (EPUB now; MOBI / AZW3 / FB2 / TXT incrementally). Fixed-layout formats are unchanged. |
+| webkitgtk-6.0 (2.46+) | Reflow rendering for EPUB / MOBI / AZW3 / FB2 / TXT / Markdown. Fixed-layout formats (PDF / DjVu / comics / XPS) are unchanged. |
+| md4c (vendored, MIT) | Markdown to HTML (GitHub dialect). Bundled in `src/md4c/`; no system dependency. |
 | fontconfig | Bundled-font registration for reflow text |
 | cairo (1.18+) | Surface management |
 | glib (2.82+) | Data structures, threading |
@@ -169,7 +170,7 @@ framework book.djvu
 framework volume.cbz
 ```
 
-CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. EPUB, FB2, MOBI, and AZW3 open through Framework's reflow pipeline rather than MuPDF's fixed layout (which remains as an automatic fallback for documents the reflow parser can't handle). EPUB now renders through WebKitGTK (Phase 17), the same engine Foliate uses, while FB2, MOBI, and AZW3 reflow as native GTK widgets with real typography, live font-size adjustment, a chapter sidebar, and in-text search highlighting; the foliate-js-derived parsers feed both paths. The remaining formats move to the WebKit path incrementally. [Foliate](https://johnfactotum.github.io/foliate/) remains the more complete dedicated ebook reader.
+CBR archives are handled via `libarchive` (BSD-licensed), so RAR-compressed comics open natively without the libunrar licensing trap. The reflowable formats (EPUB, MOBI, AZW3, FB2, TXT, and Markdown) all render through WebKitGTK (Phase 17), the same engine Foliate uses: real text reflow with a serif reading font, light / sepia / dark themes, and live typography. The foliate-js-derived parsers (EPUB / MOBI / AZW3 / FB2) and the vendored md4c (Markdown) produce stitched HTML that the WebView renders; ebooks fall back to MuPDF's fixed layout if they won't parse. [Foliate](https://johnfactotum.github.io/foliate/) remains the more complete dedicated ebook reader.
 
 One document per window. Multiple files open multiple windows.
 

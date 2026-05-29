@@ -45,6 +45,7 @@ framework_lib_sources = files(
   'fw-reflow-document-fb2.c',
   'fw-reflow-document-epub.c',
   'fw-reflow-document-mobi.c',
+  'fw-reflow-document-md.c',
   'fw-mobi-parser.c',
   'fw-reflow-view.c',
   'fw-reflow-sidebar.c',
@@ -84,6 +85,21 @@ if sanitize_flags.length() > 0
   add_project_arguments(sanitize_flags, language: 'c')
   add_project_link_arguments(sanitize_flags, language: 'c')
 endif
+
+# Vendored md4c (MIT) — Markdown to HTML for the .md reflow backend.
+# Built separately with warnings relaxed so third-party code doesn't
+# trip warning_level=2; sanitizer flags still apply project-wide.
+md4c_lib = static_library(
+  'md4c',
+  files('md4c/md4c.c', 'md4c/md4c-html.c', 'md4c/entity.c'),
+  override_options: ['warning_level=0'],
+  install: false,
+)
+md4c_dep = declare_dependency(
+  link_with: md4c_lib,
+  include_directories: include_directories('md4c'),
+)
+framework_deps += md4c_dep
 
 framework_lib = static_library(
   'framework-core',
