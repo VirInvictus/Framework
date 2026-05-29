@@ -113,7 +113,7 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 Priority-ish order; all are Phase 17.x in `roadmap.md`.
 
-1. **Delete `FwReflowView`** (17.5) — the big cleanup, now unblocked.
+1. **Delete `FwReflowView`** (17.5): the big cleanup, now unblocked.
    All five reflow formats are on the WebView, so the block-model path
    is dead code. This needs a PLAN before coding (it's broad + touches
    several files). Scope to map out first:
