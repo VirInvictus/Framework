@@ -1225,6 +1225,9 @@ fw_mobi_parse (const char *path, GError **error)
   GHashTable *images_ht =
     g_hash_table_new_full (g_str_hash, g_str_equal,
                            g_free, g_object_unref);
+  GHashTable *image_bytes_ht =
+    g_hash_table_new_full (g_str_hash, g_str_equal,
+                           g_free, (GDestroyNotify) g_bytes_unref);
   guint cover_recindex = 0;
 
   if (resource_start != 0xffffffff && resource_start < record_count) {
@@ -1256,14 +1259,19 @@ fw_mobi_parse (const char *path, GError **error)
 
       if (!looks_like_image (p, len)) continue;
 
-      g_autoptr (GBytes) bytes = g_bytes_new (p, len);
-      g_autoptr (GError) e = NULL;
-      GdkTexture *tex = gdk_texture_new_from_bytes (bytes, &e);
-      if (!tex) continue;
-
       /* recindex is 1-based: idx 0 → "1". */
       g_autofree char *key = g_strdup_printf ("%u", idx + 1);
-      g_hash_table_insert (images_ht, g_strdup (key), tex);
+      g_autoptr (GBytes) bytes = g_bytes_new (p, len);
+
+      /* Keep the raw bytes for the WebView path regardless of whether
+       * GdkTexture can decode them (WebKit has its own decoders). */
+      g_hash_table_insert (image_bytes_ht, g_strdup (key),
+                           g_bytes_ref (bytes));
+
+      g_autoptr (GError) e = NULL;
+      GdkTexture *tex = gdk_texture_new_from_bytes (bytes, &e);
+      if (tex)
+        g_hash_table_insert (images_ht, g_strdup (key), tex);
 
       /* coverOffset (EXTH 201) is also a 0-based offset into the
        * resource-record range. If it matches the current idx, this
@@ -1281,6 +1289,7 @@ fw_mobi_parse (const char *path, GError **error)
   p->language       = meta_language;
   p->publisher      = meta_publisher;
   p->images         = images_ht;
+  p->image_bytes    = image_bytes_ht;
   p->cover_recindex = cover_recindex;
   p->is_kf8         = is_kf8;
   p->toc            = kf8_toc;
@@ -1297,6 +1306,7 @@ fw_mobi_parsed_free (FwMobiParsed *p)
   g_free (p->language);
   g_free (p->publisher);
   g_clear_pointer (&p->images, g_hash_table_unref);
+  g_clear_pointer (&p->image_bytes, g_hash_table_unref);
   if (p->toc) {
     for (guint i = 0; i < p->toc->len; i++)
       g_free (g_array_index (p->toc, FwMobiTocEntry, i).label);

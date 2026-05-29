@@ -40,6 +40,7 @@ framework_lib_sources = files(
   'fw-document-djvu.c',
   'fw-document-cbr.c',
   'fw-reflow-document.c',
+  'fw-reflow-html.c',
   'fw-reflow-document-txt.c',
   'fw-reflow-document-fb2.c',
   'fw-reflow-document-epub.c',

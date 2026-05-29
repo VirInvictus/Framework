@@ -21,6 +21,7 @@
  */
 
 #include "fw-reflow-document-epub.h"
+#include "fw-reflow-html.h"
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -1258,108 +1259,28 @@ static GHashTable *epub_get_metadata (FwReflowDocument *doc) {
  * name-tokens) and shares the existing per-image GBytes refs from
  * self->image_bytes.  No copy. */
 
+/* Resolve an EPUB <img> to its manifest image id: src is a zip path
+ * relative to the chapter, looked up through zip_to_image_id. Shared
+ * subtree pass (fw_reflow_html_process) does the rewrite + script strip. */
 typedef struct {
-  const char *doc_id;
   const char *chapter_path;
   GHashTable *zip_to_image_id;
-} HtmlPassCtx;
+} EpubImgCtx;
 
-static gboolean
-is_stylesheet_link (xmlNodePtr node)
+static char *
+epub_img_resolver (xmlNodePtr img, gpointer user_data)
 {
-  if (xmlStrcasecmp (node->name, BAD_CAST "link") != 0)
-    return FALSE;
-  xmlChar *rel = xmlGetProp (node, BAD_CAST "rel");
-  gboolean is = rel && g_ascii_strcasecmp ((const char *) rel, "stylesheet") == 0;
-  if (rel) xmlFree (rel);
-  return is;
-}
-
-static void
-rewrite_img_src (xmlNodePtr img, HtmlPassCtx *ctx)
-{
+  EpubImgCtx *c = user_data;
   xmlChar *src = xmlGetProp (img, BAD_CAST "src");
-  if (!src) return;
-  g_autofree char *chapter_dir = dirname_zip (ctx->chapter_path);
+  if (!src) return NULL;
+  g_autofree char *chapter_dir = dirname_zip (c->chapter_path);
   g_autofree char *resolved =
     resolve_zip_path (chapter_dir, (const char *) src);
   xmlFree (src);
-  if (!resolved || !*resolved) return;
-  const char *image_id = g_hash_table_lookup (ctx->zip_to_image_id, resolved);
-  if (!image_id) return;       /* leave src alone; WebKit will 404 it */
-  g_autofree char *new_src =
-    g_strdup_printf ("framework-img://%s/%s", ctx->doc_id, image_id);
-  xmlSetProp (img, BAD_CAST "src", BAD_CAST new_src);
+  if (!resolved || !*resolved) return NULL;
+  const char *image_id = g_hash_table_lookup (c->zip_to_image_id, resolved);
+  return image_id ? g_strdup (image_id) : NULL;
 }
-
-static void
-process_html_subtree (xmlNodePtr parent, HtmlPassCtx *ctx)
-{
-  xmlNodePtr c = parent->children;
-  while (c) {
-    xmlNodePtr next = c->next;
-    if (c->type == XML_ELEMENT_NODE) {
-      if (xmlStrcasecmp (c->name, BAD_CAST "script") == 0 ||
-          is_stylesheet_link (c)) {
-        xmlUnlinkNode (c);
-        xmlFreeNode  (c);
-      } else {
-        if (xmlStrcasecmp (c->name, BAD_CAST "img") == 0)
-          rewrite_img_src (c, ctx);
-        /* Recurse for nested content. */
-        process_html_subtree (c, ctx);
-      }
-    }
-    c = next;
-  }
-}
-
-/* Locate <body> inside an HTML tree.  Returns NULL when there isn't one
- * (the chapter parsed to nothing renderable). */
-static xmlNodePtr
-find_body (xmlNodePtr root)
-{
-  for (xmlNodePtr n = root; n; n = n->next) {
-    if (n->type == XML_ELEMENT_NODE &&
-        xmlStrcasecmp (n->name, BAD_CAST "body") == 0)
-      return n;
-    xmlNodePtr deeper = n->children ? find_body (n->children) : NULL;
-    if (deeper) return deeper;
-  }
-  return NULL;
-}
-
-/* Default reading CSS — minimal, just enough to make the EPUB readable
- * before Phase 17.x adds theme variables / Reading Settings integration.
- * Width-clamped reading column, sane line-height, default serif body,
- * monospace for <pre>. */
-/* The :root custom properties are the typography/theme knobs. These
- * defaults (serif body, light theme) render a sane book on first paint;
- * the window overrides them live from GSettings via
- * fw_webview_set_reading_style (font, size, line-height, theme colors). */
-static const char EPUB_READING_CSS[] =
-  ":root {"
-  "  --fg: #1a1a1a; --bg: #fdfdfb; --link: #1a5fb4;"
-  "  --body-font: 'Crimson Pro', Georgia, 'Times New Roman', serif;"
-  "  --mono-font: ui-monospace, monospace;"
-  "  --font-size: 13pt; --line-height: 1.55; --measure: 38em;"
-  "}"
-  "html { background: var(--bg); color: var(--fg); }"
-  "body { max-width: var(--measure); margin: 1.5em auto; padding: 0 1.5em;"
-  "       font-family: var(--body-font); font-size: var(--font-size);"
-  "       line-height: var(--line-height); }"
-  "a { color: var(--link); }"
-  "section[data-spine] { margin: 0 0 2em 0; }"
-  "section.cover { display: flex; align-items: center; justify-content: center;"
-                  "min-height: 100vh; margin: 0; padding: 0; max-width: none; }"
-  "section.cover img { max-width: 100%; max-height: 96vh; height: auto; "
-                      "object-fit: contain; }"
-  "h1, h2, h3 { line-height: 1.2; }"
-  "img { max-width: 100%; height: auto; }"
-  "pre, code { font-family: var(--mono-font); }"
-  "blockquote { border-left: 3px solid currentColor; "
-              "padding-left: 1em; opacity: 0.85; "
-              "margin: 1em 0 1em 1em; }";
 
 static gboolean
 epub_produce_html (FwReflowDocument  *doc,
@@ -1391,7 +1312,7 @@ epub_produce_html (FwReflowDocument  *doc,
     g_string_append_printf (out, "<title>%s</title>", esc);
   }
   g_string_append (out, "<style>");
-  g_string_append (out, EPUB_READING_CSS);
+  g_string_append (out, fw_reflow_reading_css ());
   g_string_append (out, "</style></head><body>");
 
   /* Cover image (when declared via EPUB 2 <meta name="cover" /> or
@@ -1437,14 +1358,13 @@ epub_produce_html (FwReflowDocument  *doc,
     if (!d) continue;
 
     xmlNodePtr root = xmlDocGetRootElement (d);
-    xmlNodePtr body = root ? find_body (root) : NULL;
+    xmlNodePtr body = root ? fw_reflow_html_find_body (root) : NULL;
     if (body) {
-      HtmlPassCtx ctx = {
-        .doc_id          = doc_id,
+      EpubImgCtx ictx = {
         .chapter_path    = zip_path,
         .zip_to_image_id = self->zip_to_image_id,
       };
-      process_html_subtree (body, &ctx);
+      fw_reflow_html_process (body, doc_id, epub_img_resolver, &ictx);
 
       g_string_append_printf (out, "<section data-spine=\"%u\" id=\"spine-%u\">", i, i);
       for (xmlNodePtr c = body->children; c; c = c->next) {

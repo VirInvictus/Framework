@@ -2,6 +2,18 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.72.0 (2026-05-28)
+
+*MOBI and AZW3 now render through WebKitGTK, inheriting the EPUB reading typography and themes. Phase 17.2.*
+
+### MOBI / AZW3 on WebKit
+
+* **MOBI (KF7) and AZW3 / KF8 render via WebKitGTK**, the same path as EPUB. The foliate-js-derived PalmDB / KF8 parsers are unchanged; their reconstructed HTML (with the TOC anchor markers) is now stitched into one document and handed to the WebView, so MOBI/AZW3 pick up the serif default, the Light / Sepia / Kanagawa-Dragon-Dark / Follow-System themes, live font and size controls, and reading-position persistence that EPUB gained in v0.71.0.
+* **Shared HTML emit.** The reading stylesheet, body-finding, script/stylesheet stripping, and `<img>`-to-`framework-img:` rewriting are factored into a shared `fw-reflow-html` module used by both the EPUB and MOBI producers (FB2 and TXT to come).
+* **Images and covers.** The MOBI parser now retains the raw image-record bytes (not just decoded textures) so the WebView's image scheme can serve them. References resolve for both forms: KF7's zero-padded `recindex` and KF8's base-32 `kindle:embed:` ids. A cover declared only via EXTH (with no `<img>` in the body) is emitted as a synthetic cover section.
+
+The remaining reflow formats (FB2, TXT) still use the legacy `FwReflowView`; they migrate next.
+
 ## v0.71.0 (2026-05-28)
 
 *EPUB reading typography: a serif default, font and color-theme controls, all applied live through WebKitGTK.*

@@ -1,8 +1,7 @@
-<!-- Scratch handoff doc. Left UNTRACKED on purpose (not committed) so it
-     doesn't clutter history. Written 2026-05-28 end-of-session, after
-     v0.71.0. Delete or refresh when the next chunk lands. -->
+<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.72.0.
+     Delete or refresh when the next chunk lands. -->
 
-# Framework: Pick-It-Up Notes (after v0.71.0)
+# Framework: Pick-It-Up Notes (after v0.72.0)
 
 Resume point for the EPUB / reflow / comic work. Everything below is on
 `main` and pushed unless stated otherwise.
@@ -11,8 +10,8 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 ## 1. Where things stand
 
-- **Branch / version:** `main`, clean working tree, at `d5be45c` =
-  **v0.71.0**, pushed to `origin/main`.
+- **Branch / version:** `main`, clean working tree, at **v0.72.0**,
+  pushed to `origin/main`.
 - **Parked branch:** `parking/phase-16-hyphenation` (`88d2e72`) still
   exists. en_US Knuth-Liang hyphenation for the *native* reflow path,
   superseded by WebKit (CSS `hyphens: auto`). Don't delete; it's the only
@@ -28,6 +27,11 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
   - `d5be45c` **v0.71.0** EPUB reading typography: serif default (Crimson
     Pro), Light/Sepia/Kanagawa-Dark/Follow-System themes, bundled-font
     picker, all applied live through the WebView.
+  - **v0.72.0** MOBI/AZW3 render via WebKit (Phase 17.2): shared
+    `fw-reflow-html` module; `mobi_produce_html`; parser retains raw image
+    bytes; img refs resolved for KF7 zero-padded `recindex` + KF8 base-32
+    `kindle:embed:`; synthetic cover for EXTH-only covers. MOBI/AZW3
+    inherit the v0.71 typography + themes.
 
 ---
 
@@ -99,14 +103,16 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 Priority-ish order; all are Phase 17.x in `roadmap.md`.
 
-1. **MOBI / AZW3 -> `produce_html`** (Phase 17.2). The natural next
-   feature: give the MOBI/AZW3 backend a `produce_html` so those formats
-   render through the WebView and inherit *all* of v0.71's typography and
-   theming for free. The KF7/KF8 HTML reconstruction already exists in
-   `fw-reflow-document-mobi.c`; it needs to emit stitched HTML + an image
-   table instead of (or alongside) the block model. Mirror the EPUB
-   backend's `epub_produce_html`.
-2. **FB2 -> `produce_html`** (17.3), **TXT -> `produce_html`** (17.4).
+1. **FB2 -> `produce_html`** (17.3). The next format to migrate. The
+   libxml2 FB2 walker (`fw-reflow-document-fb2.c`) currently emits the
+   block model; give it a `produce_html` that emits stitched HTML +
+   image table (FB2 images are base64 `<binary>` elements referenced by
+   `l:href="#id"`). Mirror `mobi_produce_html` / `epub_produce_html` and
+   reuse the shared `fw-reflow-html` module + its img-resolver callback.
+   Then **TXT -> `produce_html`** (17.4): trivial wrap in `<pre>` or
+   paragraph-per-blank-line.
+   (DONE v0.72.0: **MOBI / AZW3 -> `produce_html`**, Phase 17.2; see
+   `mobi_produce_html` and the shared `fw-reflow-html` module.)
 3. **Delete `FwReflowView`** (17.5) once all four reflow formats are on
    WebKit. Drops `get_block_model` / `get_image` / block-model search and
    the renderer halves of each backend. Big cleanup.

@@ -13,9 +13,12 @@
 
 #include "fw-reflow-document-mobi.h"
 #include "fw-mobi-parser.h"
+#include "fw-reflow-html.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
 #include <libxml/tree.h>
 
 struct _FwReflowDocumentMobi {
@@ -25,6 +28,12 @@ struct _FwReflowDocumentMobi {
   GHashTable   *metadata;
   GHashTable   *anchors;
   GHashTable   *images;     /* gchar* (recindex string) → GdkTexture */
+  /* WebView (produce_html) path, retained from mobi_open: the
+   * marker-injected HTML body and the raw image bytes by recindex. */
+  GHashTable   *image_bytes;/* gchar* (recindex string) → GBytes */
+  char         *html_body;  /* marker-injected UTF-8 HTML (owned) */
+  gsize         html_len;
+  guint         cover_recindex; /* EXTH cover; 0 = none */
   char         *path;
 };
 
@@ -679,10 +688,17 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     self->images = m->images;
     m->images = NULL;
   }
+  /* Steal the raw image bytes too, for the WebView produce_html path. */
+  if (m->image_bytes) {
+    g_clear_pointer (&self->image_bytes, g_hash_table_unref);
+    self->image_bytes = m->image_bytes;
+    m->image_bytes = NULL;
+  }
 
   /* If a cover image was identified via EXTH-201, push it as the
    * first block — flagged FW_BLOCK_FLAG_COVER so FwReflowView
    * gives it a full-viewport page. */
+  self->cover_recindex = m->cover_recindex;
   if (m->cover_recindex > 0) {
     g_autofree char *id = g_strdup_printf ("%u", m->cover_recindex);
     FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL, id, NULL,
@@ -721,8 +737,14 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   }
 
   gsize body_len2 = 0;
-  g_autofree char *body2 = mobi_inject_markers (
+  char *body2 = mobi_inject_markers (
     m->body, m->body_len, positions, marker_prefix, &body_len2);
+  /* Retain the marker-injected body for the WebView produce_html path
+   * (carries the same id anchors the TOC resolves against). Owned by
+   * self now; freed in dispose. */
+  g_free (self->html_body);
+  self->html_body = body2;
+  self->html_len  = body_len2;
 
   /* libxml2 HTML mode — tolerant of malformed markup. The flags
    * RECOVER (continue on error) + NOERROR / NOWARNING (don't print
@@ -804,6 +826,126 @@ static GHashTable *mobi_get_metadata (FwReflowDocument *doc) {
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
+/* Resolve a MOBI <img> to its image-bytes key. Two reference forms,
+ * both ported from foliate-js mobi.js:
+ *   - KF7: `recindex="00001"` (zero-padded decimal). Key = the parsed
+ *     number (recindex N maps to loadResource(N-1); the parser keys the
+ *     same record N, so key == Number(recindex)).
+ *   - KF8/AZW3: `src="kindle:embed:000K?mime=..."` where the id is
+ *     base-32; key = parseInt(id, 32) (embed id maps to loadResource(id-1),
+ *     keyed id by the parser).
+ * Rewrite only when we hold those bytes (else leave src for WebKit). */
+static char *
+mobi_img_resolver (xmlNodePtr img, gpointer user_data)
+{
+  GHashTable *image_bytes = user_data;
+  long n = -1;
+
+  xmlChar *ri = xmlGetProp (img, BAD_CAST "recindex");
+  if (ri) {
+    n = strtol ((const char *) ri, NULL, 10);
+    xmlFree (ri);
+  } else {
+    xmlChar *src = xmlGetProp (img, BAD_CAST "src");
+    if (src) {
+      const char *embed = strstr ((const char *) src, "kindle:embed:");
+      if (embed)
+        n = strtol (embed + strlen ("kindle:embed:"), NULL, 32);
+      xmlFree (src);
+    }
+  }
+  if (n <= 0) return NULL;
+
+  char *id = g_strdup_printf ("%ld", n);
+  if (image_bytes && !g_hash_table_contains (image_bytes, id)) {
+    g_free (id);
+    return NULL;
+  }
+  return id;
+}
+
+/* WebView path: emit the marker-injected MOBI body as one stitched HTML
+ * document with the shared reading CSS, img recindex rewritten to the
+ * framework-img: scheme, scripts stripped. Returns the raw image bytes
+ * as the image table. */
+static gboolean
+mobi_produce_html (FwReflowDocument *doc, const char *doc_id,
+                   char **out_html, GHashTable **out_images, GError **error)
+{
+  FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
+  if (!self->html_body || self->html_len == 0) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "mobi: empty body");
+    return FALSE;
+  }
+
+  const char *title = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "title") : NULL;
+  const char *lang  = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "lang") : NULL;
+
+  GString *out = g_string_new ("<!DOCTYPE html>\n<html");
+  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
+  g_string_append (out, "><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *esc = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", esc);
+  }
+  g_string_append (out, "<style>");
+  g_string_append (out, fw_reflow_reading_css ());
+  g_string_append (out, "</style></head><body>");
+
+  /* Build the body section separately so we can decide whether a
+   * synthetic cover is needed (some MOBIs carry the cover only via the
+   * EXTH coverOffset, with no <img> for it in the body). */
+  g_autoptr (GString) sec = g_string_new (NULL);
+  htmlDocPtr d = htmlReadMemory (
+    self->html_body, (int) self->html_len, NULL, "UTF-8",
+    HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
+    HTML_PARSE_NONET);
+  if (d) {
+    xmlNodePtr root = xmlDocGetRootElement (d);
+    xmlNodePtr body = root ? fw_reflow_html_find_body (root) : NULL;
+    if (body) {
+      fw_reflow_html_process (body, doc_id, mobi_img_resolver,
+                              self->image_bytes);
+      g_string_append (sec, "<section data-spine=\"0\" id=\"spine-0\">");
+      xmlBufferPtr buf = xmlBufferCreate ();
+      for (xmlNodePtr c = body->children; c; c = c->next) {
+        xmlBufferEmpty (buf);
+        htmlNodeDump (buf, d, c);
+        g_string_append (sec, (const char *) xmlBufferContent (buf));
+      }
+      xmlBufferFree (buf);
+      g_string_append (sec, "</section>");
+    }
+    xmlFreeDoc (d);
+  }
+
+  /* Synthetic cover: only when the EXTH cover image exists and the body
+   * doesn't already reference it (avoids a doubled cover). */
+  if (self->cover_recindex > 0 && self->image_bytes) {
+    g_autofree char *cover_id = g_strdup_printf ("%u", self->cover_recindex);
+    if (g_hash_table_contains (self->image_bytes, cover_id)) {
+      g_autofree char *needle =
+        g_strdup_printf ("framework-img://%s/%s\"", doc_id, cover_id);
+      if (!strstr (sec->str, needle))
+        g_string_append_printf (out,
+          "<section class=\"cover\" id=\"cover\">"
+            "<img src=\"framework-img://%s/%s\" alt=\"Cover\">"
+          "</section>",
+          doc_id, cover_id);
+    }
+  }
+
+  g_string_append (out, sec->str);
+  g_string_append (out, "</body></html>");
+
+  if (out_images)
+    *out_images = self->image_bytes ? g_hash_table_ref (self->image_bytes) : NULL;
+  *out_html = g_string_free (out, FALSE);
+  return TRUE;
+}
+
 static void
 fw_reflow_document_mobi_iface_init (FwReflowDocumentInterface *iface)
 {
@@ -814,6 +956,7 @@ fw_reflow_document_mobi_iface_init (FwReflowDocumentInterface *iface)
   iface->get_toc               = mobi_get_toc;
   iface->find_block_by_anchor  = mobi_find_block_by_anchor;
   iface->get_metadata          = mobi_get_metadata;
+  iface->produce_html          = mobi_produce_html;
 }
 
 static void
@@ -825,6 +968,8 @@ fw_reflow_document_mobi_finalize (GObject *object)
   g_clear_pointer (&self->metadata, g_hash_table_unref);
   g_clear_pointer (&self->anchors,  g_hash_table_unref);
   g_clear_pointer (&self->images,   g_hash_table_unref);
+  g_clear_pointer (&self->image_bytes, g_hash_table_unref);
+  g_clear_pointer (&self->html_body, g_free);
   g_clear_pointer (&self->path,     g_free);
   G_OBJECT_CLASS (fw_reflow_document_mobi_parent_class)->finalize (object);
 }
