@@ -2,6 +2,20 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+> **Historical (Phase 13.1).** This note describes the original
+> native-GTK block-model reflow design: a `GListModel` of
+> structurally-typed blocks rendered by `FwReflowView` (a
+> `GtkListView`). That renderer shipped (v0.40–v0.67) and was then
+> **superseded by the Phase 17 WebKit pivot** (v0.68+): every reflow
+> format now emits stitched HTML via `produce_html` and renders in a
+> `WebKitWebView` (`fw-webview.c`). `FwReflowView` itself was **deleted
+> in v0.76 (Phase 17.5a)**, and the block-model machinery it drove is
+> slated for removal in 17.5b. The *parser* halves of each backend
+> (the foliate-js-derived format walks) are unchanged and still
+> canonical. Read this doc for the format-parsing references and the
+> original rationale; for the current render path see Phase 17 in
+> `roadmap.md`, `spec.md` §2.4, and the v0.68.0 patchnote.
+
 This document scopes the EPUB / MOBI / AZW3 / FB2 / TXT reflow
 rewrite tracked as **Phase 13.1 — Foliate-Style Reflow** in
 `roadmap.md`. The rewrite is the largest single architectural change

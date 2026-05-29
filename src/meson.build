@@ -47,7 +47,6 @@ framework_lib_sources = files(
   'fw-reflow-document-mobi.c',
   'fw-reflow-document-md.c',
   'fw-mobi-parser.c',
-  'fw-reflow-view.c',
   'fw-reflow-sidebar.c',
   'fw-sidebar.c',
   'fw-search.c',

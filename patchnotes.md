@@ -2,6 +2,17 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.76.0 (2026-05-28)
+
+*Phase 17.5a: the legacy native-reflow renderer is gone. Every ebook format now has exactly one render path.*
+
+### `FwReflowView` removed
+
+* **The block-model GtkListView renderer (`FwReflowView`) is deleted.** It was the original Phase 13.1 reflow engine: a `GListModel` of structurally-typed blocks driving a `GtkListView` with one wrapping widget per block. The Phase 17 WebKit pivot (v0.68 through v0.75) migrated every reflow format (EPUB, MOBI, AZW3, FB2, TXT, Markdown) onto a single `WebKitWebView`, leaving the block-model view as dead code. `fw-reflow-view.{c,h}` are removed.
+* **`fw-window.c` is unified on one reflow path.** The window previously juggled two reflow renderers behind a `GtkStack` (`"reflow"` for the block view, `"webview"` for WebKit) with parallel navigation, search, and save-state branches for each. The block-view half is gone: a single `"webview"` page, one set of navigation and search handlers, one save-state branch. The dead block-model search machinery (`reflow_hits` / `reflow_active` / the `reflow_search_*` helpers and `on_reflow_page_changed`) went with it.
+
+The `FwReflowDocument` interface still carries the now-unused block-model vtable slots (`get_block_model`, `get_image`, `find_block_by_anchor`, block-model search) and each backend still builds a block model that nothing renders. Stripping that machinery is Phase 17.5b, deferred because it entangles with the live `produce_html` path in the EPUB and MOBI backends (a single parse loop feeds both) and wants a careful, separately-verified pass. `FwReflowSidebar` (the reflow TOC) stays; it is unrelated to the deleted renderer.
+
 ## v0.75.0 (2026-05-28)
 
 *Markdown (`.md` / `.markdown`) is now a supported format, rendered through WebKitGTK.*
