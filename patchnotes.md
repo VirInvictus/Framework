@@ -2,6 +2,16 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.74.0 (2026-05-28)
+
+*TXT now renders through WebKitGTK, completing the reflow-format migration. Phase 17.4.*
+
+### TXT on WebKit
+
+* **Plain-text files render via WebKitGTK**, the last reflow format to move off the legacy view. The blank-line paragraph split is reused; each paragraph becomes a `<p>` (intra-paragraph hard newlines become `<br>`), wrapped with the shared reading stylesheet. TXT now gets the serif default, the reading themes, and live typography like the other formats.
+
+With EPUB, MOBI / AZW3, FB2, and TXT all on the WebView, the legacy `FwReflowView` block-model pipeline is unused and can be removed (Phase 17.5).
+
 ## v0.73.0 (2026-05-28)
 
 *FB2 (FictionBook) now renders through WebKitGTK too. Phase 17.3.*

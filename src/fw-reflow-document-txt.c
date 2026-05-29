@@ -8,6 +8,7 @@
  */
 
 #include "fw-reflow-document-txt.h"
+#include "fw-reflow-html.h"
 
 #include <string.h>
 
@@ -209,6 +210,48 @@ txt_get_metadata (FwReflowDocument *doc)
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
+/* WebView path: wrap each parsed paragraph in <p> (the block text is
+ * already g_markup_escape_text'd, so it's HTML-safe), with intra-paragraph
+ * newlines as <br>. No images. */
+static gboolean
+txt_produce_html (FwReflowDocument *doc, const char *doc_id,
+                  char **out_html, GHashTable **out_images, GError **error)
+{
+  (void) doc_id; (void) error;
+  FwReflowDocumentTxt *self = FW_REFLOW_DOCUMENT_TXT (doc);
+
+  const char *title = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "title") : NULL;
+
+  GString *out = g_string_new ("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *e = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", e);
+  }
+  g_string_append (out, "<style>");
+  g_string_append (out, fw_reflow_reading_css ());
+  g_string_append (out, "</style></head><body><section data-spine=\"0\">");
+
+  GListModel *m = G_LIST_MODEL (self->blocks);
+  guint n = g_list_model_get_n_items (m);
+  for (guint i = 0; i < n; i++) {
+    g_autoptr (FwBlock) b = g_list_model_get_item (m, i);
+    const char *t = fw_block_get_text (b);
+    if (!t || !*t) continue;
+    g_string_append (out, "<p>");
+    for (const char *p = t; *p; p++) {
+      if (*p == '\n') g_string_append (out, "<br>");
+      else            g_string_append_c (out, *p);
+    }
+    g_string_append (out, "</p>");
+  }
+
+  g_string_append (out, "</section></body></html>");
+  if (out_images) *out_images = NULL;
+  *out_html = g_string_free (out, FALSE);
+  return TRUE;
+}
+
 static void
 fw_reflow_document_txt_iface_init (FwReflowDocumentInterface *iface)
 {
@@ -219,6 +262,7 @@ fw_reflow_document_txt_iface_init (FwReflowDocumentInterface *iface)
   iface->get_toc               = txt_get_toc;
   iface->find_block_by_anchor  = txt_find_block_by_anchor;
   iface->get_metadata          = txt_get_metadata;
+  iface->produce_html          = txt_produce_html;
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */

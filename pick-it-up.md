@@ -1,7 +1,7 @@
-<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.73.0.
+<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.74.0.
      Delete or refresh when the next chunk lands. -->
 
-# Framework: Pick-It-Up Notes (after v0.73.0)
+# Framework: Pick-It-Up Notes (after v0.74.0)
 
 Resume point for the EPUB / reflow / comic work. Everything below is on
 `main` and pushed unless stated otherwise.
@@ -10,8 +10,10 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 ## 1. Where things stand
 
-- **Branch / version:** `main`, clean working tree, at **v0.73.0**,
-  pushed to `origin/main`.
+- **Branch / version:** `main`, clean working tree, at **v0.74.0**,
+  pushed to `origin/main`. All five reflow formats (EPUB / MOBI / AZW3 /
+  FB2 / TXT) now render through the WebView; the legacy FwReflowView
+  block-model path is unused.
 - **Parked branch:** `parking/phase-16-hyphenation` (`88d2e72`) still
   exists. en_US Knuth-Liang hyphenation for the *native* reflow path,
   superseded by WebKit (CSS `hyphens: auto`). Don't delete; it's the only
@@ -37,6 +39,9 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
     headings by depth, inline emphasis/strong/etc., poems/citations to
     blockquotes, `<image>` to `framework-img:`); retains the xmlDoc + raw
     `<binary>` bytes; reuses the shared reading CSS.
+  - **v0.74.0** TXT renders via WebKit (Phase 17.4): `txt_produce_html`
+    emits a `<p>` per blank-line paragraph (hard newlines to `<br>`),
+    shared reading CSS. Completes the reflow migration.
 
 ---
 
@@ -108,23 +113,35 @@ Resume point for the EPUB / reflow / comic work. Everything below is on
 
 Priority-ish order; all are Phase 17.x in `roadmap.md`.
 
-1. **TXT -> `produce_html`** (17.4). The last format on the legacy view.
-   `fw-reflow-document-txt.c` currently emits the block model; give it a
-   `produce_html` that wraps the text (paragraph-per-blank-line, or
-   `<pre>` for code-ish text) with the shared reading CSS. Smallest of
-   the four; no images. Then ALL reflow formats are on WebKit.
-   (DONE: **MOBI/AZW3** v0.72.0 / Phase 17.2; **FB2** v0.73.0 / Phase
-   17.3. See `mobi_produce_html`, `fb2_produce_html`, and the shared
-   `fw-reflow-html` module.)
-2. **Delete `FwReflowView`** (17.5) once TXT lands and all four reflow
-   formats are on WebKit. Drops `get_block_model` / `get_image` /
-   block-model search and the renderer halves of each backend, plus
-   `FwReflowView` / `FwReflowSidebar` and the `fw-reflow-view.c`
-   typography/pagination code. Big cleanup; verify nothing else uses the
-   block model first.
-   NOTE: there is no FB2 file in the corpus; v0.73.0 was verified on a
-   hand-built `/tmp/test.fb2` (HTML-transform inspection) + the proven
-   WebView path. Real-world FB2 wants a real file when one turns up.
+1. **Delete `FwReflowView`** (17.5) — the big cleanup, now unblocked.
+   All five reflow formats are on the WebView, so the block-model path
+   is dead code. This needs a PLAN before coding (it's broad + touches
+   several files). Scope to map out first:
+   - Drop the `FwReflowDocument` vtable slots only the block path used:
+     `get_block_model`, `get_image`, `find_block_by_anchor`, plus the
+     block-model `fw_reflow_document_search` (the WebView uses
+     `WebKitFindController`, not the block search). Keep `produce_html`,
+     `get_toc`, `get_metadata`, `supports_html`.
+   - Delete `fw-reflow-view.{c,h}` (`FwReflowView`) and
+     `fw-reflow-sidebar.{c,h}` if the WebView path fully replaces them
+     (CHECK: does the window still use `FwReflowSidebar` for the reflow
+     TOC, or did the WebView path take over TOC rendering? Verify before
+     deleting.)
+   - In each backend (`txt`/`fb2`/`mobi`/`epub`), remove the
+     block-emitting walk and the `FwBlock`/texture machinery now that
+     only `produce_html` + raw image bytes are used. The MOBI/FB2/TXT
+     backends still build the block model in `open` purely for the dead
+     path; that work can go.
+   - `fw-window.c`: remove the `reflow_via_webview` branch (always true
+     now) and the `"reflow"` GtkStack page / FwReflowView wiring.
+   - Watch the `FwBlock` type + `fw-reflow-view.c` pagination/typography:
+     all removable once no backend emits blocks.
+   - **Caveat:** there is no FB2 file in the corpus; v0.73.0 was verified
+     on a hand-built `/tmp/test.fb2` (HTML-transform inspection) + the
+     proven WebView path. Real-world FB2 wants a real file when one turns
+     up. TXT verified on `/tmp/test.txt`.
+   (DONE this run: **MOBI/AZW3** v0.72 / 17.2; **FB2** v0.73 / 17.3;
+   **TXT** v0.74 / 17.4. Shared `fw-reflow-html` module underpins all.)
 4. **Security tightening** (17.x): restore the Landlock EXECUTE drop
    behind a path-beneath allow for `/usr/libexec/webkitgtk-6.0/*`; scrub
    inline event-handler attributes (`onclick=` etc.) during HTML emit;
