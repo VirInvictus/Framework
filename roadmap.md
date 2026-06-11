@@ -279,6 +279,15 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 
 ---
 
+## Repo hygiene (workspace sweep, 2026-06-09)
+*The whole tree compiles with zero warnings at `-Wall -Wextra`; these are repo-state items, not code findings. (The sweep also flagged "meson test reports no tests defined", but that was a default build: the stress suite is registered behind `-Dstress=true` and runs fine there. Not an issue.)*
+
+- [ ] **Commit the in-flight v0.77.0 work.** 13 modified files uncommitted since the 28 May v0.76.0 commit: the reflow-document work (`fw-reflow-document*.c/h` for epub/fb2/md/mobi/txt), `meson.build`, `patchnotes.md`, `roadmap.md`, `pick-it-up.md`, `CLAUDE.md`, and the stress test. That looks like a complete unit of work sitting unprotected.
+- [ ] **Clear the script litter at repo root.** `modify_c.py`, `modify_mobi.py`, `modify_pick.py`, `modify_reflow.py` are untracked one-off editing helpers from a past session; their effect is already in the source. Delete them or move them out of the repo.
+- [ ] Gitignore or remove the untracked `.antigravitycli/` directory.
+
+---
+
 ## Deferred (v2.0+ / Strictly Out of Scope for 1.0)
 *Listed so the architecture doesn't preclude them, but forbidden from development until 1.0 ships.*
 
