@@ -1,7 +1,7 @@
-<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.76.0.
+<!-- Scratch handoff doc. Written 2026-05-28, refreshed after v0.77.0.
      Delete or refresh when the next chunk lands. -->
 
-# Framework: Pick-It-Up Notes (after v0.76.0)
+# Framework: Pick-It-Up Notes (after v0.77.0)
 
 Resume point for the reflow / WebKit cleanup work. Everything below is on
 `main` unless stated otherwise.
@@ -10,7 +10,7 @@ Resume point for the reflow / WebKit cleanup work. Everything below is on
 
 ## 1. Where things stand
 
-- **Branch / version:** `main`, at **v0.76.0**. (Confirm push state with
+- **Branch / version:** `main`, at **v0.77.0**. (Confirm push state with
   `git log --oneline origin/main..HEAD`.) Every reflow format (EPUB /
   MOBI / AZW3 / FB2 / TXT / Markdown) renders through `FwWebView`
   (WebKitGTK). The legacy `FwReflowView` block-model renderer is **gone**.
@@ -33,6 +33,7 @@ Resume point for the reflow / WebKit cleanup work. Everything below is on
   - **v0.75.0** Markdown (net-new): `FwReflowDocumentMd` + vendored md4c
     (MIT, `src/md4c/`, GitHub dialect, `MD_FLAG_NOHTML`).
   - **v0.76.0** Phase **17.5a**: deleted `FwReflowView`
+  - **v0.77.0** Phase **17.5b**: Stripped the block-model machinery entirely. Reflow interface no longer mentions FwBlock.
     (`fw-reflow-view.{c,h}` gone); unified `fw-window.c` on the single
     `"webview"` reflow path (dual stack pages, parallel nav/search/save
     branches, and `reflow_hits` / `reflow_active` / `reflow_search_*` /
@@ -73,9 +74,9 @@ Resume point for the reflow / WebKit cleanup work. Everything below is on
 
 ---
 
-## 3. Next step: Phase 17.5b (the resume point)
+## 3. Next step: Phase 17.x
 
-**Goal:** strip the now-dead block-model machinery. Decided with Brandon:
+**Goal:** Security tightening and publisher CSS.
 do it as its own increment with his visual sign-off; rewrite the stress
 test to drive `produce_html` (keep coverage, don't delete it).
 

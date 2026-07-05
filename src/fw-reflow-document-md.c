@@ -6,10 +6,7 @@
  * HTML is disabled (MD_FLAG_NOHTML) so an untrusted .md can't inject
  * <script> into the JS-enabled WebView; literal HTML is escaped instead.
  *
- * This backend has no block model (the legacy FwReflowView path is on
- * its way out); it only implements produce_html plus the metadata/TOC
- * accessors. get_block_model returns an empty store to satisfy the
- * interface.
+ * This backend implements produce_html plus the metadata/TOC accessors.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -24,7 +21,6 @@ struct _FwReflowDocumentMd {
   char         *md;          /* raw Markdown, UTF-8 (owned) */
   gsize         md_len;
   GHashTable   *metadata;    /* gchar* → gchar* */
-  GListStore   *blocks;      /* empty — satisfies the interface */
   GListStore   *toc;         /* empty */
   char         *path;
 };
@@ -83,29 +79,9 @@ md_close (FwReflowDocument *doc)
 }
 
 static GListModel *
-md_get_block_model (FwReflowDocument *doc)
-{
-  return G_LIST_MODEL (FW_REFLOW_DOCUMENT_MD (doc)->blocks);
-}
-
-static GdkTexture *
-md_get_image (FwReflowDocument *doc, const char *image_id)
-{
-  (void) doc; (void) image_id;
-  return NULL;
-}
-
-static GListModel *
 md_get_toc (FwReflowDocument *doc)
 {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_MD (doc)->toc);
-}
-
-static guint
-md_find_block_by_anchor (FwReflowDocument *doc, const char *anchor_id)
-{
-  (void) doc; (void) anchor_id;
-  return 0;
 }
 
 static GHashTable *
@@ -163,10 +139,7 @@ fw_reflow_document_md_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = md_open;
   iface->close                 = md_close;
-  iface->get_block_model       = md_get_block_model;
-  iface->get_image             = md_get_image;
   iface->get_toc               = md_get_toc;
-  iface->find_block_by_anchor  = md_find_block_by_anchor;
   iface->get_metadata          = md_get_metadata;
   iface->produce_html          = md_produce_html;
 }
@@ -179,7 +152,6 @@ fw_reflow_document_md_finalize (GObject *object)
   FwReflowDocumentMd *self = FW_REFLOW_DOCUMENT_MD (object);
   g_clear_pointer (&self->md, g_free);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
-  g_clear_object (&self->blocks);
   g_clear_object (&self->toc);
   g_clear_pointer (&self->path, g_free);
   G_OBJECT_CLASS (fw_reflow_document_md_parent_class)->finalize (object);
@@ -194,8 +166,7 @@ fw_reflow_document_md_class_init (FwReflowDocumentMdClass *klass)
 static void
 fw_reflow_document_md_init (FwReflowDocumentMd *self)
 {
-  self->blocks = g_list_store_new (FW_TYPE_BLOCK);
-  self->toc    = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
+  self->toc = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
 }
 
 FwReflowDocumentMd *

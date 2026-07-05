@@ -1,7 +1,7 @@
 /* fw-reflow-document-txt.c — TXT reflow backend
  *
- * Splits the file on blank-line boundaries to produce one
- * FW_BLOCK_PARAGRAPH per chunk. Encoding is UTF-8 with a fallback to
+ * produce_html splits the file on blank-line boundaries to emit one
+ * <p> per chunk for the WebView. Encoding is UTF-8 with a fallback to
  * ISO-8859-1 (and a BOM-driven UTF-16 unwrap) when bytes don't validate.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -10,11 +10,9 @@
 #include "fw-reflow-document-txt.h"
 #include "fw-reflow-html.h"
 
-#include <string.h>
-
 struct _FwReflowDocumentTxt {
   GObject      parent_instance;
-  GListStore  *blocks;     /* GListStore<FwBlock> */
+  char        *text;       /* decoded UTF-8 body (owned) */
   GListStore  *toc;        /* GListStore<FwReflowTocItem> — empty for TXT */
   GHashTable  *metadata;   /* gchar* → gchar* */
   char        *path;
@@ -68,17 +66,16 @@ bytes_to_utf8 (const char *data, gsize len)
   return out;
 }
 
-/* ── Paragraph splitter ───────────────────────────────────────────── */
+/* ── Paragraph emitter ────────────────────────────────────────────── */
 
-/* Push a paragraph after trimming surrounding blank lines and escaping
- * Pango markup. Empty trimmed text is dropped. */
+/* Emit one <p> for the [start, end) chunk after trimming surrounding
+ * whitespace and HTML-escaping. Intra-paragraph newlines become <br>.
+ * Empty trimmed text is dropped. */
 static void
-push_paragraph (GListStore *store, const char *start, const char *end)
+emit_paragraph (GString *out, const char *start, const char *end)
 {
-  /* Trim leading whitespace */
   while (start < end && g_ascii_isspace (*start))
     start++;
-  /* Trim trailing whitespace */
   while (end > start && g_ascii_isspace (*(end - 1)))
     end--;
   if (start >= end)
@@ -87,21 +84,23 @@ push_paragraph (GListStore *store, const char *start, const char *end)
   g_autofree char *raw = g_strndup (start, end - start);
   g_autofree char *escaped = g_markup_escape_text (raw, -1);
 
-  FwBlock *block = fw_block_new (FW_BLOCK_PARAGRAPH, 0, escaped,
-                                 NULL, NULL, 0);
-  g_list_store_append (store, block);
-  g_object_unref (block);
+  g_string_append (out, "<p>");
+  for (const char *p = escaped; *p; p++) {
+    if (*p == '\n') g_string_append (out, "<br>");
+    else            g_string_append_c (out, *p);
+  }
+  g_string_append (out, "</p>");
 }
 
+/* Walk the decoded text, splitting on runs of two or more newlines
+ * (allowing optional CRs) — Markdown-style blank-line separation — and
+ * emit a <p> per paragraph into `out`. */
 static void
-build_blocks_from_text (GListStore *store, const char *utf8)
+emit_paragraphs (GString *out, const char *utf8)
 {
   if (!utf8 || !*utf8)
     return;
 
-  /* Split on runs of two or more newlines (allowing optional CRs), so
-   * paragraph boundaries match the way TXT authors actually write
-   * — Markdown-style blank-line separation. */
   const char *p = utf8;
   const char *block_start = p;
 
@@ -109,19 +108,16 @@ build_blocks_from_text (GListStore *store, const char *utf8)
     if (*p == '\n') {
       const char *nl = p;
       const char *q = p + 1;
-      /* Skip optional CRs and whitespace until we either find a second
-       * newline (paragraph break) or hit a non-blank character. */
       gboolean blank_run = FALSE;
       while (*q == '\r' || *q == ' ' || *q == '\t') q++;
       if (*q == '\n') {
         blank_run = TRUE;
-        /* Consume the entire run of blank-only lines. */
         while (*q == '\n' || *q == '\r' || *q == ' ' || *q == '\t')
           q++;
       }
 
       if (blank_run) {
-        push_paragraph (store, block_start, nl);
+        emit_paragraph (out, block_start, nl);
         block_start = q;
         p = q;
         continue;
@@ -131,7 +127,7 @@ build_blocks_from_text (GListStore *store, const char *utf8)
   }
 
   /* Trailing paragraph (no trailing blank line). */
-  push_paragraph (store, block_start, p);
+  emit_paragraph (out, block_start, p);
 }
 
 /* ── Interface implementation ─────────────────────────────────────── */
@@ -153,7 +149,7 @@ txt_open (FwReflowDocument *doc, const char *path, GError **error)
     return FALSE;
   }
 
-  build_blocks_from_text (self->blocks, utf8);
+  self->text = g_steal_pointer (&utf8);
   self->path = g_strdup (path);
 
   /* Minimal metadata — filename + byte size. */
@@ -170,23 +166,7 @@ txt_open (FwReflowDocument *doc, const char *path, GError **error)
 static void
 txt_close (FwReflowDocument *doc)
 {
-  FwReflowDocumentTxt *self = FW_REFLOW_DOCUMENT_TXT (doc);
-  if (self->blocks)
-    g_list_store_remove_all (self->blocks);
-}
-
-static GListModel *
-txt_get_block_model (FwReflowDocument *doc)
-{
-  FwReflowDocumentTxt *self = FW_REFLOW_DOCUMENT_TXT (doc);
-  return G_LIST_MODEL (self->blocks);
-}
-
-static GdkTexture *
-txt_get_image (FwReflowDocument *doc, const char *image_id)
-{
-  (void) doc; (void) image_id;
-  return NULL;  /* TXT has no images. */
+  (void) doc;
 }
 
 static GListModel *
@@ -196,13 +176,6 @@ txt_get_toc (FwReflowDocument *doc)
   return G_LIST_MODEL (self->toc);
 }
 
-static guint
-txt_find_block_by_anchor (FwReflowDocument *doc, const char *anchor_id)
-{
-  (void) doc; (void) anchor_id;
-  return 0;
-}
-
 static GHashTable *
 txt_get_metadata (FwReflowDocument *doc)
 {
@@ -210,9 +183,8 @@ txt_get_metadata (FwReflowDocument *doc)
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
-/* WebView path: wrap each parsed paragraph in <p> (the block text is
- * already g_markup_escape_text'd, so it's HTML-safe), with intra-paragraph
- * newlines as <br>. No images. */
+/* WebView path: split the decoded text on blank lines and emit a <p>
+ * per paragraph (escaped, intra-paragraph newlines as <br>). No images. */
 static gboolean
 txt_produce_html (FwReflowDocument *doc, const char *doc_id,
                   char **out_html, GHashTable **out_images, GError **error)
@@ -232,19 +204,7 @@ txt_produce_html (FwReflowDocument *doc, const char *doc_id,
   g_string_append (out, fw_reflow_reading_css ());
   g_string_append (out, "</style></head><body><section data-spine=\"0\">");
 
-  GListModel *m = G_LIST_MODEL (self->blocks);
-  guint n = g_list_model_get_n_items (m);
-  for (guint i = 0; i < n; i++) {
-    g_autoptr (FwBlock) b = g_list_model_get_item (m, i);
-    const char *t = fw_block_get_text (b);
-    if (!t || !*t) continue;
-    g_string_append (out, "<p>");
-    for (const char *p = t; *p; p++) {
-      if (*p == '\n') g_string_append (out, "<br>");
-      else            g_string_append_c (out, *p);
-    }
-    g_string_append (out, "</p>");
-  }
+  emit_paragraphs (out, self->text);
 
   g_string_append (out, "</section></body></html>");
   if (out_images) *out_images = NULL;
@@ -257,10 +217,7 @@ fw_reflow_document_txt_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = txt_open;
   iface->close                 = txt_close;
-  iface->get_block_model       = txt_get_block_model;
-  iface->get_image             = txt_get_image;
   iface->get_toc               = txt_get_toc;
-  iface->find_block_by_anchor  = txt_find_block_by_anchor;
   iface->get_metadata          = txt_get_metadata;
   iface->produce_html          = txt_produce_html;
 }
@@ -271,7 +228,7 @@ static void
 fw_reflow_document_txt_finalize (GObject *object)
 {
   FwReflowDocumentTxt *self = FW_REFLOW_DOCUMENT_TXT (object);
-  g_clear_object (&self->blocks);
+  g_clear_pointer (&self->text, g_free);
   g_clear_object (&self->toc);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
   g_clear_pointer (&self->path, g_free);
@@ -287,8 +244,7 @@ fw_reflow_document_txt_class_init (FwReflowDocumentTxtClass *klass)
 static void
 fw_reflow_document_txt_init (FwReflowDocumentTxt *self)
 {
-  self->blocks = g_list_store_new (FW_TYPE_BLOCK);
-  self->toc    = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
+  self->toc = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
 }
 
 FwReflowDocumentTxt *

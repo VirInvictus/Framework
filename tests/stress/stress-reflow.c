@@ -2,17 +2,17 @@
  *
  * Every other stress test drives FwDocument + FwCache, i.e. the
  * fixed-layout (MuPDF / DjVu / libarchive) pipeline. None of them touch
- * the native reflow pipeline: the EPUB / MOBI / AZW3 parsers behind
- * FwReflowDocument, or the v0.66 search core. This test does.
+ * the reflow pipeline: the EPUB / MOBI / AZW3 parsers behind
+ * FwReflowDocument. This test does.
  *
- * Scope is the document layer only. Pagination and search-highlight
- * splicing live in FwReflowView, a GtkWidget — exercising those means
- * realizing a widget, which needs a display, so they're verified by
- * running the app rather than here. What this catches: parser
- * regressions (empty / malformed block models), search-core breakage
- * (wrong hit counts, out-of-range block indices, leaks), and ownership
- * bugs in the get_toc / get_metadata accessors. ASan reports leaks;
- * the harness reports crashes.
+ * Scope is the document layer only. Reflow formats render in a
+ * WebKitWebView (FwWebView), which needs a display, so the rendered
+ * output is verified by running the app rather than here. What this
+ * catches: parser regressions in produce_html (empty / structurally
+ * broken HTML), ownership bugs in the image table (the per-load
+ * GHashTable<gchar*, GBytes*> handed to the WebView), and ownership bugs
+ * in the get_toc / get_metadata accessors. ASan reports leaks; the
+ * harness reports crashes.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -22,10 +22,11 @@
 
 #include <glib.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef struct {
   const char *file;
-  const char *needle;   /* a word that should appear in normal prose */
+  const char *needle;   /* a lowercase word that should appear in prose */
 } ReflowSample;
 
 static const ReflowSample SAMPLES[] = {
@@ -56,61 +57,55 @@ test_one (const char *root, const ReflowSample *s)
 
   int fail = 0;
 
-  /* Walk every block, touching each accessor. Catches parser output that
-   * is structurally bad in a way that only blows up on read. */
-  GListModel *model = fw_reflow_document_get_block_model (doc);
-  guint n = model ? g_list_model_get_n_items (model) : 0;
-  guint nonempty = 0;
-  for (guint i = 0; i < n; i++) {
-    g_autoptr (FwBlock) b = g_list_model_get_item (model, i);
-    (void) fw_block_get_kind (b);
-    (void) fw_block_get_level (b);
-    (void) fw_block_get_image_id (b);
-    (void) fw_block_get_anchor_id (b);
-    (void) fw_block_get_flags (b);
-    const char *t = fw_block_get_text (b);
-    if (t && *t) nonempty++;
-  }
-  if (n == 0) {
-    fprintf (stderr, "  FAIL %s: empty block model\n", s->file);
-    fail = 1;
+  /* produce_html is the live render path: parse the whole document and
+   * stitch it into one HTML string plus an image table. */
+  char *html = NULL;
+  GHashTable *images = NULL;
+  if (!fw_reflow_document_produce_html (doc, "stress", &html, &images, &error)) {
+    fprintf (stderr, "  FAIL produce_html %s: %s\n", s->file,
+             error ? error->message : "(null)");
+    g_object_unref (doc);
+    return 1;
   }
 
-  /* Search: a common word should hit, and every hit must reference a
-   * real block. */
-  GArray *hits = fw_reflow_document_search (doc, s->needle);
-  guint hit_count = hits ? hits->len : 0;
-  if (hits) {
-    for (guint i = 0; i < hits->len; i++) {
-      FwReflowHit *h = &g_array_index (hits, FwReflowHit, i);
-      if (h->block >= n) {
-        fprintf (stderr, "  FAIL %s: hit block %u out of range (n=%u)\n",
-                 s->file, h->block, n);
+  gsize html_len = html ? strlen (html) : 0;
+  if (html_len == 0) {
+    fprintf (stderr, "  FAIL %s: produce_html returned empty HTML\n", s->file);
+    fail = 1;
+  } else {
+    /* Structural sanity: a stitched document has a body and closes. */
+    if (!strstr (html, "<body") || !strstr (html, "</html>")) {
+      fprintf (stderr, "  FAIL %s: HTML missing <body>/</html>\n", s->file);
+      fail = 1;
+    }
+    /* Content smoke: a common word should survive into the rendered
+     * HTML. Soft (WARN) — case / markup can hide it in edge cases. */
+    g_autofree char *low = g_ascii_strdown (html, -1);
+    if (!strstr (low, s->needle))
+      fprintf (stderr, "  WARN %s: needle '%s' not found in HTML\n",
+               s->file, s->needle);
+  }
+
+  /* The image table is optional, but when present every value must be a
+   * non-empty GBytes (catches type / ownership bugs in the resolver). */
+  guint n_images = 0;
+  if (images) {
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init (&it, images);
+    while (g_hash_table_iter_next (&it, &k, &v)) {
+      GBytes *b = v;
+      if (!b || g_bytes_get_size (b) == 0) {
+        fprintf (stderr, "  FAIL %s: image '%s' has no bytes\n",
+                 s->file, (const char *) k);
         fail = 1;
         break;
       }
+      n_images++;
     }
-    g_array_unref (hits);
+    g_hash_table_unref (images);
   }
-  if (nonempty > 0 && hit_count == 0)
-    fprintf (stderr, "  WARN %s: '%s' produced no hits in %u non-empty blocks\n",
-             s->file, s->needle, nonempty);
-
-  /* A garbage token must return no matches, and an empty needle must
-   * return NULL (not an empty array). */
-  GArray *none = fw_reflow_document_search (doc, "zzqqxx_no_such_token_42");
-  if (none) {
-    fprintf (stderr, "  FAIL %s: garbage token returned %u hits\n",
-             s->file, none->len);
-    fail = 1;
-    g_array_unref (none);
-  }
-  GArray *empty = fw_reflow_document_search (doc, "");
-  if (empty) {
-    fprintf (stderr, "  FAIL %s: empty needle returned non-NULL\n", s->file);
-    fail = 1;
-    g_array_unref (empty);
-  }
+  g_free (html);
 
   /* TOC (transfer-none, do not unref) + metadata (transfer-full, unref)
    * smoke: just call them and let ASan catch ownership bugs. */
@@ -118,8 +113,8 @@ test_one (const char *root, const ReflowSample *s)
   GHashTable *meta = fw_reflow_document_get_metadata (doc);
   if (meta) g_hash_table_unref (meta);
 
-  printf ("  %s: blocks=%u (nonempty=%u) hits['%s']=%u %s\n",
-          s->file, n, nonempty, s->needle, hit_count, fail ? "FAIL" : "ok");
+  printf ("  %s: html=%zu bytes images=%u %s\n",
+          s->file, html_len, n_images, fail ? "FAIL" : "ok");
 
   g_object_unref (doc);
   return fail;

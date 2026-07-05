@@ -2,6 +2,20 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.77.0 (2026-05-29)
+
+*Phase 17.5b: the block-model machinery has been entirely stripped from the reflow backend.*
+
+### Stripped block-model machinery
+
+* **Removed `FwBlock` and related structures.** Now that no reflow format uses the block-model renderer, `FwBlock`, `FwReflowHit`, and all the associated code (such as block-building walks inside backends) have been removed from `fw-reflow-document.h` and `.c`.
+* **Cleaned up backends.** The MOBI, EPUB, FB2, TXT, and Markdown backends were modified to completely remove references to blocks.
+* **Rewrote `stress-reflow` test.** The regression tests for reflow backends now test the structural validity of the `produce_html` output, instead of validating the old `get_block_model` functionality.
+
+### Fixed
+
+* **Font-obfuscated EPUBs no longer show a false DRM notice.** The presence of `META-INF/encryption.xml` was treated as DRM, but that file also marks EPUB OCF font obfuscation, which is common in DRM-free retail books and leaves the text fully readable. A book like this opened and rendered on v0.76 (via the MuPDF fallback) but would have shown a "DRM-protected" wall once `produce_html` started honouring the flag. The EPUB backend now parses `encryption.xml` and only treats the book as DRM when a real content-encryption algorithm is present; obfuscation-only manifests (the IDPF and Adobe font-mangling algorithms) open and reflow normally. Rendering the obfuscated fonts as the publisher intended (de-obfuscation) is queued with the Publisher-CSS work, since author CSS and fonts are not served to the WebView yet.
+
 ## v0.76.0 (2026-05-28)
 
 *Phase 17.5a: the legacy native-reflow renderer is gone. Every ebook format now has exactly one render path.*

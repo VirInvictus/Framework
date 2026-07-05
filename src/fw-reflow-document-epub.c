@@ -4,18 +4,13 @@
  * bytes get cached into a path → GBytes hash up front so subsequent
  * lookups are random-access). Parses META-INF/container.xml to find
  * the OPF rootfile; parses the OPF for manifest + spine + metadata;
- * walks the spine in order, parsing each XHTML through GMarkupParser
- * into FwBlocks. Image manifest items are decoded to GdkTextures and
- * keyed by both their resolved ZIP path and their manifest id.
+ * builds the chapter TOC from the NCX (EPUB 2) or nav.xhtml (EPUB 3).
+ * produce_html re-parses each spine chapter with libxml2's HTML parser,
+ * rewrites <img> srcs to the framework-img:// scheme, strips scripts,
+ * and stitches the bodies into one HTML document for the WebView.
  *
  * NOT in scope here:
  *   - Author CSS (deliberately dropped per design doc §3 "EPUB").
- *   - Nested list / table layout (real LIST / LIST_ITEM model is
- *     deferred; <li> renders as a "• "-prefixed paragraph).
- *   - Tolerant HTML for malformed XHTML (current parser is strict
- *     GMarkupParser; chapter files that fail to parse are skipped
- *     with a warning and the rest of the book opens).
- *   - DRM detection (encrypted EPUBs will surface as parse errors).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -28,25 +23,22 @@
 #include <string.h>
 #include <libxml/HTMLparser.h>
 #include <libxml/HTMLtree.h>
+#include <libxml/parser.h>
 #include <libxml/tree.h>
 
 /* ── Type definition ──────────────────────────────────────────────── */
 
 struct _FwReflowDocumentEpub {
   GObject       parent_instance;
-  GListStore   *blocks;     /* GListStore<FwBlock> */
   GListStore   *toc;        /* GListStore<FwReflowTocItem> */
   GHashTable   *metadata;   /* gchar* → gchar* */
-  GHashTable   *images;     /* gchar* (zip-path or manifest-id) → GdkTexture */
-  GHashTable   *anchors;    /* gchar* (anchor_id) → guint position+1 */
   GHashTable   *zip;        /* gchar* (zip-path) → GBytes (owned) */
   char         *path;
   char         *opf_dir;    /* directory portion of OPF path within ZIP */
+  gboolean      drm;        /* encrypted EPUB — produce_html emits a notice */
 
-  /* WebView render path (Phase 17, produce_html).  Populated alongside
-   * the block-model walk so produce_html can stitch the spine without
-   * re-parsing the OPF.  These are immutable for the lifetime of the
-   * document — the URI scheme handler reads them from any thread. */
+  /* WebView render path (produce_html).  Immutable for the lifetime of
+   * the document — the URI scheme handler reads them from any thread. */
   GPtrArray    *spine_paths;        /* gchar* resolved zip paths in order */
   GHashTable   *zip_to_image_id;    /* gchar* zip-path → gchar* manifest-id (images only) */
   GHashTable   *image_bytes;        /* gchar* manifest-id → GBytes (owned) */
@@ -404,363 +396,6 @@ opf_text (GMarkupParseContext *ctx G_GNUC_UNUSED,
 }
 
 
-static int
-heading_level (const char *name)
-{
-  if (g_str_equal (name, "h1")) return 1;
-  if (g_str_equal (name, "h2")) return 2;
-  if (g_str_equal (name, "h3")) return 3;
-  if (g_str_equal (name, "h4")) return 4;
-  if (g_str_equal (name, "h5")) return 5;
-  if (g_str_equal (name, "h6")) return 6;
-  return 0;
-}
-
-
-
-/* ── libxml2 chapter walker ────────────────────────────────────────
- *
- * libxml2's `htmlReadMemory` with HTML_PARSE_RECOVER + NOERROR +
- * NOWARNING tolerates the malformations real-world EPUBs ship with
- * — orphan close tags, unclosed elements, unquoted attributes,
- * `<a>` wrapping multiple `<p>`s. Same approach as the MOBI port.
- */
-
-typedef struct {
-  GListStore  *blocks;
-  GHashTable  *anchors;
-  const char  *chapter_path;
-  gboolean     in_body;
-  gboolean     accum_active;
-  FwBlockKind  accum_kind;
-  int          accum_level;
-  guint        accum_flags;     /* extra FW_BLOCK_FLAG_* bits for this block */
-  GString     *accum;
-  char        *pending_anchor;
-  gboolean     chapter_marker_pushed;
-  /* Inline-tag stack — handles `<a>` wrapping multiple `<p>`s
-   * etc., same shape as the MOBI walker. */
-  GPtrArray   *open_inlines;
-  /* Ordered-list nesting. Each element is the next number to emit
-   * for an `<ol>`; 0 = `<ul>` (unordered). Top-of-stack is the
-   * innermost list. */
-  GArray      *ol_stack;
-} EpubWalkCtx;
-
-static const char *
-epub_pango_for_inline (const char *lname)
-{
-  if (g_str_equal (lname, "em") || g_str_equal (lname, "i"))      return "i";
-  if (g_str_equal (lname, "strong") || g_str_equal (lname, "b"))  return "b";
-  if (g_str_equal (lname, "code") || g_str_equal (lname, "tt") ||
-      g_str_equal (lname, "kbd")  || g_str_equal (lname, "samp")) return "tt";
-  if (g_str_equal (lname, "sub"))                                  return "sub";
-  if (g_str_equal (lname, "sup"))                                  return "sup";
-  if (g_str_equal (lname, "s") || g_str_equal (lname, "strike") ||
-      g_str_equal (lname, "del"))                                  return "s";
-  if (g_str_equal (lname, "u") || g_str_equal (lname, "ins") ||
-      g_str_equal (lname, "a"))                                    return "u";
-  return NULL;
-}
-
-static void
-ewalk_flush (EpubWalkCtx *cc)
-{
-  if (!cc->accum_active) return;
-  cc->accum_active = FALSE;
-
-  if (cc->open_inlines) {
-    for (gint i = (gint) cc->open_inlines->len - 1; i >= 0; i--)
-      g_string_append_printf (cc->accum, "</%s>",
-                              (const char *) cc->open_inlines->pdata[i]);
-  }
-
-  while (cc->accum->len > 0 &&
-         g_ascii_isspace (cc->accum->str[cc->accum->len - 1]))
-    g_string_truncate (cc->accum, cc->accum->len - 1);
-
-  if (cc->accum->len > 0) {
-    /* Push CHAPTER marker before the first content block of this
-     * spine entry — anchored to the chapter path so NCX
-     * `<content src="chapter.html">` lookups land on it. */
-    if (!cc->chapter_marker_pushed) {
-      FwBlock *chap = fw_block_new (FW_BLOCK_CHAPTER, 0, NULL, NULL,
-                                    cc->chapter_path, 0);
-      g_list_store_append (cc->blocks, chap);
-      if (cc->chapter_path) {
-        guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
-        g_hash_table_insert (cc->anchors, g_strdup (cc->chapter_path),
-                             GUINT_TO_POINTER (pos + 1));
-      }
-      g_object_unref (chap);
-      cc->chapter_marker_pushed = TRUE;
-    }
-
-    FwBlock *b = fw_block_new (cc->accum_kind, cc->accum_level,
-                               cc->accum->str, NULL,
-                               cc->pending_anchor, cc->accum_flags);
-    g_list_store_append (cc->blocks, b);
-    if (cc->pending_anchor) {
-      guint pos = g_list_model_get_n_items (G_LIST_MODEL (cc->blocks)) - 1;
-      g_autofree char *key =
-        cc->chapter_path
-          ? g_strdup_printf ("%s#%s", cc->chapter_path, cc->pending_anchor)
-          : g_strdup (cc->pending_anchor);
-      g_hash_table_insert (cc->anchors, g_steal_pointer (&key),
-                           GUINT_TO_POINTER (pos + 1));
-    }
-    g_object_unref (b);
-  }
-  g_string_truncate (cc->accum, 0);
-  g_clear_pointer (&cc->pending_anchor, g_free);
-  cc->accum_level = 0;
-  cc->accum_flags = 0;
-}
-
-static void
-ewalk_re_emit_inlines (EpubWalkCtx *cc)
-{
-  if (!cc->open_inlines) return;
-  for (guint i = 0; i < cc->open_inlines->len; i++)
-    g_string_append_printf (cc->accum, "<%s>",
-                            (const char *) cc->open_inlines->pdata[i]);
-}
-
-static void
-ewalk_start (EpubWalkCtx *cc, FwBlockKind kind, int level, xmlNode *element)
-{
-  ewalk_flush (cc);
-  cc->accum_active = TRUE;
-  cc->accum_kind   = kind;
-  cc->accum_level  = level;
-  for (xmlAttr *a = element->properties; a; a = a->next) {
-    if (g_ascii_strcasecmp ((const char *)a->name, "id") == 0 && a->children) {
-      const char *val = (const char *)a->children->content;
-      if (val && *val) {
-        g_clear_pointer (&cc->pending_anchor, g_free);
-        cc->pending_anchor = g_strdup (val);
-      }
-      break;
-    }
-  }
-  ewalk_re_emit_inlines (cc);
-}
-
-static void
-ewalk_text_escaped (GString *out, const char *text)
-{
-  if (!text) return;
-  for (const char *p = text; *p; p++) {
-    char c = *p;
-    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-    if (c == ' ' && out->len > 0 && out->str[out->len - 1] == ' ') continue;
-    if      (c == '<') g_string_append (out, "&lt;");
-    else if (c == '>') g_string_append (out, "&gt;");
-    else if (c == '&') g_string_append (out, "&amp;");
-    else               g_string_append_c (out, c);
-  }
-}
-
-static void ewalk_node (EpubWalkCtx *cc, xmlNode *node);
-
-static void
-ewalk_handle_element (EpubWalkCtx *cc, xmlNode *n)
-{
-  const char *name = (const char *)n->name;
-  g_autofree char *lname = g_ascii_strdown (name, -1);
-
-  int hl = heading_level (lname);
-  if (hl > 0) {
-    ewalk_start (cc, FW_BLOCK_HEADING, hl, n);
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "p")) {
-    ewalk_start (cc, FW_BLOCK_PARAGRAPH, 0, n);
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "blockquote")) {
-    ewalk_start (cc, FW_BLOCK_BLOCKQUOTE, 0, n);
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "pre")) {
-    ewalk_start (cc, FW_BLOCK_CODE, 0, n);
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "ul") || g_str_equal (lname, "ol")) {
-    /* Push a counter (1+) for `<ol>` or sentinel 0 for `<ul>`. The
-     * `<li>` handler reads + increments the top of stack. */
-    int slot = g_str_equal (lname, "ol") ? 1 : 0;
-    g_array_append_val (cc->ol_stack, slot);
-    ewalk_node (cc, n->children);
-    g_array_set_size (cc->ol_stack, cc->ol_stack->len - 1);
-    return;
-  }
-  if (g_str_equal (lname, "li")) {
-    int level = 0;  /* 0 = bullet, N>0 = "N." */
-    if (cc->ol_stack && cc->ol_stack->len > 0) {
-      int *top = &g_array_index (cc->ol_stack, int, cc->ol_stack->len - 1);
-      if (*top > 0) { level = *top; (*top)++; }
-    }
-    ewalk_start (cc, FW_BLOCK_LIST_ITEM, level, n);
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "figure")) {
-    /* Container — recurse so the inner img + figcaption emit as
-     * separate blocks. */
-    ewalk_node (cc, n->children);
-    return;
-  }
-  if (g_str_equal (lname, "figcaption")) {
-    ewalk_start (cc, FW_BLOCK_PARAGRAPH, 0, n);
-    cc->accum_flags |= FW_BLOCK_FLAG_CAPTION;
-    ewalk_node (cc, n->children);
-    ewalk_flush (cc);
-    return;
-  }
-  if (g_str_equal (lname, "hr")) {
-    ewalk_flush (cc);
-    FwBlock *hr = fw_block_new (FW_BLOCK_HR, 0, NULL, NULL, NULL, 0);
-    g_list_store_append (cc->blocks, hr);
-    g_object_unref (hr);
-    return;
-  }
-  if (g_str_equal (lname, "br")) {
-    if (cc->accum_active) g_string_append_c (cc->accum, '\n');
-    return;
-  }
-  if (g_str_equal (lname, "img")) {
-    ewalk_flush (cc);
-    const char *src = NULL;
-    for (xmlAttr *a = n->properties; a; a = a->next) {
-      if (g_ascii_strcasecmp ((const char *)a->name, "src") == 0 && a->children) {
-        src = (const char *)a->children->content;
-        break;
-      }
-    }
-    if (src && *src) {
-      g_autofree char *resolved = NULL;
-      if (cc->chapter_path) {
-        g_autofree char *chap_dir = dirname_zip (cc->chapter_path);
-        resolved = resolve_zip_path (chap_dir, src);
-      }
-      FwBlock *img = fw_block_new (FW_BLOCK_IMAGE, 0, NULL,
-                                    resolved ? resolved : src, NULL, 0);
-      g_list_store_append (cc->blocks, img);
-      g_object_unref (img);
-    }
-    return;
-  }
-
-  /* Inline tag inside an active accumulator. Track on stack so we
-   * can balance across block-level boundaries (an `<a>` wrapping
-   * multiple `<p>`s, common in real EPUBs). */
-  if (cc->accum_active) {
-    const char *pname = epub_pango_for_inline (lname);
-    if (pname) {
-      g_string_append_printf (cc->accum, "<%s>", pname);
-      g_ptr_array_add (cc->open_inlines, (gpointer) pname);
-      ewalk_node (cc, n->children);
-      if (cc->open_inlines->len > 0 &&
-          cc->open_inlines->pdata[cc->open_inlines->len - 1] == pname) {
-        g_ptr_array_remove_index (cc->open_inlines,
-                                   cc->open_inlines->len - 1);
-        if (cc->accum_active)
-          g_string_append_printf (cc->accum, "</%s>", pname);
-      }
-    } else {
-      ewalk_node (cc, n->children);
-    }
-    return;
-  }
-
-  /* Container we don't recognise — recurse so deeper block elements
-   * still get reached. */
-  ewalk_node (cc, n->children);
-}
-
-static void
-ewalk_node (EpubWalkCtx *cc, xmlNode *node)
-{
-  for (xmlNode *n = node; n; n = n->next) {
-    if (n->type == XML_ELEMENT_NODE) {
-      const char *name = (const char *)n->name;
-      g_autofree char *lname = g_ascii_strdown (name, -1);
-
-      if (g_str_equal (lname, "body")) {
-        gboolean was = cc->in_body;
-        cc->in_body = TRUE;
-        ewalk_node (cc, n->children);
-        cc->in_body = was;
-        continue;
-      }
-      if (g_str_equal (lname, "head") || g_str_equal (lname, "style") ||
-          g_str_equal (lname, "script") || g_str_equal (lname, "title")) {
-        continue;
-      }
-      if (!cc->in_body) {
-        if (g_str_equal (lname, "html")) {
-          ewalk_node (cc, n->children);
-          continue;
-        }
-        cc->in_body = TRUE;
-        ewalk_handle_element (cc, n);
-        cc->in_body = FALSE;
-        continue;
-      }
-      ewalk_handle_element (cc, n);
-    } else if (n->type == XML_TEXT_NODE && cc->accum_active) {
-      ewalk_text_escaped (cc->accum, (const char *)n->content);
-    }
-  }
-}
-
-static void
-parse_xhtml_chapter (FwReflowDocumentEpub *self,
-                     const char           *chapter_path,
-                     GBytes               *bytes)
-{
-  gsize len = 0;
-  const char *data = g_bytes_get_data (bytes, &len);
-
-  htmlDocPtr xdoc = htmlReadMemory (
-    data, (int) len,
-    NULL, "UTF-8",
-    HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
-    HTML_PARSE_NONET    | HTML_PARSE_NOBLANKS);
-  if (!xdoc) {
-    g_warning ("epub: htmlReadMemory failed for '%s'", chapter_path);
-    return;
-  }
-
-  EpubWalkCtx cc = {
-    .blocks       = self->blocks,
-    .anchors      = self->anchors,
-    .chapter_path = chapter_path,
-    .accum        = g_string_new (NULL),
-    .open_inlines = g_ptr_array_new (),
-    .ol_stack     = g_array_new (FALSE, FALSE, sizeof (int)),
-  };
-
-  ewalk_node (&cc, xmlDocGetRootElement (xdoc));
-  ewalk_flush (&cc);
-
-  g_string_free (cc.accum, TRUE);
-  g_clear_pointer (&cc.pending_anchor, g_free);
-  g_ptr_array_free (cc.open_inlines, TRUE);
-  g_array_free (cc.ol_stack, TRUE);
-  xmlFreeDoc (xdoc);
-}
-
 /* ── NCX TOC parser (EPUB 2 / 3 fallback) ─────────────────────────── */
 
 typedef struct {
@@ -1020,6 +655,63 @@ parse_nav_xhtml (FwReflowDocumentEpub *self,
   xmlFreeDoc (xdoc);
 }
 
+/* ── Encryption classification ────────────────────────────────────── */
+
+/* EPUB OCF resource obfuscation (embedded-font mangling) uses one of
+ * these two algorithms. Both scramble only font resources; the text
+ * content stays readable. Anything else in encryption.xml is real
+ * content encryption (Adobe ADEPT, Apple FairPlay, …) that we can't
+ * render. See https://www.w3.org/publishing/epub32/epub-ocf.html and
+ * .foliate-js/epub.js (the two obfuscation algorithm URIs). */
+static gboolean
+enc_algorithm_is_obfuscation (const char *algo)
+{
+  return algo &&
+    (g_strcmp0 (algo, "http://www.idpf.org/2008/embedding") == 0 ||
+     g_strcmp0 (algo, "http://ns.adobe.com/pdf/enc#RC") == 0);
+}
+
+static void
+enc_scan_node (xmlNodePtr node, gboolean *has_drm)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE)
+      continue;
+    if (xmlStrcasecmp (n->name, BAD_CAST "EncryptionMethod") == 0) {
+      xmlChar *algo = xmlGetProp (n, BAD_CAST "Algorithm");
+      if (!enc_algorithm_is_obfuscation ((const char *) algo))
+        *has_drm = TRUE;
+      if (algo) xmlFree (algo);
+    }
+    enc_scan_node (n->children, has_drm);
+  }
+}
+
+/* Classify META-INF/encryption.xml: TRUE only when some EncryptedData
+ * uses a non-obfuscation algorithm (real DRM). Font-obfuscation-only
+ * manifests — very common in DRM-free retail EPUBs — are NOT DRM, so
+ * the book opens and reflows normally. (The obfuscated fonts simply
+ * fall back to the bundled reading fonts: publisher CSS/fonts aren't
+ * served yet, so font de-obfuscation is queued with the Publisher-CSS
+ * phase in roadmap.md.) An unparseable manifest is treated as DRM —
+ * we can't verify it's benign. */
+static gboolean
+epub_encryption_is_drm (GBytes *enc)
+{
+  gsize len = 0;
+  const char *data = g_bytes_get_data (enc, &len);
+  xmlDocPtr d = xmlReadMemory (data, (int) len, NULL, "UTF-8",
+                               XML_PARSE_NOERROR | XML_PARSE_NOWARNING |
+                               XML_PARSE_NONET);
+  if (!d)
+    return TRUE;
+
+  gboolean has_drm = FALSE;
+  enc_scan_node (xmlDocGetRootElement (d), &has_drm);
+  xmlFreeDoc (d);
+  return has_drm;
+}
+
 /* ── Top-level open() ─────────────────────────────────────────────── */
 
 static gboolean
@@ -1030,25 +722,19 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   if (!read_zip_entries (self, path, error))
     return FALSE;
 
-  /* DRM detection — META-INF/encryption.xml indicates the EPUB is
-   * encrypted (Adobe ADEPT, Apple FairPlay, etc.). Foliate's stack
-   * surfaces a clear error rather than opening to garbled content.
-   * Framework opens the doc successfully but the only visible block
-   * is a clear explanation; user knows what's up at a glance. */
-  if (g_hash_table_contains (self->zip, "META-INF/encryption.xml")) {
+  /* Encryption classification — META-INF/encryption.xml alone does NOT
+   * mean DRM: it also marks EPUB OCF font obfuscation, which is common
+   * in DRM-free retail EPUBs and leaves the text fully readable. Only
+   * treat the book as DRM when a non-obfuscation algorithm is present
+   * (see epub_encryption_is_drm). Font-obfuscation-only books fall
+   * through and open normally. */
+  GBytes *enc = g_hash_table_lookup (self->zip, "META-INF/encryption.xml");
+  if (enc && epub_encryption_is_drm (enc)) {
     g_hash_table_insert (self->metadata, g_strdup ("title"),
                          g_strdup ("DRM-protected EPUB"));
     g_hash_table_insert (self->metadata, g_strdup ("format"),
                          g_strdup ("EPUB (encrypted)"));
-    static const char *drm_text =
-      "<b>This book is DRM-protected.</b>\n\n"
-      "Framework does not support DRM-encrypted EPUBs. "
-      "Convert via Calibre's DeDRM plugin, or open with a "
-      "DRM-aware reader.";
-    FwBlock *msg = fw_block_new (FW_BLOCK_PARAGRAPH, 0, drm_text,
-                                  NULL, NULL, 0);
-    g_list_store_append (self->blocks, msg);
-    g_object_unref (msg);
+    self->drm = TRUE;   /* produce_html emits the notice */
     self->path = g_strdup (path);
     return TRUE;
   }
@@ -1102,25 +788,13 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
     }
   }
 
-  /* Push cover image as the first block — flagged FW_BLOCK_FLAG_COVER
-   * so FwReflowView gives it a full-viewport page.  The cover_image_id
-   * field mirrors this for the produce_html (WebView) path so it can
-   * prepend the cover before the spine sections. */
-  if (oc.cover_id) {
-    const char *cover_href = g_hash_table_lookup (oc.manifest_href, oc.cover_id);
-    if (cover_href) {
-      FwBlock *cover = fw_block_new (FW_BLOCK_IMAGE, 0, NULL,
-                                      cover_href, NULL,
-                                      FW_BLOCK_FLAG_COVER);
-      g_list_store_append (self->blocks, cover);
-      g_object_unref (cover);
-    }
+  /* Record the cover manifest id so produce_html can prepend a cover
+   * section before the spine. */
+  if (oc.cover_id)
     self->cover_image_id = g_strdup (oc.cover_id);
-  }
 
-  /* Walk spine and parse each chapter's XHTML.  In parallel, mirror the
-   * resolved zip path into self->spine_paths so produce_html can stitch
-   * the spine later without re-walking the OPF. */
+  /* Record the resolved spine paths in order so produce_html can stitch
+   * the chapters without re-walking the OPF. */
   for (guint i = 0; i < oc.spine->len; i++) {
     const char *idref = oc.spine->pdata[i];
     const char *href  = g_hash_table_lookup (oc.manifest_href, idref);
@@ -1128,12 +802,10 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_warning ("epub: spine idref '%s' not in manifest", idref);
       continue;
     }
-    GBytes *cb = g_hash_table_lookup (self->zip, href);
-    if (!cb) {
+    if (!g_hash_table_contains (self->zip, href)) {
       g_warning ("epub: chapter '%s' missing from archive", href);
       continue;
     }
-    parse_xhtml_chapter (self, href, cb);
     g_ptr_array_add (self->spine_paths, g_strdup (href));
   }
 
@@ -1158,14 +830,10 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
     }
   }
 
-  /* Decode every manifest image into the images hash. Keys: both the
-   * resolved zip path (which is what xhtml_start writes into IMAGE
-   * blocks) and the manifest id (for hand-rolled callers).
-   *
-   * Same iteration also populates the produce_html-side tables:
-   * zip-path → manifest-id (for rewriting <img src> while stitching),
-   * and image_bytes keyed by manifest-id (the table fw_webview_load_html
-   * receives). */
+  /* Build the produce_html image tables: zip-path → manifest-id (for
+   * rewriting <img src> while stitching) and image_bytes keyed by
+   * manifest-id (the table fw_webview_load_html receives; WebKit
+   * decodes the bytes itself). */
   GHashTableIter it;
   gpointer k, v;
   g_hash_table_iter_init (&it, oc.manifest_type);
@@ -1178,16 +846,6 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
     if (!href) continue;
     GBytes *b = g_hash_table_lookup (self->zip, href);
     if (!b) continue;
-    g_autoptr (GError) e = NULL;
-    GdkTexture *tex = gdk_texture_new_from_bytes (b, &e);
-    if (tex) {
-      g_hash_table_insert (self->images, g_strdup (href), tex);
-      /* Second key: manifest id, sharing the same texture. */
-      g_hash_table_insert (self->images, g_strdup (id), g_object_ref (tex));
-    } else {
-      g_warning ("epub: dropping image '%s': %s", href,
-                 e ? e->message : "(unknown)");
-    }
     g_hash_table_insert (self->zip_to_image_id, g_strdup (href), g_strdup (id));
     g_hash_table_insert (self->image_bytes,     g_strdup (id),   g_bytes_ref (b));
   }
@@ -1214,24 +872,11 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
 
 static void epub_close (FwReflowDocument *doc) {
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
-  if (self->blocks) g_list_store_remove_all (self->blocks);
-  if (self->toc)    g_list_store_remove_all (self->toc);
+  if (self->toc) g_list_store_remove_all (self->toc);
 }
 
-static GListModel *epub_get_block_model (FwReflowDocument *doc) {
-  return G_LIST_MODEL (FW_REFLOW_DOCUMENT_EPUB (doc)->blocks);
-}
-static GdkTexture *epub_get_image (FwReflowDocument *doc, const char *image_id) {
-  if (!image_id) return NULL;
-  return g_hash_table_lookup (FW_REFLOW_DOCUMENT_EPUB (doc)->images, image_id);
-}
 static GListModel *epub_get_toc (FwReflowDocument *doc) {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_EPUB (doc)->toc);
-}
-static guint epub_find_block_by_anchor (FwReflowDocument *doc, const char *a) {
-  if (!a) return 0;
-  return GPOINTER_TO_UINT (
-    g_hash_table_lookup (FW_REFLOW_DOCUMENT_EPUB (doc)->anchors, a));
 }
 static GHashTable *epub_get_metadata (FwReflowDocument *doc) {
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
@@ -1290,6 +935,24 @@ epub_produce_html (FwReflowDocument  *doc,
                    GError           **error)
 {
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
+
+  /* Encrypted EPUB: render a plain explanation rather than failing the
+   * open (which would fall through to MuPDF and show garbage). */
+  if (self->drm) {
+    GString *m = g_string_new ("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
+                               "<title>DRM-protected EPUB</title><style>");
+    g_string_append (m, fw_reflow_reading_css ());
+    g_string_append (m, "</style></head><body><section data-spine=\"0\">"
+                        "<h1>This book is DRM-protected.</h1>"
+                        "<p>Framework does not support DRM-encrypted EPUBs. "
+                        "Convert via Calibre's DeDRM plugin, or open with a "
+                        "DRM-aware reader.</p>"
+                        "</section></body></html>");
+    if (out_images) *out_images = NULL;
+    *out_html = g_string_free (m, FALSE);
+    return TRUE;
+  }
+
   if (!self->spine_paths || self->spine_paths->len == 0) {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                  "epub: spine is empty");
@@ -1393,10 +1056,7 @@ fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = epub_open;
   iface->close                 = epub_close;
-  iface->get_block_model       = epub_get_block_model;
-  iface->get_image             = epub_get_image;
   iface->get_toc               = epub_get_toc;
-  iface->find_block_by_anchor  = epub_find_block_by_anchor;
   iface->get_metadata          = epub_get_metadata;
   iface->produce_html          = epub_produce_html;
 }
@@ -1407,11 +1067,8 @@ static void
 fw_reflow_document_epub_finalize (GObject *object)
 {
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (object);
-  g_clear_object (&self->blocks);
   g_clear_object (&self->toc);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
-  g_clear_pointer (&self->images,   g_hash_table_unref);
-  g_clear_pointer (&self->anchors,  g_hash_table_unref);
   g_clear_pointer (&self->zip,      g_hash_table_unref);
   g_clear_pointer (&self->path,     g_free);
   g_clear_pointer (&self->opf_dir,  g_free);
@@ -1431,14 +1088,9 @@ fw_reflow_document_epub_class_init (FwReflowDocumentEpubClass *klass)
 static void
 fw_reflow_document_epub_init (FwReflowDocumentEpub *self)
 {
-  self->blocks   = g_list_store_new (FW_TYPE_BLOCK);
   self->toc      = g_list_store_new (FW_TYPE_REFLOW_TOC_ITEM);
   self->metadata = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free, g_free);
-  self->images   = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                          g_free, g_object_unref);
-  self->anchors  = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                          g_free, NULL);
   self->zip      = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free,
                                           (GDestroyNotify) g_bytes_unref);

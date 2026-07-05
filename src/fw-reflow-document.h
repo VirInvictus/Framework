@@ -14,46 +14,6 @@
 
 G_BEGIN_DECLS
 
-/* ── Block kinds ──────────────────────────────────────────────────── */
-
-typedef enum {
-  FW_BLOCK_HEADING,     /* level encoded in `level` */
-  FW_BLOCK_PARAGRAPH,
-  FW_BLOCK_BLOCKQUOTE,
-  FW_BLOCK_LIST,        /* nested children — not used by TXT */
-  FW_BLOCK_LIST_ITEM,
-  FW_BLOCK_CODE,        /* preformatted; preserve whitespace */
-  FW_BLOCK_IMAGE,
-  FW_BLOCK_HR,
-  FW_BLOCK_CHAPTER,     /* ToC anchor — no rendered content */
-} FwBlockKind;
-
-/* FwBlock flags — packed into the `flags` GUINT. */
-#define FW_BLOCK_FLAG_COVER    (1u << 0) /* IMAGE: render full-page */
-#define FW_BLOCK_FLAG_INDENT   (1u << 1) /* PARAGRAPH: first-line indent */
-#define FW_BLOCK_FLAG_CAPTION  (1u << 2) /* PARAGRAPH: rendered as figcaption */
-#define FW_BLOCK_FLAG_DROPCAP  (1u << 3) /* PARAGRAPH: chapter-leading raised cap */
-
-/* ── FwBlock — GObject for use in GListModel ──────────────────────── */
-
-#define FW_TYPE_BLOCK (fw_block_get_type ())
-
-G_DECLARE_FINAL_TYPE (FwBlock, fw_block, FW, BLOCK, GObject)
-
-FwBlock     *fw_block_new            (FwBlockKind  kind,
-                                      int          level,
-                                      const char  *text,
-                                      const char  *image_id,
-                                      const char  *anchor_id,
-                                      guint        flags);
-
-FwBlockKind  fw_block_get_kind       (FwBlock *self);
-int          fw_block_get_level      (FwBlock *self);
-const char  *fw_block_get_text       (FwBlock *self);
-const char  *fw_block_get_image_id   (FwBlock *self);
-const char  *fw_block_get_anchor_id  (FwBlock *self);
-guint        fw_block_get_flags      (FwBlock *self);
-void         fw_block_set_flags      (FwBlock *self, guint flags);
 
 /* ── Reflow TOC entry ─────────────────────────────────────────────── */
 
@@ -83,14 +43,8 @@ struct _FwReflowDocumentInterface {
   void         (*close)            (FwReflowDocument *self);
 
   /* Hot path — bound directly to GtkListView. */
-  GListModel  *(*get_block_model)  (FwReflowDocument *self);
-
-  GdkTexture  *(*get_image)        (FwReflowDocument *self,
-                                    const char       *image_id);
 
   GListModel  *(*get_toc)          (FwReflowDocument *self);
-  guint        (*find_block_by_anchor) (FwReflowDocument *self,
-                                        const char       *anchor_id);
 
   GHashTable  *(*get_metadata)     (FwReflowDocument *self);
 
@@ -118,35 +72,13 @@ struct _FwReflowDocumentInterface {
                                     GError           **error);
 };
 
-/* ── Search hit ───────────────────────────────────────────────────── */
-
-/* A single match. Offsets are into the block's *visible* text — markup
- * tags stripped and entities decoded — so they line up with what the
- * reader sees and with the highlight splicer in fw-reflow-view.c. */
-typedef struct {
-  guint block;    /* index into the block model */
-  guint offset;   /* byte offset of the match in the block's visible text */
-  guint length;   /* byte length of the match */
-} FwReflowHit;
 
 gboolean     fw_reflow_document_open                (FwReflowDocument *self,
                                                      const char       *path,
                                                      GError          **error);
 void         fw_reflow_document_close               (FwReflowDocument *self);
-GListModel  *fw_reflow_document_get_block_model     (FwReflowDocument *self);
-GdkTexture  *fw_reflow_document_get_image           (FwReflowDocument *self,
-                                                     const char       *image_id);
 GListModel  *fw_reflow_document_get_toc             (FwReflowDocument *self);
-guint        fw_reflow_document_find_block_by_anchor(FwReflowDocument *self,
-                                                     const char       *anchor_id);
 
-/* Case-insensitive substring search across the whole block model,
- * mirroring the fixed-layout backends' semantics (Unicode-lowercased
- * substring, no regex / whole-word). Returns a newly-allocated
- * GArray<FwReflowHit> in reading order, or NULL when there are no
- * matches. Caller frees with g_array_unref. */
-GArray      *fw_reflow_document_search              (FwReflowDocument *self,
-                                                     const char       *needle);
 GHashTable  *fw_reflow_document_get_metadata        (FwReflowDocument *self);
 
 /* Optional: returns TRUE iff the backend implements `produce_html`.  The
