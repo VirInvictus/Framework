@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: configure + compile
+    runs-on: ubuntu-latest
+    # Framework requires gtk4 >= 4.16, libadwaita >= 1.7, and webkitgtk-6.0;
+    # Ubuntu runners ship gtk4 4.14, so a GTK4 configure aborts. Fedora carries
+    # a new-enough GTK/libadwaita/WebKitGTK and matches the project's actual
+    # target (GNOME Platform). Same pattern as Atrium's CI.
+    container: fedora:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            gcc \
+            git \
+            meson \
+            ninja-build \
+            pkgconf-pkg-config \
+            gettext \
+            glib2-devel \
+            gtk4-devel \
+            libadwaita-devel \
+            cairo-devel \
+            json-glib-devel \
+            mupdf-devel \
+            djvulibre-devel \
+            libarchive-devel \
+            fontconfig-devel \
+            libxml2-devel \
+            webkitgtk6.0-devel
+
+      - uses: actions/checkout@v4
+
+      # No unit-test suite: the tests/ tree is a stress/bench harness gated by
+      # -Dstress=true and needs a document corpus, so it is not run in CI. A
+      # clean configure + compile of the full C17 app is the meaningful check.
+      - name: meson setup
+        run: meson setup builddir
+
+      - name: meson compile
+        run: meson compile -C builddir
