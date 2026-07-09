@@ -248,7 +248,9 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **Tag 1.0.0 & Release**
 
 ## Phase 18: Hyprland-Leaning Design
-*Brandon moved his desktop from GNOME Shell to Hyprland (a Wayland tiling compositor). Framework stays GTK4/libadwaita; this phase is purely additive, filling gaps that were already latent under a floating window manager and only now visible under tiling. Nothing here removes a GNOME affordance or regresses floating-window behavior. Grounded in a source audit of `src/fw-window.c`, `src/fw-view.c`, `src/fw-application.c`, and `data/`.*
+*Brandon moved his desktop from GNOME Shell to Hyprland (a Wayland tiling compositor). This phase is purely additive, filling gaps that were already latent under a floating window manager and only now visible under tiling. Nothing here removes a GNOME affordance or regresses floating-window behavior. Grounded in a source audit of `src/fw-window.c`, `src/fw-view.c`, `src/fw-application.c`, and `data/`.*
+
+*Direction note (Brandon, 2026-07-09): the portfolio goal has since moved past "runs politely under Hyprland" to "fully belongs on Hyprland," which means leaving libadwaita behind. For Framework that lands as Phase 19, which starts with a decision gate (Brandon is also considering a Zig rewrite; see there). This phase's audit items stay valid on either path: they are toolkit-agnostic geometry, keyboard, and portal work, and they carry over as Phase 19's acceptance criteria. Only this phase's keep-adwaita framing is superseded.*
 
 ### Tiling-first geometry
 
@@ -282,6 +284,15 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **No SSD reliance: already verified.** Confirmed by inspection: the window is a stock `AdwApplicationWindow` with `AdwHeaderBar` (client-side decorations); no server-side-decoration assumption anywhere in `src/`. No action; recorded as verified.
 
 ---
+
+## Phase 19: Hyprland-Native Shell — De-adwaita, or the Zig Rewrite (post-1.0, decision gate first)
+
+*Portfolio direction change (Brandon, 2026-07-09): the goal is an app that fully belongs on Hyprland, which for the rest of the portfolio means dropping libadwaita while keeping GTK4, with Colophon as the pilot (its roadmap, Phase 6). Framework has an extra fork Brandon put on the table the same day: he is considering rewriting Framework in Zig. That consideration gates everything else in this phase, because a rewrite would make a C-side de-adwaita migration wasted churn. Nothing here starts before Phase 15 (the 1.0 release) ships; 1.0 goes out as the current C17/GTK4/libadwaita app.*
+
+- [ ] **Decision gate: Zig rewrite go/no-go (blocks both paths below).** Needs its own research pass and spec, not a slip-in. What ports naturally: the fixed-layout render pipeline's C libraries (MuPDF, DjVuLibre, libarchive) and the velocity pre-cache design, since Zig's C interop is first-class. The open questions: the WebKitGTK reflow path, the GTK4 shell (Zig can speak the GTK4 C API directly, or the rewrite picks a different UI story entirely), build system (Zig's own build vs. Meson), and what a rewrite costs against a working v0.77 app with a shipped Flatpak. The output of this item is a written verdict with scope and sequencing, not code.
+- [ ] **Path A (no rewrite): de-adwaita the C17 codebase.** Keep GTK4, drop libadwaita, adopt the Colophon pilot's patterns in C: full `Adw*` inventory first (`AdwApplicationWindow`, `AdwHeaderBar`, the `AdwOverlaySplitView` TOC sidebar, the three `AdwDialog`s, `AdwStyleManager` dark/light), plain-GTK replacements per type, an owned application stylesheet (flat, square, tiling-first) instead of the adwaita sheet, and dark/light via a direct `org.freedesktop.portal.Settings` GDBus read. Decoration posture (headerbar cargo, window buttons, the Phase 18 no-chrome toggle as the possible default posture) is decided in spec before code. No regression under GNOME; the look changes, the behavior doesn't.
+- [ ] **Path B (rewrite): fold this phase into the rewrite's spec.** The new shell is Hyprland-native from day one: no libadwaita dependency at all, decoration posture decided up front, the owned-stylesheet look carried over from the pilot's design language.
+- [ ] **Either path: Phase 18's audit items are the verification tail.** The tiling geometry, keyboard-first, portal, and fractional-scaling items carry over unchanged as acceptance criteria for the migrated (or rewritten) shell.
 
 ## Audit Findings (code review, post-v0.66)
 *From the full-codebase audit after the reflow-search work. The codebase is in good shape; these are refinements, not rot. Items marked done were applied during the audit pass; the rest are tracked for when they're worth the change. None are blockers.*
