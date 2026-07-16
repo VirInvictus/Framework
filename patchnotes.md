@@ -2,6 +2,25 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.78.0 (2026-07-16)
+
+*Phase 17.x security tightening: ebook HTML is scrubbed of active content, and the Landlock EXECUTE drop is back.*
+
+### Active-content scrub (EPUB / MOBI / AZW3)
+
+* **Inline event handlers and script URLs no longer survive into the WebView.** `fw_reflow_html_process` now strips `<iframe>` / `<object>` / `<embed>` alongside the existing `<script>` removal, drops every inline event-handler attribute (anything starting with `on`), and removes URL-bearing attributes (`href`, `src`, `action`, `formaction`, `poster`, `data`, `background`) whose value resolves to a `javascript:` or `vbscript:` scheme. The scheme check mirrors HTML URL parsing (tab / LF / CR are stripped before scheme resolution), so `java&#x0A;script:` is caught too. This matters because the WebView runs with JavaScript enabled (our position-tracking scripts need it), which made `<img onerror=...>` in a crafted book a live script vector. FB2, TXT, and Markdown were already safe by construction: their emitters build the HTML themselves, and Markdown blocks raw HTML via `MD_FLAG_NOHTML`.
+* **`stress-reflow` grew a hostile-EPUB section.** It builds a synthetic malicious EPUB in-test (libarchive zip writer, the same library the EPUB backend reads with), runs `produce_html`, and asserts that no script element, `on*` handler, `javascript:` URL, or payload survives while benign prose and normal links do. Runs without the corpus, so the scrub is covered even on a fresh checkout.
+
+### Landlock EXECUTE drop restored (v0.38 hardening, removed in v0.68)
+
+* **Filesystem EXECUTE is dropped again**, now behind a narrow path-beneath allowlist: execution is permitted only beneath the WebKitGTK helper-process directory (derived from pkg-config at build time, with common distro layouts as runtime fallbacks) and the loader directories `/usr/lib64` / `/usr/lib` (the kernel checks EXECUTE on the ELF interpreter when spawning). Shells under `/usr/bin` and payloads under `/tmp` or `$HOME` stay denied, so a parser RCE still can't escalate to a shell. Verified live: `WebKitNetworkProcess` and `WebKitWebProcess` spawn normally, EPUBs render, `state.json` persists; a probe confirms `execve("/usr/bin/true")` is denied with `EACCES`.
+* **The ruleset build is all-or-nothing.** If the WebKit helper dir can't be found, or any allow rule fails to attach, the sandbox falls back to the previous MAKE_*-only ruleset instead of handling EXECUTE with a missing rule (which would deny every exec in the process and its children, bricking the WebView). `FW_NO_LANDLOCK=1` is a new debugging escape hatch that skips the sandbox entirely.
+
+### WebKit bubblewrap sandbox: verdict recorded
+
+* The v0.68 patchnote blamed the Fedora host for `bwrap: Failed to make / slave: Operation not permitted`. A standalone probe shows the real cause was Framework's own Landlock hardening: the kernel denies all mount-topology changes to a landlocked process and everything it spawns, no allow rule can grant them, so WebKit's bubblewrap sandbox can never initialize while `fw_sandbox_drop_execute` is in effect. The two are structurally mutually exclusive, not a host quirk.
+* **Decision: keep Landlock, leave the WebKit sandbox disabled.** Landlock covers the in-process parsers (MuPDF, DjVuLibre, libarchive), which are the larger attack surface; bwrap would confine only the web process and leave the fixed-layout parsers bare. The web process is instead confined by the emit-time scrub above plus the EXECUTE allowlist. The reasoning now lives in `main.c` next to the env-var, replacing the incorrect host-blame comment.
+
 ## v0.77.0 (2026-05-29)
 
 *Phase 17.5b: the block-model machinery has been entirely stripped from the reflow backend.*

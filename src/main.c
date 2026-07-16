@@ -132,18 +132,22 @@ main (int argc, char *argv[])
 
   /* WebKitGTK 6.0 (the EPUB reflow renderer added in v0.68) spawns its
    * web/network/dbus-proxy subprocesses inside a bubblewrap-based
-   * mount-namespace sandbox.  On hosts where unprivileged user-namespace
-   * sandboxing isn't available (AppArmor profiles blocking it, sysctl
-   * kernel.unprivileged_userns_clone=0, some container configurations,
-   * the user's Fedora 44 desktop today), that setup fails with
-   * "bwrap: Failed to make / slave: Operation not permitted" and the
-   * process aborts.
+   * mount-namespace sandbox.  That sandbox cannot coexist with our
+   * Landlock hardening below: a Landlock-restricted process (and every
+   * child it spawns) is denied all mount-topology changes by the
+   * kernel, no allow rule can grant them, so bwrap's first step —
+   * mount("/", MS_SLAVE) — fails with "Failed to make / slave:
+   * Operation not permitted" and the web process aborts.  (Verified
+   * v0.78 with a standalone probe: unshare + MS_SLAVE succeed bare and
+   * under NNP, fail only under the Landlock ruleset.  The v0.68 note
+   * blaming the Fedora host was wrong.)
    *
-   * Framework is a viewer for trusted documents from the user's own
-   * library — not an arbitrary-URL browser — so we set the documented
-   * sandbox-bypass env-var.  WebKit's filesystem reads still go through
-   * the inherited Landlock ruleset (MAKE_*-restricted) so a malicious
-   * EPUB exploiting a WebKit bug can't plant device nodes or symlinks.
+   * Posture decision (Phase 17.x): keep Landlock, disable the WebKit
+   * sandbox.  Landlock covers the in-process parsers (MuPDF,
+   * DjVuLibre, libarchive) — the largest attack surface — while ebook
+   * HTML is scrubbed of active content at emit time and the EXECUTE
+   * drop confines any web-process compromise.  bwrap would confine
+   * only the web process and leave the fixed-layout parsers bare.
    * The env-var must be set before any WebKit symbol is referenced.
    *
    * If the user has set WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS in
@@ -160,12 +164,12 @@ main (int argc, char *argv[])
   g_setenv ("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
 
   /* Apply Landlock LSM hardening before launching the app loop.
-   * Drops MAKE_* filesystem rights so a malicious document exploiting
-   * a backend can't plant device nodes or fifos.  EXECUTE used to be in
-   * this set; removed in v0.68 because WebKitGTK fork-execs its child
-   * processes — see fw-sandbox.c for the path-beneath plan to bring
-   * EXECUTE back behind a narrow allowlist.  No-op on non-Linux and on
-   * kernels without Landlock support. */
+   * Drops EXECUTE + MAKE_* filesystem rights so a malicious document
+   * exploiting a backend can't reach a shell or plant device nodes.
+   * EXECUTE (dropped in v0.38, removed in v0.68 for WebKit's process
+   * spawn, restored in v0.78) is allowed only beneath the WebKit
+   * helper dir and the loader dirs — see fw-sandbox.c.  No-op on
+   * non-Linux and on kernels without Landlock support. */
   fw_sandbox_drop_execute ();
 
   g_autoptr (FwApplication) app = fw_application_new ();

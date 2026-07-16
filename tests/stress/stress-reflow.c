@@ -21,8 +21,12 @@
 #include "corpus-root.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
+
+#include <archive.h>
+#include <archive_entry.h>
 
 typedef struct {
   const char *file;
@@ -120,6 +124,145 @@ test_one (const char *root, const ReflowSample *s)
   return fail;
 }
 
+/* ── Active-content scrub (synthetic hostile EPUB) ──────────────────
+ *
+ * fw_reflow_html_process must strip <script>/<iframe>/<object>/<embed>,
+ * inline on* handlers, and javascript:-scheme URLs from ebook markup —
+ * the WebView runs with JavaScript enabled, so any survivor executes.
+ * The fixture is built in-test (libarchive zip writer, same library the
+ * EPUB backend reads with), so this section needs no corpus. */
+
+static gboolean
+zip_add (struct archive *a, const char *name, const char *data)
+{
+  size_t len = strlen (data);
+  struct archive_entry *e = archive_entry_new ();
+  archive_entry_set_pathname (e, name);
+  archive_entry_set_size (e, (la_int64_t) len);
+  archive_entry_set_filetype (e, AE_IFREG);
+  archive_entry_set_perm (e, 0644);
+  gboolean ok = archive_write_header (a, e) == ARCHIVE_OK &&
+                archive_write_data (a, data, len) == (la_ssize_t) len;
+  archive_entry_free (e);
+  return ok;
+}
+
+static const char HOSTILE_CONTAINER[] =
+  "<?xml version=\"1.0\"?>\n"
+  "<container version=\"1.0\" "
+    "xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\n"
+  "  <rootfiles><rootfile full-path=\"OEBPS/content.opf\" "
+    "media-type=\"application/oebps-package+xml\"/></rootfiles>\n"
+  "</container>\n";
+
+static const char HOSTILE_OPF[] =
+  "<?xml version=\"1.0\"?>\n"
+  "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" "
+    "unique-identifier=\"uid\">\n"
+  "  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n"
+  "    <dc:identifier id=\"uid\">urn:uuid:fw-stress-hostile</dc:identifier>\n"
+  "    <dc:title>Hostile Markup Fixture</dc:title>\n"
+  "    <dc:language>en</dc:language>\n"
+  "  </metadata>\n"
+  "  <manifest>\n"
+  "    <item id=\"ch1\" href=\"ch1.xhtml\" "
+    "media-type=\"application/xhtml+xml\"/>\n"
+  "  </manifest>\n"
+  "  <spine><itemref idref=\"ch1\"/></spine>\n"
+  "</package>\n";
+
+static const char HOSTILE_CHAPTER[] =
+  "<html><head><title>hostile</title></head><body>\n"
+  "<p onclick=\"alert(1)\">Benign paragraph survives.</p>\n"
+  "<p><em>inline kept</em></p>\n"
+  "<img src=\"missing.png\" onerror=\"alert(2)\" onload=\"alert(3)\">\n"
+  "<a href=\"javascript:alert(4)\">plain</a>\n"
+  "<a href=\"java&#x0A;script:alert(5)\">split scheme</a>\n"
+  "<a href=\"  JaVaScRiPt:alert(6)\">cased + padded</a>\n"
+  "<a href=\"https://example.org/ok\">normal link kept</a>\n"
+  "<iframe src=\"https://evil.example/\"></iframe>\n"
+  "<object data=\"x.swf\"></object>\n"
+  "<embed src=\"x.swf\">\n"
+  "<script>alert(7)</script>\n"
+  "</body></html>\n";
+
+static int
+check_absent (const char *low, const char *needle, const char *what)
+{
+  if (strstr (low, needle)) {
+    fprintf (stderr, "  FAIL scrub: %s survived ('%s' found in HTML)\n",
+             what, needle);
+    return 1;
+  }
+  return 0;
+}
+
+static int
+test_scrub (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *dir = g_dir_make_tmp ("fw-stress-reflow-XXXXXX", &error);
+  if (!dir) {
+    fprintf (stderr, "  FAIL scrub: tmp dir: %s\n",
+             error ? error->message : "(null)");
+    return 1;
+  }
+  g_autofree char *path = g_build_filename (dir, "hostile.epub", NULL);
+
+  struct archive *a = archive_write_new ();
+  archive_write_set_format_zip (a);
+  gboolean wrote =
+    archive_write_open_filename (a, path) == ARCHIVE_OK &&
+    zip_add (a, "mimetype", "application/epub+zip") &&
+    zip_add (a, "META-INF/container.xml", HOSTILE_CONTAINER) &&
+    zip_add (a, "OEBPS/content.opf", HOSTILE_OPF) &&
+    zip_add (a, "OEBPS/ch1.xhtml", HOSTILE_CHAPTER);
+  archive_write_free (a);
+  if (!wrote) {
+    fprintf (stderr, "  FAIL scrub: could not write fixture zip\n");
+    return 1;
+  }
+
+  int fail = 0;
+  FwReflowDocument *doc = fw_reflow_document_new_for_path (path, &error);
+  char *html = NULL;
+  GHashTable *images = NULL;
+  if (!doc ||
+      !fw_reflow_document_produce_html (doc, "scrub", &html, &images, &error)) {
+    fprintf (stderr, "  FAIL scrub: open/produce_html: %s\n",
+             error ? error->message : "(null)");
+    fail = 1;
+  } else {
+    g_autofree char *low = g_ascii_strdown (html, -1);
+    fail += check_absent (low, "<script",     "script element");
+    fail += check_absent (low, "<iframe",     "iframe element");
+    fail += check_absent (low, "<object",     "object element");
+    fail += check_absent (low, "<embed",      "embed element");
+    fail += check_absent (low, "onclick",     "onclick handler");
+    fail += check_absent (low, "onerror",     "onerror handler");
+    fail += check_absent (low, "onload",      "onload handler");
+    fail += check_absent (low, "javascript",  "javascript: URL");
+    fail += check_absent (low, "alert(",      "script payload");
+    if (!strstr (low, "benign paragraph survives")) {
+      fprintf (stderr, "  FAIL scrub: benign prose was lost\n");
+      fail++;
+    }
+    if (!strstr (low, "https://example.org/ok")) {
+      fprintf (stderr, "  FAIL scrub: benign href was lost\n");
+      fail++;
+    }
+  }
+  g_free (html);
+  if (images) g_hash_table_unref (images);
+  if (doc) g_object_unref (doc);
+
+  (void) g_unlink (path);
+  (void) g_rmdir (dir);
+
+  printf ("  hostile.epub (synthetic): %s\n", fail ? "FAIL" : "ok");
+  return fail ? 1 : 0;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -134,6 +277,9 @@ main (int argc, char **argv)
     failures += test_one (root, &SAMPLES[i]);
     processed++;
   }
+
+  failures += test_scrub ();
+  processed++;
 
   printf ("done: processed=%d failures=%d\n", processed, failures);
   if (failures > 0) {

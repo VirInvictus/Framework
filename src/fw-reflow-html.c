@@ -83,6 +83,83 @@ is_stylesheet_link (xmlNodePtr node)
   return is;
 }
 
+/* Elements that can execute or embed active content.  No legitimate
+ * ebook needs any of these; the WebView runs with JavaScript enabled
+ * (our position-tracking scripts need it), so they must not survive
+ * into the stitched document. */
+static gboolean
+is_active_element (xmlNodePtr node)
+{
+  return xmlStrcasecmp (node->name, BAD_CAST "script") == 0 ||
+         xmlStrcasecmp (node->name, BAD_CAST "iframe") == 0 ||
+         xmlStrcasecmp (node->name, BAD_CAST "object") == 0 ||
+         xmlStrcasecmp (node->name, BAD_CAST "embed")  == 0;
+}
+
+/* TRUE when a URL-valued attribute resolves to a script scheme.  HTML's
+ * URL parser strips tab / LF / CR anywhere in the input before scheme
+ * resolution, so "java\nscript:" executes just like "javascript:" —
+ * mirror that here rather than doing a naive prefix compare. */
+static gboolean
+url_has_script_scheme (const xmlChar *value)
+{
+  const char *p = (const char *) value;
+  while (*p && (guchar) *p <= 0x20)  /* leading whitespace/controls */
+    p++;
+  char scheme[16];
+  gsize n = 0;
+  for (; *p; p++) {
+    if (*p == '\t' || *p == '\n' || *p == '\r')
+      continue;
+    if (*p == ':') {
+      scheme[n] = '\0';
+      return g_ascii_strcasecmp (scheme, "javascript") == 0 ||
+             g_ascii_strcasecmp (scheme, "vbscript") == 0;
+    }
+    if (n >= sizeof scheme - 1)
+      return FALSE;                  /* longer than any script scheme */
+    if (!g_ascii_isalnum (*p) && *p != '+' && *p != '-' && *p != '.')
+      return FALSE;                  /* not a scheme — relative URL etc. */
+    scheme[n++] = *p;
+  }
+  return FALSE;
+}
+
+static gboolean
+is_url_attr (const xmlChar *name)
+{
+  static const char *const url_attrs[] = {
+    "href", "src", "action", "formaction", "poster", "data", "background",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (url_attrs); i++)
+    if (g_ascii_strcasecmp ((const char *) name, url_attrs[i]) == 0)
+      return TRUE;
+  return FALSE;
+}
+
+/* Drop inline event handlers (any on* attribute) and script-scheme
+ * URLs from one element.  Removal-safe iteration: xmlRemoveProp frees
+ * the attr, so the next pointer is saved first. */
+static void
+scrub_attributes (xmlNodePtr node)
+{
+  xmlAttr *a = node->properties;
+  while (a) {
+    xmlAttr *next = a->next;
+    gboolean drop = FALSE;
+    if (g_ascii_strncasecmp ((const char *) a->name, "on", 2) == 0) {
+      drop = TRUE;
+    } else if (is_url_attr (a->name)) {
+      xmlChar *val = xmlNodeListGetString (node->doc, a->children, 1);
+      drop = val && url_has_script_scheme (val);
+      if (val) xmlFree (val);
+    }
+    if (drop)
+      xmlRemoveProp (a);
+    a = next;
+  }
+}
+
 void
 fw_reflow_html_process (xmlNodePtr body, const char *doc_id,
                         FwReflowImgResolver resolver, gpointer user_data)
@@ -91,11 +168,11 @@ fw_reflow_html_process (xmlNodePtr body, const char *doc_id,
   while (c) {
     xmlNodePtr next = c->next;
     if (c->type == XML_ELEMENT_NODE) {
-      if (xmlStrcasecmp (c->name, BAD_CAST "script") == 0 ||
-          is_stylesheet_link (c)) {
+      if (is_active_element (c) || is_stylesheet_link (c)) {
         xmlUnlinkNode (c);
         xmlFreeNode  (c);
       } else {
+        scrub_attributes (c);
         if (xmlStrcasecmp (c->name, BAD_CAST "img") == 0) {
           g_autofree char *id = resolver ? resolver (c, user_data) : NULL;
           if (id) {
