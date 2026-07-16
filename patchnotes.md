@@ -2,6 +2,36 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.79.0 (2026-07-16)
+
+*Phase 17.x closes Phase 17: EPUBs render with their own stylesheets and fonts, internal links and TOC navigation actually work across all reflow formats, and books can't touch the network.*
+
+### Publisher CSS (EPUB)
+
+* **Books render with their own stylesheets.** Chapter `<head>`s are walked for stylesheet `<link>`s (deduped across the spine, first-appearance order) and inline `<style>` blocks; both are emitted into the stitched document ahead of the reading stylesheet. Sheets are served by archive path through the new `framework-img://<doc-id>/res/<zip-path>` namespace, so relative `url(...)` and `@import` references inside a sheet resolve natively against the sheet's own URI: fonts and CSS-referenced images need no rewriting at all. (Foliate must rewrite every CSS URL because blob URLs are flat; a hierarchical scheme sidesteps the whole problem. One scheme, not a separate `framework-css:`, keeps document and resources same-origin, which `@font-face` requires.)
+* **Your settings still win.** The reading stylesheet is emitted last and its body-level rules (theme colors, chosen font, size, line height, reading column) carry `!important`, so publisher structure (drop caps, tables, poetry) renders as designed while the theme and typography stay yours. Known limitation: a publisher rule painting an explicit background on inner containers can still glare in dark themes; Calibre-style color transformation is a tracked follow-up.
+* **"Publisher styles" toggle** in Reading Settings (GSettings `publisher-styles`, default on). Flips the stylesheets' DOM `disabled` state live — no reload. The backend always emits the CSS; the toggle is pure view state.
+
+### EPUB font de-obfuscation
+
+* Obfuscated embedded fonts (EPUB OCF: IDPF `http://www.idpf.org/2008/embedding` and Adobe `http://ns.adobe.com/pdf/enc#RC`) are now XOR-decoded in place at open. `encryption.xml` parsing retains a path → algorithm map (real DRM still shows the notice); the OPF parser now tracks `package@unique-identifier` ↔ `dc:identifier@id` (the IDPF key source, SHA-1 of the whitespace-stripped identifier over 1040 bytes) and the book's UUID identifier (the Adobe key, 16 raw bytes over 1024). Key derivations match Calibre's `epub_input.py` and foliate-js. Verified on Gone Girl (Adobe scheme) and a synthetic IDPF fixture that round-trips byte-for-byte.
+
+### Working internal links + TOC (all reflow formats)
+
+* **EPUB TOC navigation was broken and is now fixed.** TOC anchors were stored as zip paths (`OEBPS/ch2.xhtml#sec1`) that could never match a DOM id, so sidebar clicks landed nowhere. Anchors are now translated to the stitched document's real ids at open.
+* **EPUB cross-chapter links work.** Chapter element ids are namespaced per spine position (`s4-note3`), killing cross-chapter id collisions, and hrefs are rewritten to in-document fragments (`#s4-note3`, `#spine-7`). Previously a cross-chapter click navigated the WebView into the image-scheme error page and lost the reading session.
+* **MOBI links work.** KF7 `<a filepos=N>` anchors (which carry no href at all) become `href="#filepos_N"`, pointing at the markers that were already injected; guide/TOC filepos anchors are numeric-normalized so kindlegen's zero-padded values match the markers. KF8/AZW3 in-body `kindle:pos:fid:F:off:O` links resolve through the parser's now-exported fragment table to `#ncx_<offset>` markers (818 links on the corpus AZW3); unresolvable kindle: hrefs degrade to plain text.
+* **FB2 note links work.** `<a l:href="#n1">` references were dropped to bare text; they now emit as real anchors targeting the note-section ids (script schemes refused via the shared guard, since FB2 emits its own HTML).
+
+### Navigation policy + network isolation
+
+* **`decide-policy` handler on the WebView** (there was none): same-document fragment jumps pass through; `http(s)`/`mailto` link clicks open in the default browser via `GtkUriLauncher`; every other link-click navigation is blocked, so nothing can replace the stitched book.
+* **Books cannot reach the network.** A compiled WebKit content filter blocks all `http(s)`/`ws(s)` subresource fetches (remote images, stylesheets, tracking pixels). Local-first, and the privacy hole is closed.
+
+### Tests
+
+* `stress-reflow` gains a second synthetic EPUB covering the whole slice: stylesheet link emission + dedup, id namespacing, all three href-rewrite forms, TOC anchor translation, and IDPF font de-obfuscation round-trip against an in-test-obfuscated font. Plus `FW_STRESS_DUMP_HTML=<dir>` to dump stitched HTML for inspection. Full suite green, ASan+UBSan clean.
+
 ## v0.78.0 (2026-07-16)
 
 *Phase 17.x security tightening: ebook HTML is scrubbed of active content, and the Landlock EXECUTE drop is back.*

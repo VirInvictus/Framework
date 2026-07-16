@@ -7,10 +7,12 @@
  * builds the chapter TOC from the NCX (EPUB 2) or nav.xhtml (EPUB 3).
  * produce_html re-parses each spine chapter with libxml2's HTML parser,
  * rewrites <img> srcs to the framework-img:// scheme, strips scripts,
- * and stitches the bodies into one HTML document for the WebView.
- *
- * NOT in scope here:
- *   - Author CSS (deliberately dropped per design doc §3 "EPUB").
+ * namespaces chapter ids and rewrites internal hrefs to in-document
+ * fragments, collects publisher stylesheets (served by path through
+ * framework-img://<doc-id>/res/), and stitches the bodies into one HTML
+ * document for the WebView.  Obfuscated fonts (EPUB OCF, IDPF + Adobe
+ * algorithms) are XOR-decoded in place at open so publisher @font-face
+ * rules render as intended (v0.79).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -36,10 +38,16 @@ struct _FwReflowDocumentEpub {
   char         *path;
   char         *opf_dir;    /* directory portion of OPF path within ZIP */
   gboolean      drm;        /* encrypted EPUB — produce_html emits a notice */
+  GHashTable   *obfuscated; /* gchar* zip-path → gchar* algorithm URI (fonts
+                             * mangled per EPUB OCF obfuscation; decoded in
+                             * place in `zip` once the OPF identifiers are
+                             * known) */
 
   /* WebView render path (produce_html).  Immutable for the lifetime of
    * the document — the URI scheme handler reads them from any thread. */
   GPtrArray    *spine_paths;        /* gchar* resolved zip paths in order */
+  GHashTable   *spine_index;        /* gchar* zip-path → GUINT(index + 1);
+                                     * 0 is the not-found sentinel */
   GHashTable   *zip_to_image_id;    /* gchar* zip-path → gchar* manifest-id (images only) */
   GHashTable   *image_bytes;        /* gchar* manifest-id → GBytes (owned) */
   char         *cover_image_id;     /* manifest id of the cover (NULL if none) */
@@ -232,9 +240,40 @@ typedef struct {
   const char *meta_key;        /* current scalar key */
   GHashTable *out_metadata;    /* shared with backend */
 
+  /* Identifier tracking for font de-obfuscation keys.  uid_attr is
+   * <package unique-identifier="...">; ident_id is the id attribute of
+   * the dc:identifier currently being read; uid_ident is the text of
+   * the identifier whose id matches uid_attr (the IDPF key source);
+   * uuid_ident is the first identifier carrying a UUID (the Adobe key
+   * source); first_ident is the IDPF fallback when uid_attr resolves
+   * to nothing (mirrors foliate's getIdentifier). */
+  char       *uid_attr;
+  char       *ident_id;
+  char       *uid_ident;
+  char       *uuid_ident;
+  char       *first_ident;
+
   /* Where to resolve manifest hrefs */
   const char *opf_dir;
 } OpfCtx;
+
+/* Loose UUID sniff: 32 hex digits with optional hyphens after the last
+ * ':' — enough to recognize urn:uuid: and bare-uuid identifiers. */
+static gboolean
+ident_looks_like_uuid (const char *text)
+{
+  const char *colon = strrchr (text, ':');
+  const char *p = colon ? colon + 1 : text;
+  int digits = 0;
+  for (; *p; p++) {
+    if (*p == '-')
+      continue;
+    if (g_ascii_xdigit_value (*p) < 0)
+      return FALSE;
+    digits++;
+  }
+  return digits == 32;
+}
 
 static void
 opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
@@ -247,6 +286,13 @@ opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
   OpfCtx *oc = user_data;
 
   if (g_str_equal (name, "metadata")) { oc->in_metadata = TRUE; return; }
+
+  if (g_str_equal (name, "package")) {
+    for (int i = 0; attr_names[i]; i++)
+      if (g_str_equal (attr_names[i], "unique-identifier") && !oc->uid_attr)
+        oc->uid_attr = g_strdup (attr_values[i]);
+    return;
+  }
 
   if (g_str_equal (name, "spine")) {
     for (int i = 0; attr_names[i]; i++)
@@ -321,6 +367,14 @@ opf_start (GMarkupParseContext *ctx G_GNUC_UNUSED,
       if (!oc->meta_text) oc->meta_text = g_string_new (NULL);
       g_string_truncate (oc->meta_text, 0);
       oc->meta_key = name;
+      /* dc:identifier: remember its id attribute so opf_end can match
+       * it against <package unique-identifier>. */
+      if (g_str_has_suffix (name, "identifier")) {
+        g_clear_pointer (&oc->ident_id, g_free);
+        for (int i = 0; attr_names[i]; i++)
+          if (g_str_equal (attr_names[i], "id"))
+            oc->ident_id = g_strdup (attr_values[i]);
+      }
     }
   }
 }
@@ -355,6 +409,19 @@ opf_end (GMarkupParseContext *ctx G_GNUC_UNUSED,
     else if (g_str_has_suffix (oc->meta_key, "subject"))     canonical = "subject";
     else if (g_str_has_suffix (oc->meta_key, "rights"))      canonical = "rights";
     else if (g_str_has_suffix (oc->meta_key, "source"))      canonical = "source";
+
+    /* Identifier bookkeeping for the de-obfuscation keys, independent
+     * of the metadata table's first-write-wins policy. */
+    if (g_str_equal (canonical, "identifier") && oc->meta_text->len > 0) {
+      if (!oc->first_ident)
+        oc->first_ident = g_strdup (oc->meta_text->str);
+      if (!oc->uid_ident && oc->ident_id && oc->uid_attr &&
+          g_str_equal (oc->ident_id, oc->uid_attr))
+        oc->uid_ident = g_strdup (oc->meta_text->str);
+      if (!oc->uuid_ident && ident_looks_like_uuid (oc->meta_text->str))
+        oc->uuid_ident = g_strdup (oc->meta_text->str);
+      g_clear_pointer (&oc->ident_id, g_free);
+    }
 
     /* First-write-wins for most fields; subjects accumulate
      * comma-separated since real EPUBs typically declare several. */
@@ -671,32 +738,76 @@ enc_algorithm_is_obfuscation (const char *algo)
      g_strcmp0 (algo, "http://ns.adobe.com/pdf/enc#RC") == 0);
 }
 
-static void
-enc_scan_node (xmlNodePtr node, gboolean *has_drm)
+/* Find the first descendant element named `elem` and return its `attr`
+ * value (caller xmlFree's), or NULL. */
+static xmlChar *
+enc_find_attr (xmlNodePtr node, const char *elem, const char *attr)
 {
   for (xmlNodePtr n = node; n; n = n->next) {
     if (n->type != XML_ELEMENT_NODE)
       continue;
-    if (xmlStrcasecmp (n->name, BAD_CAST "EncryptionMethod") == 0) {
-      xmlChar *algo = xmlGetProp (n, BAD_CAST "Algorithm");
-      if (!enc_algorithm_is_obfuscation ((const char *) algo))
-        *has_drm = TRUE;
-      if (algo) xmlFree (algo);
+    if (xmlStrcasecmp (n->name, BAD_CAST elem) == 0) {
+      xmlChar *v = xmlGetProp (n, BAD_CAST attr);
+      if (v)
+        return v;
     }
-    enc_scan_node (n->children, has_drm);
+    xmlChar *deep = n->children ? enc_find_attr (n->children, elem, attr) : NULL;
+    if (deep)
+      return deep;
+  }
+  return NULL;
+}
+
+/* CipherReference URIs are container-root-relative, possibly
+ * percent-encoded, sometimes with a leading "./" or "/". Normalize to
+ * the plain zip-path form used as `self->zip` keys. */
+static char *
+enc_normalize_uri (const xmlChar *uri)
+{
+  g_autofree char *un = g_uri_unescape_string ((const char *) uri, NULL);
+  if (!un)
+    return NULL;
+  const char *p = un;
+  if (g_str_has_prefix (p, "./")) p += 2;
+  while (*p == '/') p++;
+  return *p ? g_strdup (p) : NULL;
+}
+
+static void
+enc_collect (xmlNodePtr node, GHashTable *obfuscated, gboolean *has_drm)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE)
+      continue;
+    if (xmlStrcasecmp (n->name, BAD_CAST "EncryptedData") == 0) {
+      xmlChar *algo = enc_find_attr (n->children, "EncryptionMethod",
+                                     "Algorithm");
+      xmlChar *uri  = enc_find_attr (n->children, "CipherReference", "URI");
+      if (!enc_algorithm_is_obfuscation ((const char *) algo)) {
+        *has_drm = TRUE;
+      } else if (uri) {
+        char *path = enc_normalize_uri (uri);
+        if (path)
+          g_hash_table_insert (obfuscated, path,
+                               g_strdup ((const char *) algo));
+      }
+      if (algo) xmlFree (algo);
+      if (uri)  xmlFree (uri);
+      continue;   /* EncryptedData don't nest */
+    }
+    enc_collect (n->children, obfuscated, has_drm);
   }
 }
 
-/* Classify META-INF/encryption.xml: TRUE only when some EncryptedData
- * uses a non-obfuscation algorithm (real DRM). Font-obfuscation-only
- * manifests — very common in DRM-free retail EPUBs — are NOT DRM, so
- * the book opens and reflows normally. (The obfuscated fonts simply
- * fall back to the bundled reading fonts: publisher CSS/fonts aren't
- * served yet, so font de-obfuscation is queued with the Publisher-CSS
- * phase in roadmap.md.) An unparseable manifest is treated as DRM —
- * we can't verify it's benign. */
+/* Classify META-INF/encryption.xml and collect the obfuscated-resource
+ * map. Returns TRUE only when some EncryptedData uses a non-obfuscation
+ * algorithm (real DRM). Font-obfuscation-only manifests — very common
+ * in DRM-free retail EPUBs — are NOT DRM: the book opens normally and
+ * the collected fonts are XOR-decoded once the OPF identifiers (the key
+ * material) are known. An unparseable manifest is treated as DRM — we
+ * can't verify it's benign. */
 static gboolean
-epub_encryption_is_drm (GBytes *enc)
+epub_parse_encryption (FwReflowDocumentEpub *self, GBytes *enc)
 {
   gsize len = 0;
   const char *data = g_bytes_get_data (enc, &len);
@@ -707,9 +818,151 @@ epub_encryption_is_drm (GBytes *enc)
     return TRUE;
 
   gboolean has_drm = FALSE;
-  enc_scan_node (xmlDocGetRootElement (d), &has_drm);
+  enc_collect (xmlDocGetRootElement (d), self->obfuscated, &has_drm);
   xmlFreeDoc (d);
   return has_drm;
+}
+
+/* ── Font de-obfuscation (EPUB OCF) ───────────────────────────────────
+ *
+ * IDPF (http://www.idpf.org/2008/embedding): key = SHA-1 of the OPF
+ * unique-identifier text with space/tab/CR/LF stripped; the first 1040
+ * bytes are XORed with the cycled 20-byte digest.
+ * Adobe (http://ns.adobe.com/pdf/enc#RC): key = the 16 raw bytes of the
+ * book's UUID identifier (hyphens dropped, urn:uuid: prefix ignored);
+ * the first 1024 bytes are XORed with the cycled key.
+ * Reference: Calibre epub_input.py decrypt_font_data and
+ * .foliate-js/epub.js deobfuscate. */
+
+static gboolean
+idpf_key_from_identifier (const char *ident, guint8 out[20])
+{
+  if (!ident || !*ident)
+    return FALSE;
+  g_autoptr (GString) s = g_string_new (NULL);
+  for (const char *p = ident; *p; p++)
+    if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+      g_string_append_c (s, *p);
+  GChecksum *ck = g_checksum_new (G_CHECKSUM_SHA1);
+  g_checksum_update (ck, (const guchar *) s->str, (gssize) s->len);
+  gsize len = 20;
+  g_checksum_get_digest (ck, out, &len);
+  g_checksum_free (ck);
+  return len == 20;
+}
+
+static gboolean
+adobe_key_from_identifier (const char *ident, guint8 out[16])
+{
+  if (!ident)
+    return FALSE;
+  /* Take the part after the last ':' (drops urn:uuid:), then the hex
+   * digits with hyphens skipped; exactly 32 nibbles make a key. */
+  const char *colon = strrchr (ident, ':');
+  const char *p = colon ? colon + 1 : ident;
+  gsize n = 0;
+  int hi = -1;
+  for (; *p; p++) {
+    if (*p == '-')
+      continue;
+    int v = g_ascii_xdigit_value (*p);
+    if (v < 0)
+      return FALSE;
+    if (hi < 0) {
+      hi = v;
+    } else {
+      if (n >= 16)
+        return FALSE;
+      out[n++] = (guint8) ((hi << 4) | v);
+      hi = -1;
+    }
+  }
+  return n == 16 && hi < 0;
+}
+
+static void
+epub_deobfuscate_fonts (FwReflowDocumentEpub *self,
+                        const char *idpf_ident, const char *adobe_ident)
+{
+  if (g_hash_table_size (self->obfuscated) == 0)
+    return;
+
+  guint8 idpf_key[20], adobe_key[16];
+  gboolean have_idpf  = idpf_key_from_identifier (idpf_ident, idpf_key);
+  gboolean have_adobe = adobe_key_from_identifier (adobe_ident, adobe_key);
+
+  GHashTableIter it;
+  gpointer k, v;
+  g_hash_table_iter_init (&it, self->obfuscated);
+  while (g_hash_table_iter_next (&it, &k, &v)) {
+    const char *path = k;
+    const char *algo = v;
+    GBytes *src = g_hash_table_lookup (self->zip, path);
+    if (!src)
+      continue;
+
+    gboolean is_adobe = g_strcmp0 (algo, "http://ns.adobe.com/pdf/enc#RC") == 0;
+    const guint8 *key = is_adobe ? adobe_key : idpf_key;
+    gsize key_len     = is_adobe ? sizeof adobe_key : sizeof idpf_key;
+    gsize crypt_len   = is_adobe ? 1024 : 1040;
+    if (is_adobe ? !have_adobe : !have_idpf) {
+      g_warning ("epub: no key material for obfuscated resource '%s' — "
+                 "leaving mangled (font will fall back)", path);
+      continue;
+    }
+
+    gsize n = 0;
+    const guint8 *data = g_bytes_get_data (src, &n);
+    guint8 *copy = g_memdup2 (data, n);
+    gsize limit = MIN (n, crypt_len);
+    for (gsize i = 0; i < limit; i++)
+      copy[i] ^= key[i % key_len];
+    g_hash_table_replace (self->zip, g_strdup (path),
+                          g_bytes_new_take (copy, n));
+  }
+}
+
+/* ── TOC anchor translation ───────────────────────────────────────────
+ *
+ * The NCX / nav.xhtml parsers store anchors in source form — a resolved
+ * zip path with an optional fragment ("OEBPS/ch2.xhtml#sec1").  The
+ * stitched document navigates by DOM id, so translate each anchor to
+ * the ids produce_html actually emits: "spine-<M>" for a bare chapter
+ * target, "s<M>-<frag>" for a fragment (chapter ids are namespaced with
+ * the same prefix during the stitch).  Anchors whose path isn't in the
+ * spine are left unchanged. */
+static void
+epub_translate_toc_anchors (FwReflowDocumentEpub *self)
+{
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->toc));
+  for (guint i = 0; i < n; i++) {
+    FwReflowTocItem *item =
+      g_list_model_get_item (G_LIST_MODEL (self->toc), i);
+    const char *anchor = fw_reflow_toc_item_get_anchor_id (item);
+    const char *title  = fw_reflow_toc_item_get_title (item);
+
+    char *dom = NULL;
+    if (anchor && *anchor) {
+      const char *frag = strchr (anchor, '#');
+      g_autofree char *path =
+        frag ? g_strndup (anchor, frag - anchor) : g_strdup (anchor);
+      gpointer v = g_hash_table_lookup (self->spine_index, path);
+      if (v) {
+        guint m = GPOINTER_TO_UINT (v) - 1;
+        dom = frag ? g_strdup_printf ("s%u-%s", m, frag + 1)
+                   : g_strdup_printf ("spine-%u", m);
+      }
+    }
+
+    if (dom && g_strcmp0 (dom, anchor) != 0) {
+      FwReflowTocItem *repl = fw_reflow_toc_item_new (title, dom);
+      g_list_store_remove (G_LIST_STORE (self->toc), i);
+      g_list_store_insert (G_LIST_STORE (self->toc), i, repl);
+      g_object_unref (repl);
+    }
+    g_free (dom);
+    g_object_unref (item);
+  }
 }
 
 /* ── Top-level open() ─────────────────────────────────────────────── */
@@ -729,7 +982,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
    * (see epub_encryption_is_drm). Font-obfuscation-only books fall
    * through and open normally. */
   GBytes *enc = g_hash_table_lookup (self->zip, "META-INF/encryption.xml");
-  if (enc && epub_encryption_is_drm (enc)) {
+  if (enc && epub_parse_encryption (self, enc)) {
     g_hash_table_insert (self->metadata, g_strdup ("title"),
                          g_strdup ("DRM-protected EPUB"));
     g_hash_table_insert (self->metadata, g_strdup ("format"),
@@ -784,9 +1037,21 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_free (oc.toc_id);
       g_free (oc.nav_id);
       g_free (oc.cover_id);
+      g_free (oc.uid_attr);
+      g_free (oc.ident_id);
+      g_free (oc.uid_ident);
+      g_free (oc.uuid_ident);
+      g_free (oc.first_ident);
       return FALSE;
     }
   }
+
+  /* Decode obfuscated fonts in place now that the key material (the
+   * OPF identifiers) is known.  Must run before the image tables below
+   * ref the raw GBytes. */
+  epub_deobfuscate_fonts (self,
+                          oc.uid_ident ? oc.uid_ident : oc.first_ident,
+                          oc.uuid_ident);
 
   /* Record the cover manifest id so produce_html can prepend a cover
    * section before the spine. */
@@ -806,6 +1071,8 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
       g_warning ("epub: chapter '%s' missing from archive", href);
       continue;
     }
+    g_hash_table_insert (self->spine_index, g_strdup (href),
+                         GUINT_TO_POINTER (self->spine_paths->len + 1));
     g_ptr_array_add (self->spine_paths, g_strdup (href));
   }
 
@@ -829,6 +1096,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
         parse_nav_xhtml (self, nav_href, nb);
     }
   }
+  epub_translate_toc_anchors (self);
 
   /* Build the produce_html image tables: zip-path → manifest-id (for
    * rewriting <img src> while stitching) and image_bytes keyed by
@@ -866,6 +1134,11 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   g_free (oc.toc_id);
   g_free (oc.nav_id);
   g_free (oc.cover_id);
+  g_free (oc.uid_attr);
+  g_free (oc.ident_id);
+  g_free (oc.uid_ident);
+  g_free (oc.uuid_ident);
+  g_free (oc.first_ident);
 
   return TRUE;
 }
@@ -883,17 +1156,27 @@ static GHashTable *epub_get_metadata (FwReflowDocument *doc) {
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
 
+/* The whole zip table backs the /res/ URIs: publisher CSS, fonts
+ * (already de-obfuscated in place), and whatever relative url()s inside
+ * those stylesheets resolve to.  Serving chapter XHTML through it is
+ * harmless — link-click navigation away from the stitched document is
+ * blocked by the WebView policy hook. */
+static GHashTable *epub_get_resources (FwReflowDocument *doc) {
+  FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
+  return self->drm ? NULL : self->zip;
+}
+
 /* ── produce_html: stitch spine into one HTML document ──────────────────
  *
  * Concatenates every spine chapter's <body> into a single HTML document
  * the WebKitWebView can load in one call.  Image src attributes get
  * resolved relative to their chapter's zip-directory and rewritten to
  * `framework-img://<doc-id>/<manifest-id>`, the URI scheme fw-webview.c
- * registers globally.  <script> and <link rel="stylesheet"> get
- * stripped — the former for safety, the latter because we don't ship
- * the EPUB's CSS resource graph through the URI scheme yet (Phase 17.x
- * will add framework-css:; until then a small built-in reading
- * stylesheet picks up the slack).
+ * registers globally.  <script> is stripped for safety.  Publisher
+ * stylesheets are collected from chapter <head>s and served by zip path
+ * through `framework-img://<doc-id>/res/<path>` (v0.79); relative
+ * url()/@import references inside them resolve natively against the
+ * sheet's own URI, so fonts and CSS-referenced images need no rewrite.
  *
  * Resolution rules mirror what a browser does:
  *   - src starting with "/"  → archive-absolute, strip leading /
@@ -925,6 +1208,147 @@ epub_img_resolver (xmlNodePtr img, gpointer user_data)
   if (!resolved || !*resolved) return NULL;
   const char *image_id = g_hash_table_lookup (c->zip_to_image_id, resolved);
   return image_id ? g_strdup (image_id) : NULL;
+}
+
+/* ── Chapter id/href rewriting for the stitched document ──────────────
+ *
+ * Chapters lose their file identity when stitched, so element ids are
+ * namespaced per spine position ("note3" in chapter 4 → "s4-note3") to
+ * kill cross-chapter collisions, and hrefs are rewritten to in-document
+ * fragments: "#f" → "#sN-f", "ch2.xhtml#f" → "#sM-f", "ch2.xhtml" →
+ * "#spine-M".  External links (any URI with a scheme) are left for the
+ * WebView policy hook; relative targets outside the spine are left
+ * as-is (the policy hook blocks those clicks). */
+typedef struct {
+  guint       idx;
+  const char *chapter_dir;
+  GHashTable *spine_index;
+} EpubLinkCtx;
+
+static void
+epub_rewrite_href (xmlNodePtr n, EpubLinkCtx *lc)
+{
+  xmlChar *href = xmlGetProp (n, BAD_CAST "href");
+  if (!href)
+    return;
+  const char *h = (const char *) href;
+  char *rewritten = NULL;
+
+  g_autofree char *scheme = g_uri_parse_scheme (h);
+  if (scheme) {
+    /* absolute URI — external; the policy hook decides */
+  } else if (h[0] == '#') {
+    rewritten = g_strdup_printf ("#s%u-%s", lc->idx, h + 1);
+  } else if (*h) {
+    const char *frag = strchr (h, '#');
+    g_autofree char *base = frag ? g_strndup (h, frag - h) : g_strdup (h);
+    g_autofree char *unesc = g_uri_unescape_string (base, NULL);
+    g_autofree char *resolved =
+      resolve_zip_path (lc->chapter_dir, unesc ? unesc : base);
+    gpointer v = g_hash_table_lookup (lc->spine_index, resolved);
+    if (v) {
+      guint m = GPOINTER_TO_UINT (v) - 1;
+      rewritten = frag ? g_strdup_printf ("#s%u-%s", m, frag + 1)
+                       : g_strdup_printf ("#spine-%u", m);
+    }
+  }
+
+  if (rewritten)
+    xmlSetProp (n, BAD_CAST "href", BAD_CAST rewritten);
+  g_free (rewritten);
+  xmlFree (href);
+}
+
+static void
+epub_rewrite_tree (xmlNodePtr node, EpubLinkCtx *lc)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE)
+      continue;
+
+    xmlChar *id = xmlGetProp (n, BAD_CAST "id");
+    if (id && *id) {
+      g_autofree char *ns = g_strdup_printf ("s%u-%s", lc->idx, id);
+      xmlSetProp (n, BAD_CAST "id", BAD_CAST ns);
+    } else if (xmlStrcasecmp (n->name, BAD_CAST "a") == 0) {
+      /* legacy <a name="x"> anchor targets become namespaced ids */
+      xmlChar *name = xmlGetProp (n, BAD_CAST "name");
+      if (name && *name) {
+        g_autofree char *ns = g_strdup_printf ("s%u-%s", lc->idx, name);
+        xmlSetProp (n, BAD_CAST "id", BAD_CAST ns);
+      }
+      if (name) xmlFree (name);
+    }
+    if (id) xmlFree (id);
+
+    if (xmlStrcasecmp (n->name, BAD_CAST "a") == 0 ||
+        xmlStrcasecmp (n->name, BAD_CAST "area") == 0)
+      epub_rewrite_href (n, lc);
+
+    if (n->children)
+      epub_rewrite_tree (n->children, lc);
+  }
+}
+
+/* ── Publisher CSS collection ─────────────────────────────────────────
+ *
+ * Chapters reference stylesheets from <head>, which the body stitch
+ * never sees.  Walk each chapter's full tree, resolving stylesheet
+ * <link>s to zip paths (deduped, first-appearance order — books
+ * reference the same sheets from every chapter) and gathering inline
+ * <style> text.  Chapter-scoped rules leak document-wide in a stitched
+ * DOM; accepted, since real books overwhelmingly share one stylesheet
+ * set across the spine. */
+typedef struct {
+  GPtrArray  *sheet_paths;    /* gchar* resolved zip paths, ordered */
+  GHashTable *seen;           /* set: sheet paths + style-block texts */
+  GString    *style_blocks;
+  const char *chapter_dir;
+} EpubCssCtx;
+
+static void
+epub_collect_css (xmlNodePtr node, EpubCssCtx *cc)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE)
+      continue;
+
+    if (xmlStrcasecmp (n->name, BAD_CAST "link") == 0) {
+      xmlChar *rel  = xmlGetProp (n, BAD_CAST "rel");
+      xmlChar *href = xmlGetProp (n, BAD_CAST "href");
+      if (rel && href && *href &&
+          g_ascii_strcasecmp ((const char *) rel, "stylesheet") == 0) {
+        g_autofree char *unesc =
+          g_uri_unescape_string ((const char *) href, NULL);
+        char *resolved = resolve_zip_path (cc->chapter_dir,
+                                           unesc ? unesc : (const char *) href);
+        if (resolved && *resolved &&
+            !g_hash_table_contains (cc->seen, resolved)) {
+          g_hash_table_add (cc->seen, g_strdup (resolved));
+          g_ptr_array_add (cc->sheet_paths, resolved);
+          resolved = NULL;
+        }
+        g_free (resolved);
+      }
+      if (rel)  xmlFree (rel);
+      if (href) xmlFree (href);
+    } else if (xmlStrcasecmp (n->name, BAD_CAST "style") == 0) {
+      xmlChar *text = xmlNodeGetContent (n);
+      /* "</style" inside the text would break out of the emitted block;
+       * such content can only be hostile or broken — skip it. */
+      if (text && *text &&
+          !g_strstr_len ((const char *) text, -1, "</style") &&
+          !g_hash_table_contains (cc->seen, (const char *) text)) {
+        g_hash_table_add (cc->seen, g_strdup ((const char *) text));
+        g_string_append (cc->style_blocks, (const char *) text);
+        g_string_append_c (cc->style_blocks, '\n');
+      }
+      if (text) xmlFree (text);
+    }
+
+    if (n->children)
+      epub_collect_css (n->children, cc);
+  }
 }
 
 static gboolean
@@ -959,24 +1383,16 @@ epub_produce_html (FwReflowDocument  *doc,
     return FALSE;
   }
 
-  GString *out = g_string_new (NULL);
-  const char *title = self->metadata
-                        ? g_hash_table_lookup (self->metadata, "title")
-                        : NULL;
-  const char *lang  = self->metadata
-                        ? g_hash_table_lookup (self->metadata, "lang")
-                        : NULL;
-
-  g_string_append (out, "<!DOCTYPE html>\n<html");
-  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
-  g_string_append (out, "><head><meta charset=\"utf-8\">");
-  if (title && *title) {
-    g_autofree char *esc = g_markup_escape_text (title, -1);
-    g_string_append_printf (out, "<title>%s</title>", esc);
-  }
-  g_string_append (out, "<style>");
-  g_string_append (out, fw_reflow_reading_css ());
-  g_string_append (out, "</style></head><body>");
+  /* Sections accumulate separately from the document shell: publisher
+   * stylesheets are discovered while walking the chapters, but must be
+   * emitted in <head>, before any of them. */
+  GString *sections = g_string_new (NULL);
+  EpubCssCtx css = {
+    .sheet_paths  = g_ptr_array_new_with_free_func (g_free),
+    .seen         = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                           g_free, NULL),
+    .style_blocks = g_string_new (NULL),
+  };
 
   /* Cover image (when declared via EPUB 2 <meta name="cover" /> or
    * EPUB 3 `properties="cover-image"`).  We only emit a standalone
@@ -989,7 +1405,7 @@ epub_produce_html (FwReflowDocument  *doc,
   if (self->cover_image_id &&
       self->image_bytes &&
       g_hash_table_contains (self->image_bytes, self->cover_image_id)) {
-    g_string_append_printf (out,
+    g_string_append_printf (sections,
       "<section class=\"cover\" id=\"cover\">"
         "<img src=\"framework-img://%s/%s\" alt=\"Cover\">"
       "</section>",
@@ -1023,25 +1439,80 @@ epub_produce_html (FwReflowDocument  *doc,
     xmlNodePtr root = xmlDocGetRootElement (d);
     xmlNodePtr body = root ? fw_reflow_html_find_body (root) : NULL;
     if (body) {
+      g_autofree char *chapter_dir = dirname_zip (zip_path);
+
+      /* Publisher CSS lives in <head> — collect from the full tree
+       * before the body-only passes below. */
+      css.chapter_dir = chapter_dir;
+      epub_collect_css (root, &css);
+
       EpubImgCtx ictx = {
         .chapter_path    = zip_path,
         .zip_to_image_id = self->zip_to_image_id,
       };
       fw_reflow_html_process (body, doc_id, epub_img_resolver, &ictx);
 
-      g_string_append_printf (out, "<section data-spine=\"%u\" id=\"spine-%u\">", i, i);
+      EpubLinkCtx lctx = {
+        .idx         = i,
+        .chapter_dir = chapter_dir,
+        .spine_index = self->spine_index,
+      };
+      epub_rewrite_tree (body->children, &lctx);
+
+      g_string_append_printf (sections, "<section data-spine=\"%u\" id=\"spine-%u\">", i, i);
       for (xmlNodePtr c = body->children; c; c = c->next) {
         xmlBufferEmpty (buf);
         htmlNodeDump (buf, d, c);
-        g_string_append (out, (const char *) xmlBufferContent (buf));
+        g_string_append (sections, (const char *) xmlBufferContent (buf));
       }
-      g_string_append (out, "</section>");
+      g_string_append (sections, "</section>");
     }
     xmlFreeDoc (d);
   }
   xmlBufferFree (buf);
 
+  /* Assemble the shell now that the stylesheet set is known.  Publisher
+   * sheets and inline blocks come first, the reading stylesheet last —
+   * its sovereignty rules (!important body/theme) must win the cascade.
+   * Publisher elements carry class="fw-pub" / are plain <link>s so
+   * fw_webview_set_publisher_styles can flip their .disabled live. */
+  GString *out = g_string_new (NULL);
+  const char *title = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "title")
+                        : NULL;
+  const char *lang  = self->metadata
+                        ? g_hash_table_lookup (self->metadata, "lang")
+                        : NULL;
+
+  g_string_append (out, "<!DOCTYPE html>\n<html");
+  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
+  g_string_append (out, "><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *esc = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", esc);
+  }
+  for (guint i = 0; i < css.sheet_paths->len; i++) {
+    const char *path = css.sheet_paths->pdata[i];
+    if (!g_hash_table_contains (self->zip, path))
+      continue;
+    g_autofree char *esc = g_uri_escape_string (path, "/", TRUE);
+    g_string_append_printf (out,
+      "<link rel=\"stylesheet\" href=\"framework-img://%s/res/%s\">",
+      doc_id, esc);
+  }
+  if (css.style_blocks->len > 0)
+    g_string_append_printf (out, "<style class=\"fw-pub\">%s</style>",
+                            css.style_blocks->str);
+  g_string_append (out, "<style id=\"fw-reading-css\">");
+  g_string_append (out, fw_reflow_reading_css ());
+  g_string_append (out, "</style></head><body>");
+  g_string_append_len (out, sections->str, (gssize) sections->len);
   g_string_append (out, "</body></html>");
+
+  g_string_free (sections, TRUE);
+  g_ptr_array_free (css.sheet_paths, TRUE);
+  g_hash_table_destroy (css.seen);
+  g_string_free (css.style_blocks, TRUE);
 
   if (out_images)
     *out_images = self->image_bytes
@@ -1059,6 +1530,7 @@ fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
   iface->get_toc               = epub_get_toc;
   iface->get_metadata          = epub_get_metadata;
   iface->produce_html          = epub_produce_html;
+  iface->get_resources         = epub_get_resources;
 }
 
 /* ── GObject boilerplate ──────────────────────────────────────────── */
@@ -1069,10 +1541,12 @@ fw_reflow_document_epub_finalize (GObject *object)
   FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (object);
   g_clear_object (&self->toc);
   g_clear_pointer (&self->metadata, g_hash_table_unref);
-  g_clear_pointer (&self->zip,      g_hash_table_unref);
+  g_clear_pointer (&self->zip,        g_hash_table_unref);
+  g_clear_pointer (&self->obfuscated, g_hash_table_unref);
   g_clear_pointer (&self->path,     g_free);
   g_clear_pointer (&self->opf_dir,  g_free);
   g_clear_pointer (&self->spine_paths,     g_ptr_array_unref);
+  g_clear_pointer (&self->spine_index,     g_hash_table_unref);
   g_clear_pointer (&self->zip_to_image_id, g_hash_table_unref);
   g_clear_pointer (&self->image_bytes,     g_hash_table_unref);
   g_clear_pointer (&self->cover_image_id,  g_free);
@@ -1094,7 +1568,11 @@ fw_reflow_document_epub_init (FwReflowDocumentEpub *self)
   self->zip      = g_hash_table_new_full (g_str_hash, g_str_equal,
                                           g_free,
                                           (GDestroyNotify) g_bytes_unref);
+  self->obfuscated = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                            g_free, g_free);
   self->spine_paths     = g_ptr_array_new_with_free_func (g_free);
+  self->spine_index     = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                  g_free, NULL);
   self->zip_to_image_id = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                   g_free, g_free);
   self->image_bytes     = g_hash_table_new_full (g_str_hash, g_str_equal,

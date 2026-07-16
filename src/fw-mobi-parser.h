@@ -72,6 +72,13 @@ typedef struct {
    * an anchor there. NULL/empty for KF7 (which uses in-body filepos) or
    * when no NCX is present. Caller frees via fw_mobi_parsed_free. */
   GArray       *toc;   /* FwMobiTocEntry */
+
+  /* KF8 fragment table: frag_offsets[fid] is the absolute byte offset
+   * in `body` where fragment `fid` begins (G_MAXUINT32 for a skipped
+   * fragment). Lets the backend resolve in-body kindle:pos:fid:F:off:O
+   * links to frag_offsets[F] + O. NULL for KF7 and for the rare cp1252
+   * KF8 whose re-encode shifts offsets (same caveat as `toc`). */
+  GArray       *frag_offsets;   /* guint32 */
 } FwMobiParsed;
 
 typedef struct {

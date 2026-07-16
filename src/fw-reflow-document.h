@@ -70,6 +70,15 @@ struct _FwReflowDocumentInterface {
                                     char             **out_html,
                                     GHashTable       **out_images,
                                     GError           **error);
+
+  /* Optional.  Path-keyed resource table (gchar* archive path → GBytes*)
+   * backing `framework-img://<doc-id>/res/<path>` URIs: publisher CSS,
+   * fonts (already de-obfuscated), and anything relative url()/@import
+   * references inside those stylesheets resolve to.  Transfer none —
+   * the table stays owned by the document; fw_webview_load_html takes
+   * its own ref.  NULL when the format has no path-addressed resources
+   * (every format except EPUB today). */
+  GHashTable  *(*get_resources)    (FwReflowDocument *self);
 };
 
 
@@ -94,6 +103,10 @@ gboolean     fw_reflow_document_produce_html        (FwReflowDocument  *self,
                                                      char             **out_html,
                                                      GHashTable       **out_images,
                                                      GError           **error);
+
+/* Path-keyed resource table for the WebView's /res/ URIs, or NULL.
+ * Transfer none. */
+GHashTable  *fw_reflow_document_get_resources       (FwReflowDocument  *self);
 
 /* ── Path → reflow-eligible? ──────────────────────────────────────── */
 

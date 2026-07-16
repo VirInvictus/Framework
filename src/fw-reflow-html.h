@@ -24,6 +24,12 @@ const char *fw_reflow_reading_css (void);
 /* Locate <body> in a parsed HTML tree, or NULL. */
 xmlNodePtr  fw_reflow_html_find_body (xmlNodePtr root);
 
+/* TRUE when a URL resolves to a script scheme (javascript:/vbscript:),
+ * tolerating the embedded tab/LF/CR that HTML URL parsing strips. For
+ * backends that emit anchors directly instead of going through
+ * fw_reflow_html_process. */
+gboolean    fw_reflow_url_is_script (const char *value);
+
 /* Resolve an <img> element to an image id (newly-allocated, caller frees
  * via g_free), or NULL to leave the element's src untouched. */
 typedef char *(*FwReflowImgResolver) (xmlNodePtr img, gpointer user_data);

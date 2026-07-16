@@ -168,6 +168,19 @@
       </description>
     </key>
 
+    <key name="publisher-styles" type="b">
+      <default>true</default>
+      <summary>Honour publisher stylesheets in reflow documents</summary>
+      <description>
+        When true (the default), EPUB documents render with the book's
+        own stylesheets and embedded fonts, served through the internal
+        resource scheme. The reading theme, chosen typography, and the
+        reading column still take precedence over book-level styling.
+        When false, publisher stylesheets are disabled live (no reload)
+        and only the built-in reading stylesheet applies.
+      </description>
+    </key>
+
     <key name="reading-two-column" type="b">
       <default>false</default>
       <summary>Render reflow documents as two columns side-by-side</summary>

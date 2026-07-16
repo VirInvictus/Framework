@@ -72,6 +72,16 @@ test_one (const char *root, const ReflowSample *s)
     return 1;
   }
 
+  /* FW_STRESS_DUMP_HTML=<dir>: write each sample's stitched HTML out
+   * for eyeball inspection (publisher CSS links, id namespacing, href
+   * rewrites).  Debugging affordance, not an assertion. */
+  const char *dump_dir = g_getenv ("FW_STRESS_DUMP_HTML");
+  if (dump_dir && html) {
+    g_autofree char *out_path =
+      g_strdup_printf ("%s/%s.html", dump_dir, s->file);
+    g_file_set_contents (out_path, html, -1, NULL);
+  }
+
   gsize html_len = html ? strlen (html) : 0;
   if (html_len == 0) {
     fprintf (stderr, "  FAIL %s: produce_html returned empty HTML\n", s->file);
@@ -263,6 +273,231 @@ test_scrub (void)
   return fail ? 1 : 0;
 }
 
+/* ── Publisher CSS + links + font de-obfuscation (synthetic EPUB) ────
+ *
+ * Covers the v0.79 Phase 17.x work: stylesheet <link>s served through
+ * /res/, per-chapter id namespacing, cross-chapter href rewriting, TOC
+ * anchor translation to DOM ids, and IDPF font de-obfuscation. */
+
+static const char PUB_UID[] = "urn:uuid:12345678-1234-1234-1234-123456789abc";
+
+static const char PUB_OPF[] =
+  "<?xml version=\"1.0\"?>\n"
+  "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" "
+    "unique-identifier=\"uid\">\n"
+  "  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n"
+  "    <dc:identifier id=\"uid\">urn:uuid:12345678-1234-1234-1234-123456789abc</dc:identifier>\n"
+  "    <dc:title>Publisher CSS Fixture</dc:title>\n"
+  "  </metadata>\n"
+  "  <manifest>\n"
+  "    <item id=\"ch1\" href=\"ch1.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+  "    <item id=\"ch2\" href=\"ch2.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+  "    <item id=\"css\" href=\"styles/main.css\" media-type=\"text/css\"/>\n"
+  "    <item id=\"fnt\" href=\"fonts/test.otf\" media-type=\"font/otf\"/>\n"
+  "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n"
+  "  </manifest>\n"
+  "  <spine toc=\"ncx\"><itemref idref=\"ch1\"/><itemref idref=\"ch2\"/></spine>\n"
+  "</package>\n";
+
+static const char PUB_NCX[] =
+  "<?xml version=\"1.0\"?>\n"
+  "<ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" version=\"2005-1\">\n"
+  "  <navMap>\n"
+  "    <navPoint id=\"n1\"><navLabel><text>Target Section</text></navLabel>"
+      "<content src=\"ch2.xhtml#target\"/></navPoint>\n"
+  "    <navPoint id=\"n2\"><navLabel><text>Chapter One</text></navLabel>"
+      "<content src=\"ch1.xhtml\"/></navPoint>\n"
+  "  </navMap>\n"
+  "</ncx>\n";
+
+static const char PUB_CH1[] =
+  "<html><head>"
+  "<link rel=\"stylesheet\" href=\"styles/main.css\"/>"
+  "</head><body>\n"
+  "<p id=\"note1\">Note one target.</p>\n"
+  "<a href=\"#note1\">same-file link</a>\n"
+  "<a href=\"ch2.xhtml#target\">cross-file fragment</a>\n"
+  "<a href=\"ch2.xhtml\">cross-file chapter</a>\n"
+  "</body></html>\n";
+
+static const char PUB_CH2[] =
+  "<html><head>"
+  "<link rel=\"stylesheet\" href=\"styles/main.css\"/>"
+  "</head><body>\n"
+  "<h1 id=\"target\">Target</h1>\n"
+  "<a href=\"ch1.xhtml#note1\">back-reference</a>\n"
+  "</body></html>\n";
+
+static const char PUB_CSS[] =
+  "@font-face { font-family: T; src: url(../fonts/test.otf); }\n"
+  "p { color: teal; }\n";
+
+static const char PUB_ENCRYPTION[] =
+  "<?xml version=\"1.0\"?>\n"
+  "<encryption xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\""
+  " xmlns:enc=\"http://www.w3.org/2001/04/xmlenc#\">\n"
+  "  <enc:EncryptedData>\n"
+  "    <enc:EncryptionMethod Algorithm=\"http://www.idpf.org/2008/embedding\"/>\n"
+  "    <enc:CipherData><enc:CipherReference URI=\"OEBPS/fonts/test.otf\"/></enc:CipherData>\n"
+  "  </enc:EncryptedData>\n"
+  "</encryption>\n";
+
+/* IDPF-obfuscate `data` in place: XOR the first 1040 bytes with the
+ * cycled SHA-1 of the whitespace-stripped unique identifier — the same
+ * derivation the backend must invert. */
+static void
+idpf_obfuscate (guint8 *data, gsize len, const char *ident)
+{
+  guint8 key[20];
+  gsize klen = sizeof key;
+  GChecksum *ck = g_checksum_new (G_CHECKSUM_SHA1);
+  g_checksum_update (ck, (const guchar *) ident, -1);   /* no ws in fixture */
+  g_checksum_get_digest (ck, key, &klen);
+  g_checksum_free (ck);
+  gsize limit = MIN (len, (gsize) 1040);
+  for (gsize i = 0; i < limit; i++)
+    data[i] ^= key[i % sizeof key];
+}
+
+static int
+pub_check (gboolean ok, const char *what)
+{
+  if (!ok)
+    fprintf (stderr, "  FAIL publisher-css: %s\n", what);
+  return ok ? 0 : 1;
+}
+
+static guint
+count_occurrences (const char *hay, const char *needle)
+{
+  guint n = 0;
+  for (const char *p = hay; (p = strstr (p, needle)) != NULL;
+       p += strlen (needle))
+    n++;
+  return n;
+}
+
+static int
+test_publisher_css (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree char *dir = g_dir_make_tmp ("fw-stress-pubcss-XXXXXX", &error);
+  if (!dir) {
+    fprintf (stderr, "  FAIL publisher-css: tmp dir: %s\n",
+             error ? error->message : "(null)");
+    return 1;
+  }
+  g_autofree char *path = g_build_filename (dir, "pubcss.epub", NULL);
+
+  /* Font plaintext: a recognizable 2 KB pattern (longer than the 1040
+   * XOR window, so the tail must round-trip untouched too). */
+  gsize font_len = 2048;
+  g_autofree guint8 *font_plain = g_malloc (font_len);
+  for (gsize i = 0; i < font_len; i++)
+    font_plain[i] = (guint8) (i * 7 + 13);
+  g_autofree guint8 *font_obf = g_memdup2 (font_plain, font_len);
+  idpf_obfuscate (font_obf, font_len, PUB_UID);
+
+  struct archive *a = archive_write_new ();
+  archive_write_set_format_zip (a);
+  gboolean wrote =
+    archive_write_open_filename (a, path) == ARCHIVE_OK &&
+    zip_add (a, "mimetype", "application/epub+zip") &&
+    zip_add (a, "META-INF/container.xml", HOSTILE_CONTAINER) &&
+    zip_add (a, "META-INF/encryption.xml", PUB_ENCRYPTION) &&
+    zip_add (a, "OEBPS/content.opf", PUB_OPF) &&
+    zip_add (a, "OEBPS/toc.ncx", PUB_NCX) &&
+    zip_add (a, "OEBPS/ch1.xhtml", PUB_CH1) &&
+    zip_add (a, "OEBPS/ch2.xhtml", PUB_CH2) &&
+    zip_add (a, "OEBPS/styles/main.css", PUB_CSS);
+  if (wrote) {
+    struct archive_entry *e = archive_entry_new ();
+    archive_entry_set_pathname (e, "OEBPS/fonts/test.otf");
+    archive_entry_set_size (e, (la_int64_t) font_len);
+    archive_entry_set_filetype (e, AE_IFREG);
+    archive_entry_set_perm (e, 0644);
+    wrote = archive_write_header (a, e) == ARCHIVE_OK &&
+            archive_write_data (a, font_obf, font_len) == (la_ssize_t) font_len;
+    archive_entry_free (e);
+  }
+  archive_write_free (a);
+  if (!wrote) {
+    fprintf (stderr, "  FAIL publisher-css: could not write fixture zip\n");
+    return 1;
+  }
+
+  int fail = 0;
+  FwReflowDocument *doc = fw_reflow_document_new_for_path (path, &error);
+  char *html = NULL;
+  GHashTable *images = NULL;
+  if (!doc ||
+      !fw_reflow_document_produce_html (doc, "pub", &html, &images, &error)) {
+    fprintf (stderr, "  FAIL publisher-css: open/produce_html: %s\n",
+             error ? error->message : "(null)");
+    fail = 1;
+  } else {
+    /* Publisher stylesheet link, served by path, deduped to one. */
+    const char *sheet =
+      "href=\"framework-img://pub/res/OEBPS/styles/main.css\"";
+    fail += pub_check (count_occurrences (html, sheet) == 1,
+                       "stylesheet <link> missing or not deduped");
+    /* Id namespacing + href rewriting. */
+    fail += pub_check (strstr (html, "id=\"s0-note1\"") != NULL,
+                       "chapter id not namespaced");
+    fail += pub_check (strstr (html, "href=\"#s0-note1\"") != NULL,
+                       "same-file href not rewritten");
+    fail += pub_check (strstr (html, "href=\"#s1-target\"") != NULL,
+                       "cross-file fragment href not rewritten");
+    fail += pub_check (strstr (html, "href=\"#spine-1\"") != NULL,
+                       "cross-file chapter href not rewritten");
+    fail += pub_check (strstr (html, "href=\"ch2.xhtml") == NULL,
+                       "raw cross-file href survived");
+    /* Reading stylesheet keeps its toggle-exempt id. */
+    fail += pub_check (strstr (html, "<style id=\"fw-reading-css\">") != NULL,
+                       "reading stylesheet id missing");
+
+    /* De-obfuscated font served through the resource table. */
+    GHashTable *res = fw_reflow_document_get_resources (doc);
+    GBytes *font = res ? g_hash_table_lookup (res, "OEBPS/fonts/test.otf")
+                       : NULL;
+    if (pub_check (font != NULL, "font missing from resource table") == 0) {
+      gsize n = 0;
+      const guint8 *b = g_bytes_get_data (font, &n);
+      fail += pub_check (n == font_len &&
+                         memcmp (b, font_plain, font_len) == 0,
+                         "font bytes not de-obfuscated");
+    } else {
+      fail += 1;
+    }
+
+    /* TOC anchors translated to DOM ids. */
+    GListModel *toc = fw_reflow_document_get_toc (doc);
+    if (toc && g_list_model_get_n_items (toc) == 2) {
+      FwReflowTocItem *i0 = g_list_model_get_item (toc, 0);
+      FwReflowTocItem *i1 = g_list_model_get_item (toc, 1);
+      fail += pub_check (
+        g_strcmp0 (fw_reflow_toc_item_get_anchor_id (i0), "s1-target") == 0,
+        "fragment TOC anchor not translated");
+      fail += pub_check (
+        g_strcmp0 (fw_reflow_toc_item_get_anchor_id (i1), "spine-0") == 0,
+        "chapter TOC anchor not translated");
+      g_object_unref (i0);
+      g_object_unref (i1);
+    } else {
+      fail += pub_check (FALSE, "TOC missing or wrong size");
+    }
+  }
+  g_free (html);
+  if (images) g_hash_table_unref (images);
+  if (doc) g_object_unref (doc);
+
+  (void) g_unlink (path);
+  (void) g_rmdir (dir);
+
+  printf ("  pubcss.epub (synthetic): %s\n", fail ? "FAIL" : "ok");
+  return fail ? 1 : 0;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -279,6 +514,9 @@ main (int argc, char **argv)
   }
 
   failures += test_scrub ();
+  processed++;
+
+  failures += test_publisher_css ();
   processed++;
 
   printf ("done: processed=%d failures=%d\n", processed, failures);

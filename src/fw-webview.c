@@ -36,12 +36,15 @@ struct _FwWebView {
 
   char              *doc_id;          /* per-view UUID, host of img URIs */
   GHashTable        *images;          /* gchar* id → GBytes*; owned ref */
+  GHashTable        *resources;       /* gchar* zip-path → GBytes*; owned
+                                       * ref; backs /res/<path> URIs */
 
   guint              hit_count;
   gboolean           load_done;       /* TRUE once load-changed FINISHED */
   char              *pending_position;/* restored if load_done == FALSE */
   char              *pending_anchor;  /* ditto for scroll_to_anchor */
   char              *pending_style;   /* reading-style JS, run on load */
+  char              *pending_pub;     /* publisher-styles JS, run on load */
   char              *last_position;   /* latest {anchor,scroll_y} JSON from
                                        * the in-page scroll listener; read
                                        * synchronously at save time */
@@ -82,6 +85,39 @@ registry_remove (FwWebView *self)
   g_mutex_unlock (&registry_lock);
 }
 
+/* Content-type sniff by magic bytes.  WebKit accepts any
+ * image/(subtype) we hand it. */
+static char *
+sniff_mime (GBytes *bytes)
+{
+  gsize n;
+  const guchar *p = g_bytes_get_data (bytes, &n);
+  if      (n >= 8 && memcmp (p, "\x89PNG\r\n\x1a\n", 8) == 0) return g_strdup ("image/png");
+  else if (n >= 3 && memcmp (p, "\xff\xd8\xff", 3) == 0)      return g_strdup ("image/jpeg");
+  else if (n >= 6 && memcmp (p, "GIF87a", 6) == 0)            return g_strdup ("image/gif");
+  else if (n >= 6 && memcmp (p, "GIF89a", 6) == 0)            return g_strdup ("image/gif");
+  else if (n >= 4 && memcmp (p, "RIFF", 4) == 0)              return g_strdup ("image/webp");
+  else if (n >= 4 && memcmp (p, "<svg", 4) == 0)              return g_strdup ("image/svg+xml");
+  return g_strdup ("application/octet-stream");
+}
+
+/* MIME for /res/ paths: extension first (CSS and fonts have no reliable
+ * magic WebKit trusts), magic sniff as fallback. */
+static char *
+resource_mime (const char *path, GBytes *bytes)
+{
+  const char *dot = strrchr (path, '.');
+  if (dot) {
+    if (g_ascii_strcasecmp (dot, ".css") == 0)   return g_strdup ("text/css");
+    if (g_ascii_strcasecmp (dot, ".woff2") == 0) return g_strdup ("font/woff2");
+    if (g_ascii_strcasecmp (dot, ".woff") == 0)  return g_strdup ("font/woff");
+    if (g_ascii_strcasecmp (dot, ".ttf") == 0)   return g_strdup ("font/ttf");
+    if (g_ascii_strcasecmp (dot, ".otf") == 0)   return g_strdup ("font/otf");
+    if (g_ascii_strcasecmp (dot, ".svg") == 0)   return g_strdup ("image/svg+xml");
+  }
+  return sniff_mime (bytes);
+}
+
 /* Lookup runs on the WebKit IPC thread.  Returns a borrowed GBytes
  * reference; the caller must g_bytes_ref before unlocking. */
 static GBytes *
@@ -96,19 +132,40 @@ registry_lookup_image (const char *doc_id, const char *image_id, char **out_mime
       bytes = g_bytes_ref (src);
   }
   g_mutex_unlock (&registry_lock);
-  /* Cheap content-type sniff by magic bytes.  WebKit accepts any
-   * image/(subtype) we hand it. */
-  if (bytes && out_mime) {
-    gsize n;
-    const guchar *p = g_bytes_get_data (bytes, &n);
-    if      (n >= 8 && memcmp (p, "\x89PNG\r\n\x1a\n", 8) == 0) *out_mime = g_strdup ("image/png");
-    else if (n >= 3 && memcmp (p, "\xff\xd8\xff", 3) == 0)      *out_mime = g_strdup ("image/jpeg");
-    else if (n >= 6 && memcmp (p, "GIF87a", 6) == 0)            *out_mime = g_strdup ("image/gif");
-    else if (n >= 6 && memcmp (p, "GIF89a", 6) == 0)            *out_mime = g_strdup ("image/gif");
-    else if (n >= 4 && memcmp (p, "RIFF", 4) == 0)              *out_mime = g_strdup ("image/webp");
-    else if (n >= 4 && memcmp (p, "<svg", 4) == 0)              *out_mime = g_strdup ("image/svg+xml");
-    else                                                         *out_mime = g_strdup ("application/octet-stream");
+  if (bytes && out_mime)
+    *out_mime = sniff_mime (bytes);
+  return bytes;
+}
+
+/* /res/<zip-path> lookup (percent-decoded).  Serves publisher resources
+ * (CSS, fonts, images referenced from CSS) by archive path so relative
+ * url(...) and @import references inside stylesheets resolve natively
+ * against the resource's own URI.  Scripts are never served: <script>
+ * is stripped at emit, and refusing .js here keeps it that way even if
+ * a future emit path slips. */
+static GBytes *
+registry_lookup_resource (const char *doc_id, const char *escaped_path,
+                          char **out_mime)
+{
+  g_autofree char *path = g_uri_unescape_string (escaped_path, NULL);
+  if (!path || !*path)
+    return NULL;
+  const char *dot = strrchr (path, '.');
+  if (dot && (g_ascii_strcasecmp (dot, ".js") == 0 ||
+              g_ascii_strcasecmp (dot, ".mjs") == 0))
+    return NULL;
+
+  GBytes *bytes = NULL;
+  g_mutex_lock (&registry_lock);
+  FwWebView *view = registry ? g_hash_table_lookup (registry, doc_id) : NULL;
+  if (view && view->resources) {
+    GBytes *src = g_hash_table_lookup (view->resources, path);
+    if (src)
+      bytes = g_bytes_ref (src);
   }
+  g_mutex_unlock (&registry_lock);
+  if (bytes && out_mime)
+    *out_mime = resource_mime (path, bytes);
   return bytes;
 }
 
@@ -147,10 +204,14 @@ on_img_scheme_request (WebKitURISchemeRequest *req, gpointer user_data G_GNUC_UN
   }
 
   g_autofree char *mime = NULL;
-  GBytes *bytes = registry_lookup_image (doc_id, image_id, &mime);
+  GBytes *bytes;
+  if (g_str_has_prefix (image_id, "res/"))
+    bytes = registry_lookup_resource (doc_id, image_id + 4, &mime);
+  else
+    bytes = registry_lookup_image (doc_id, image_id, &mime);
   if (!bytes) {
     g_autoptr (GError) err = g_error_new (G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                                          "no image %s in document %s",
+                                          "no resource %s in document %s",
                                           image_id, doc_id);
     webkit_uri_scheme_request_finish_error (req, err);
     return;
@@ -233,6 +294,11 @@ flush_pending_after_load (FwWebView *self)
     webkit_web_view_evaluate_javascript (
       self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
   }
+  if (self->pending_pub) {
+    g_autofree char *js = g_steal_pointer (&self->pending_pub);
+    webkit_web_view_evaluate_javascript (
+      self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
+  }
 }
 
 static void
@@ -292,6 +358,117 @@ static const char FW_POS_USER_SCRIPT[] =
   "  window.addEventListener('load', snap);"
   "})();";
 
+/* ── Navigation policy ─────────────────────────────────────────────────
+ *
+ * The stitched document is the whole reading session: navigating the
+ * WebView anywhere else destroys it (an unresolved relative href used
+ * to load an error page from the img scheme handler).  Policy:
+ *   - same-document fragment jumps (rewritten in-book links): allowed;
+ *   - http(s)/mailto link clicks: opened in the default browser via
+ *     GtkUriLauncher, navigation blocked;
+ *   - any other link-click navigation: blocked;
+ *   - non-link navigations (the load_html itself): allowed.  In-book
+ *     scripts are stripped at emit, so nothing else can navigate. */
+
+/* target and current URIs match up to the fragment → same-document. */
+static gboolean
+is_same_document (const char *target, const char *current)
+{
+  if (!target || !current)
+    return FALSE;
+  gsize n = 0;
+  while (target[n] && target[n] != '#' &&
+         current[n] && current[n] != '#' && target[n] == current[n])
+    n++;
+  gboolean t_end = target[n] == '\0' || target[n] == '#';
+  gboolean c_end = current[n] == '\0' || current[n] == '#';
+  return t_end && c_end;
+}
+
+static gboolean
+on_decide_policy (WebKitWebView            *web,
+                  WebKitPolicyDecision     *decision,
+                  WebKitPolicyDecisionType  type,
+                  gpointer                  user_data)
+{
+  FwWebView *self = FW_WEBVIEW (user_data);
+  if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
+    return FALSE;   /* default handling */
+
+  WebKitNavigationPolicyDecision *nav =
+    WEBKIT_NAVIGATION_POLICY_DECISION (decision);
+  WebKitNavigationAction *action =
+    webkit_navigation_policy_decision_get_navigation_action (nav);
+  if (webkit_navigation_action_get_navigation_type (action) !=
+      WEBKIT_NAVIGATION_TYPE_LINK_CLICKED)
+    return FALSE;   /* load_html, reload, ... — allow */
+
+  const char *uri =
+    webkit_uri_request_get_uri (webkit_navigation_action_get_request (action));
+  if (is_same_document (uri, webkit_web_view_get_uri (web)))
+    return FALSE;   /* fragment jump inside the book — allow */
+
+  if (uri && (g_str_has_prefix (uri, "http://")  ||
+              g_str_has_prefix (uri, "https://") ||
+              g_str_has_prefix (uri, "mailto:"))) {
+    GtkUriLauncher *launcher = gtk_uri_launcher_new (uri);
+    GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+    gtk_uri_launcher_launch (launcher, GTK_IS_WINDOW (root) ?
+                             GTK_WINDOW (root) : NULL, NULL, NULL, NULL);
+    g_object_unref (launcher);
+  }
+  webkit_policy_decision_ignore (decision);
+  return TRUE;
+}
+
+/* ── Remote-content blocker ────────────────────────────────────────────
+ *
+ * Books are local documents; nothing in one should reach the network
+ * (remote images and stylesheets are tracking vectors).  A compiled
+ * WebKit content filter blocks every http(s)/ws(s) subresource fetch;
+ * top-level navigation is already handled by the policy hook above.
+ * Compilation is async and cached by WebKit under the store path, so
+ * after the first run this resolves from disk immediately. */
+
+static const char REMOTE_BLOCK_RULES[] =
+  "[{\"trigger\":{\"url-filter\":\"^https?:\"},\"action\":{\"type\":\"block\"}},"
+  " {\"trigger\":{\"url-filter\":\"^wss?:\"},\"action\":{\"type\":\"block\"}}]";
+
+static void
+on_filter_saved (GObject *src, GAsyncResult *res, gpointer user_data)
+{
+  WebKitUserContentManager *ucm = user_data;
+  g_autoptr (GError) err = NULL;
+  WebKitUserContentFilter *filter =
+    webkit_user_content_filter_store_save_finish (
+      WEBKIT_USER_CONTENT_FILTER_STORE (src), res, &err);
+  if (filter) {
+    webkit_user_content_manager_add_filter (ucm, filter);
+    webkit_user_content_filter_unref (filter);
+  } else {
+    g_warning ("fw-webview: remote-block filter failed to compile: %s",
+               err ? err->message : "(unknown)");
+  }
+  g_object_unref (ucm);
+}
+
+static void
+install_remote_block_filter (WebKitUserContentManager *ucm)
+{
+  g_autofree char *dir =
+    g_build_filename (g_get_user_cache_dir (), "framework",
+                      "content-filters", NULL);
+  g_mkdir_with_parents (dir, 0700);
+  WebKitUserContentFilterStore *store =
+    webkit_user_content_filter_store_new (dir);
+  g_autoptr (GBytes) rules =
+    g_bytes_new_static (REMOTE_BLOCK_RULES, sizeof (REMOTE_BLOCK_RULES) - 1);
+  webkit_user_content_filter_store_save (
+    store, "fw-block-remote", rules, NULL,
+    on_filter_saved, g_object_ref (ucm));
+  g_object_unref (store);
+}
+
 /* ── Widget machinery ──────────────────────────────────────────────── */
 
 static char *
@@ -309,9 +486,11 @@ fw_webview_dispose (GObject *object)
   FwWebView *self = FW_WEBVIEW (object);
   registry_remove (self);
   g_clear_pointer (&self->images, g_hash_table_unref);
+  g_clear_pointer (&self->resources, g_hash_table_unref);
   g_clear_pointer (&self->pending_anchor, g_free);
   g_clear_pointer (&self->pending_position, g_free);
   g_clear_pointer (&self->pending_style, g_free);
+  g_clear_pointer (&self->pending_pub, g_free);
   g_clear_pointer (&self->last_position, g_free);
   if (self->web) {
     gtk_widget_unparent (GTK_WIDGET (self->web));
@@ -378,6 +557,8 @@ fw_webview_init (FwWebView *self)
   webkit_user_content_manager_add_script (ucm, pos_script);
   webkit_user_script_unref (pos_script);
 
+  install_remote_block_filter (ucm);
+
   /* JS is required for our scroll_to_anchor / restore_position helpers.
    * Local-storage and HTML5 database are off — viewer, not a browser. */
   WebKitSettings *s = webkit_web_view_get_settings (self->web);
@@ -392,6 +573,8 @@ fw_webview_init (FwWebView *self)
 
   g_signal_connect (self->web, "load-changed",
                     G_CALLBACK (on_load_changed), self);
+  g_signal_connect (self->web, "decide-policy",
+                    G_CALLBACK (on_decide_policy), self);
   g_signal_connect (self->finder, "found-text",
                     G_CALLBACK (on_found_text), self);
   g_signal_connect (self->finder, "failed-to-find-text",
@@ -416,18 +599,23 @@ fw_webview_get_doc_id (FwWebView *self)
 }
 
 void
-fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images)
+fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images,
+                      GHashTable *resources)
 {
   g_return_if_fail (FW_IS_WEBVIEW (self));
   g_return_if_fail (html != NULL);
 
-  /* Swap the image table.  The scheme handler may already be resolving
-   * a URI from the previous load; the lock in registry_lookup_image
-   * synchronizes with us here. */
+  /* Swap the image + resource tables.  The scheme handler may already
+   * be resolving a URI from the previous load; the lock in the
+   * registry_lookup_* helpers synchronizes with us here. */
   g_mutex_lock (&registry_lock);
   if (self->images != images) {
     if (self->images) g_hash_table_unref (self->images);
     self->images = images ? g_hash_table_ref (images) : NULL;
+  }
+  if (self->resources != resources) {
+    if (self->resources) g_hash_table_unref (self->resources);
+    self->resources = resources ? g_hash_table_ref (resources) : NULL;
   }
   g_mutex_unlock (&registry_lock);
 
@@ -436,6 +624,7 @@ fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images)
    * new document scrolls can't persist a stale anchor against it. */
   g_clear_pointer (&self->last_position, g_free);
   g_clear_pointer (&self->pending_style, g_free);
+  g_clear_pointer (&self->pending_pub, g_free);
   /* base_uri matches the framework-img: origin our images live in so
    * the document and images are same-origin.  Without this, WebKit's
    * mixed-origin rules silently drop the image fetches before they
@@ -624,6 +813,31 @@ fw_webview_set_reading_style (FwWebView *self, const FwReadingStyle *s)
   }
   webkit_web_view_evaluate_javascript (
     self->web, js->str, -1, NULL, NULL, NULL, NULL, NULL);
+}
+
+void
+fw_webview_set_publisher_styles (FwWebView *self, gboolean enabled)
+{
+  g_return_if_fail (FW_IS_WEBVIEW (self));
+
+  /* Publisher CSS is always emitted (as <link>s and class="fw-pub"
+   * style blocks); the toggle flips their DOM .disabled flag, which is
+   * instant and reversible without re-producing the document.  The
+   * reading stylesheet (id fw-reading-css) is never touched. */
+  g_autofree char *js = g_strdup_printf (
+    "(function (on) {"
+    "  var els = document.querySelectorAll('link[rel=\"stylesheet\"],style');"
+    "  for (var i = 0; i < els.length; i++)"
+    "    if (els[i].id !== 'fw-reading-css') els[i].disabled = !on;"
+    "})(%s);", enabled ? "true" : "false");
+
+  if (!self->load_done) {
+    g_free (self->pending_pub);
+    self->pending_pub = g_steal_pointer (&js);
+    return;
+  }
+  webkit_web_view_evaluate_javascript (
+    self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
 }
 
 /* ── Search ────────────────────────────────────────────────────────── */

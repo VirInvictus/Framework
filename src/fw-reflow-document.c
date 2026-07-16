@@ -138,6 +138,14 @@ fw_reflow_document_produce_html (FwReflowDocument  *self,
   return iface->produce_html (self, doc_id, out_html, out_images, error);
 }
 
+GHashTable *
+fw_reflow_document_get_resources (FwReflowDocument *self)
+{
+  g_return_val_if_fail (FW_IS_REFLOW_DOCUMENT (self), NULL);
+  FwReflowDocumentInterface *iface = FW_REFLOW_DOCUMENT_GET_IFACE (self);
+  return iface->get_resources ? iface->get_resources (self) : NULL;
+}
+
 /* ── Path probe + factory ─────────────────────────────────────────── */
 
 static gboolean

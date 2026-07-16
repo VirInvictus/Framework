@@ -20,16 +20,20 @@ G_DECLARE_FINAL_TYPE (FwWebView, fw_webview, FW, WEBVIEW, GtkWidget)
 
 GtkWidget *fw_webview_new                (void);
 
-/* Load an HTML document plus the image table the framework-img: scheme
- * will resolve against.  `images` is GHashTable<gchar* image_id, GBytes*>;
- * FwWebView takes a reference (g_hash_table_ref) and drops it on next
- * load or on dispose.  Pass NULL to clear. `html` is the complete
- * document; its `<img>` tags should already have been rewritten by the
- * caller to point at `framework-img://<doc-id>/<image-id>` (the doc-id
- * for this view is exposed via fw_webview_get_doc_id). */
+/* Load an HTML document plus the lookup tables the framework-img:
+ * scheme resolves against.  `images` is GHashTable<gchar* image_id,
+ * GBytes*> for `framework-img://<doc-id>/<image-id>` references;
+ * `resources` is GHashTable<gchar* zip_path, GBytes*> for
+ * `framework-img://<doc-id>/res/<path>` references (publisher CSS,
+ * fonts, and anything relative URLs inside those stylesheets reach).
+ * FwWebView takes a reference on each and drops it on next load or on
+ * dispose.  Pass NULL to clear either. `html` is the complete document;
+ * its `<img>`/`<link>` URIs should already have been rewritten by the
+ * caller (the doc-id for this view is fw_webview_get_doc_id). */
 void       fw_webview_load_html          (FwWebView    *self,
                                           const char   *html,
-                                          GHashTable   *images);
+                                          GHashTable   *images,
+                                          GHashTable   *resources);
 
 /* Per-view UUID-shaped string used as the host part of framework-img://
  * URIs.  Borrowed; valid for the lifetime of the FwWebView. */
@@ -73,6 +77,13 @@ typedef struct {
 
 void       fw_webview_set_reading_style  (FwWebView           *self,
                                           const FwReadingStyle *style);
+
+/* Enable/disable publisher stylesheets (every <link rel=stylesheet> and
+ * <style> except the built-in reading stylesheet) by flipping their DOM
+ * .disabled flag — live, no reload. Queued until the load finishes if
+ * the document isn't ready. */
+void       fw_webview_set_publisher_styles (FwWebView *self,
+                                            gboolean   enabled);
 
 /* Latest reading position as JSON `{"anchor":"...","scroll_y":N}`, kept
  * current by a debounced in-page scroll listener that posts back to a

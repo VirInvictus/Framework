@@ -31,6 +31,8 @@ struct _FwReflowDocumentMobi {
   char         *html_body;  /* marker-injected UTF-8 HTML (owned) */
   gsize         html_len;
   guint         cover_recindex; /* EXTH cover; 0 = none */
+  GArray       *frag_offsets;   /* KF8 fid → body offset (owned ref;
+                                 * NULL for KF7), for kindle:pos links */
   char         *path;
 };
 
@@ -161,6 +163,86 @@ cmp_guint32 (gconstpointer a, gconstpointer b)
   return (x > y) - (x < y);
 }
 
+/* ── KF8 kindle:pos links ────────────────────────────────────────
+ *
+ * KF8 internal links are `<a href="kindle:pos:fid:XXXX:off:YYYYYYYYYY">`
+ * with base-32 fields (foliate mobi.js parsePosURI); the target byte
+ * offset in the spliced body is frag_offsets[fid] + off. Targets get
+ * "ncx_<offset>" markers injected at open (merged with the NCX TOC
+ * positions — same prefix, so ids unify), and the hrefs are rewritten
+ * to "#ncx_<offset>" at produce time. */
+
+static gboolean
+kf8_parse_pos (const char *href, guint32 *out_fid, guint32 *out_off)
+{
+  const char *p = strstr (href, "kindle:pos:fid:");
+  if (!p)
+    return FALSE;
+  p += strlen ("kindle:pos:fid:");
+  char *end = NULL;
+  guint64 fid = g_ascii_strtoull (p, &end, 32);
+  if (end == p || !g_str_has_prefix (end, ":off:"))
+    return FALSE;
+  p = end + strlen (":off:");
+  guint64 off = g_ascii_strtoull (p, &end, 32);
+  if (end == p || fid > G_MAXUINT32 || off > G_MAXUINT32)
+    return FALSE;
+  *out_fid = (guint32) fid;
+  *out_off = (guint32) off;
+  return TRUE;
+}
+
+static gboolean
+kf8_pos_to_abs (GArray *frag_offsets, guint32 fid, guint32 off,
+                guint32 *out_abs)
+{
+  if (!frag_offsets || fid >= frag_offsets->len)
+    return FALSE;
+  guint32 base = g_array_index (frag_offsets, guint32, fid);
+  if (base == G_MAXUINT32)
+    return FALSE;
+  *out_abs = base + off;
+  return TRUE;
+}
+
+/* Scan the spliced body for kindle:pos link targets so markers can be
+ * injected at their offsets alongside the NCX ones. */
+static void
+kf8_collect_pos_targets (const char *body, gsize len,
+                         GArray *frag_offsets, GArray *positions)
+{
+  static const char needle[] = "kindle:pos:fid:";
+  const char *end = body + len;
+  const char *p = body;
+  while ((p = g_strstr_len (p, end - p, needle))) {
+    guint32 fid, off, abs;
+    if (kf8_parse_pos (p, &fid, &off) &&
+        kf8_pos_to_abs (frag_offsets, fid, off, &abs) &&
+        abs <= len)
+      g_array_append_val (positions, abs);
+    p += sizeof (needle) - 1;
+  }
+}
+
+/* Sort ascending and drop duplicates — the marker injector requires
+ * ascending positions, and duplicate ids would be invalid HTML. */
+static void
+positions_sort_unique (GArray *positions)
+{
+  if (positions->len < 2) {
+    g_array_sort (positions, cmp_guint32);
+    return;
+  }
+  g_array_sort (positions, cmp_guint32);
+  guint w = 1;
+  for (guint i = 1; i < positions->len; i++) {
+    guint32 v = g_array_index (positions, guint32, i);
+    if (v != g_array_index (positions, guint32, w - 1))
+      g_array_index (positions, guint32, w++) = v;
+  }
+  g_array_set_size (positions, w);
+}
+
 /* Concatenate descendant text content of a node, normalised to
  * single-space whitespace and trimmed. Used for TOC labels. */
 static char *
@@ -224,7 +306,10 @@ mobi_walk_references (FwReflowDocumentMobi *self, xmlNode *node)
         continue;
       }
       if (title && filepos && *title && *filepos) {
-        g_autofree char *anchor = g_strdup_printf ("filepos_%s", filepos);
+        /* Numeric-normalize: markers are "filepos_<parsed value>", and
+         * kindlegen zero-pads the attribute ("filepos=0000034567"). */
+        guint64 v = g_ascii_strtoull (filepos, NULL, 10);
+        g_autofree char *anchor = g_strdup_printf ("filepos_%u", (guint32) v);
         FwReflowTocItem *item = fw_reflow_toc_item_new (title, anchor);
         g_list_store_append (self->toc, item);
         g_object_unref (item);
@@ -260,7 +345,8 @@ mobi_walk_a_filepos (FwReflowDocumentMobi *self, xmlNode *node)
       if (filepos && *filepos) {
         g_autofree char *label = mobi_node_text (n->children);
         if (label && *label) {
-          g_autofree char *anchor = g_strdup_printf ("filepos_%s", filepos);
+          guint64 v = g_ascii_strtoull (filepos, NULL, 10);
+          g_autofree char *anchor = g_strdup_printf ("filepos_%u", (guint32) v);
           FwReflowTocItem *item = fw_reflow_toc_item_new (label, anchor);
           g_list_store_append (self->toc, item);
           g_object_unref (item);
@@ -339,17 +425,32 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   gboolean kf8_toc = (m->is_kf8 && m->toc && m->toc->len > 0);
   g_autoptr (GArray) positions = NULL;
   const char *marker_prefix;
-  if (kf8_toc) {
+  if (kf8_toc || (m->is_kf8 && m->frag_offsets)) {
     positions = g_array_new (FALSE, FALSE, sizeof (guint32));
-    for (guint i = 0; i < m->toc->len; i++) {
-      guint32 o = g_array_index (m->toc, FwMobiTocEntry, i).body_offset;
-      g_array_append_val (positions, o);
+    if (kf8_toc) {
+      for (guint i = 0; i < m->toc->len; i++) {
+        guint32 o = g_array_index (m->toc, FwMobiTocEntry, i).body_offset;
+        g_array_append_val (positions, o);
+      }
     }
-    g_array_sort (positions, cmp_guint32);   /* injector needs ascending */
+    /* In-body kindle:pos link targets get markers too, under the same
+     * "ncx_" prefix, so internal links land somewhere real. */
+    if (m->frag_offsets)
+      kf8_collect_pos_targets (m->body, m->body_len,
+                               m->frag_offsets, positions);
+    positions_sort_unique (positions);       /* injector needs ascending */
     marker_prefix = "ncx_";
   } else {
     positions = mobi_collect_filepos (m->body, m->body_len);  /* sorted, unique */
     marker_prefix = "filepos_";
+  }
+
+  /* Retain the KF8 fragment table for kindle:pos href rewriting in
+   * produce_html. */
+  g_clear_pointer (&self->frag_offsets, g_array_unref);
+  if (m->frag_offsets) {
+    self->frag_offsets = m->frag_offsets;
+    m->frag_offsets = NULL;
   }
 
   gsize body_len2 = 0;
@@ -450,6 +551,45 @@ mobi_img_resolver (xmlNodePtr img, gpointer user_data)
   return id;
 }
 
+/* Give internal links a working href. KF7 anchors carry the target as
+ * a `filepos` attribute, never an href — rewrite to "#filepos_<N>"
+ * (numeric-normalized: markers use the parsed value, attrs are often
+ * zero-padded). KF8 uses kindle:pos hrefs — rewrite to "#ncx_<abs>"
+ * via the fragment table, or drop the href when unresolvable so a dead
+ * link degrades to plain text instead of a blocked navigation. */
+static void
+mobi_rewrite_links (xmlNodePtr node, GArray *frag_offsets)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE)
+      continue;
+    if (xmlStrcasecmp (n->name, BAD_CAST "a") == 0) {
+      xmlChar *fp = xmlGetProp (n, BAD_CAST "filepos");
+      if (fp && *fp) {
+        guint64 v = g_ascii_strtoull ((const char *) fp, NULL, 10);
+        g_autofree char *href = g_strdup_printf ("#filepos_%u", (guint32) v);
+        xmlSetProp (n, BAD_CAST "href", BAD_CAST href);
+      } else {
+        xmlChar *href = xmlGetProp (n, BAD_CAST "href");
+        if (href && strstr ((const char *) href, "kindle:")) {
+          guint32 fid, off, abs;
+          if (kf8_parse_pos ((const char *) href, &fid, &off) &&
+              kf8_pos_to_abs (frag_offsets, fid, off, &abs)) {
+            g_autofree char *nh = g_strdup_printf ("#ncx_%u", abs);
+            xmlSetProp (n, BAD_CAST "href", BAD_CAST nh);
+          } else {
+            xmlUnsetProp (n, BAD_CAST "href");
+          }
+        }
+        if (href) xmlFree (href);
+      }
+      if (fp) xmlFree (fp);
+    }
+    if (n->children)
+      mobi_rewrite_links (n->children, frag_offsets);
+  }
+}
+
 /* WebView path: emit the marker-injected MOBI body as one stitched HTML
  * document with the shared reading CSS, img recindex rewritten to the
  * framework-img: scheme, scripts stripped. Returns the raw image bytes
@@ -494,6 +634,7 @@ mobi_produce_html (FwReflowDocument *doc, const char *doc_id,
     if (body) {
       fw_reflow_html_process (body, doc_id, mobi_img_resolver,
                               self->image_bytes);
+      mobi_rewrite_links (body->children, self->frag_offsets);
       g_string_append (sec, "<section data-spine=\"0\" id=\"spine-0\">");
       xmlBufferPtr buf = xmlBufferCreate ();
       for (xmlNodePtr c = body->children; c; c = c->next) {
@@ -550,6 +691,7 @@ fw_reflow_document_mobi_finalize (GObject *object)
   g_clear_pointer (&self->metadata, g_hash_table_unref);
   g_clear_pointer (&self->image_bytes, g_hash_table_unref);
   g_clear_pointer (&self->html_body, g_free);
+  g_clear_pointer (&self->frag_offsets, g_array_unref);
   g_clear_pointer (&self->path,     g_free);
   G_OBJECT_CLASS (fw_reflow_document_mobi_parent_class)->finalize (object);
 }

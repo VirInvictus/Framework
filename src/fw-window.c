@@ -1114,6 +1114,17 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
   g_signal_connect (theme_row, "notify::selected",
                     G_CALLBACK (on_theme_combo_changed), self);
   adw_preferences_group_add (g_appear, GTK_WIDGET (theme_row));
+
+  /* Publisher styles — honour the book's own CSS (EPUB). Flips the
+   * stylesheets' DOM disabled state live; no reload. */
+  GtkWidget *pub_row = adw_switch_row_new ();
+  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (pub_row),
+                                 "Publisher styles");
+  adw_action_row_set_subtitle (ADW_ACTION_ROW (pub_row),
+    "Use the book's own stylesheets and fonts when it ships them");
+  g_settings_bind (self->settings, "publisher-styles",
+                   pub_row, "active", G_SETTINGS_BIND_DEFAULT);
+  adw_preferences_group_add (g_appear, pub_row);
   adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_appear);
 
   /* Font group */
@@ -2026,7 +2037,7 @@ fw_window_constructed (GObject *object)
     const char *style_keys[] = {
       "changed::reading-theme", "changed::reading-font-family",
       "changed::reading-monospace-family", "changed::reading-font-size",
-      "changed::reading-line-height",
+      "changed::reading-line-height", "changed::publisher-styles",
     };
     for (gsize i = 0; i < G_N_ELEMENTS (style_keys); i++)
       g_signal_connect (self->settings, style_keys[i],
@@ -2278,9 +2289,10 @@ fw_window_close_active_document (FwWindow *self)
   g_clear_object (&self->document);
 
   if (self->webview && self->reflow_via_webview) {
-    /* Clear the WebView's content and drop the image-table ref so
-     * the next document doesn't pick up stale image URIs. */
-    fw_webview_load_html (self->webview, "<html><body></body></html>", NULL);
+    /* Clear the WebView's content and drop the image/resource-table
+     * refs so the next document doesn't pick up stale URIs. */
+    fw_webview_load_html (self->webview, "<html><body></body></html>",
+                          NULL, NULL);
   }
   self->reflow_via_webview = FALSE;
   g_clear_object (&self->reflow_doc);
@@ -2337,6 +2349,8 @@ apply_reading_style (FwWindow *self)
     .fg = fg, .bg = bg, .link = link,
   };
   fw_webview_set_reading_style (self->webview, &style);
+  fw_webview_set_publisher_styles (self->webview,
+    g_settings_get_boolean (self->settings, "publisher-styles"));
 }
 
 static void
@@ -2392,7 +2406,8 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   self->reflow_doc = doc;
   self->file_path  = g_strdup (path);
 
-  fw_webview_load_html (self->webview, html, images);
+  fw_webview_load_html (self->webview, html, images,
+                        fw_reflow_document_get_resources (doc));
   self->reflow_via_webview = TRUE;
   apply_reading_style (self);        /* font + theme; queues until load */
   if (images)

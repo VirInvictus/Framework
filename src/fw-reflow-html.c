@@ -16,11 +16,19 @@ static const char READING_CSS[] =
   "  --mono-font: ui-monospace, monospace;"
   "  --font-size: 13pt; --line-height: 1.55; --measure: 38em;"
   "}"
-  "html { background: var(--bg); color: var(--fg); }"
-  "body { max-width: var(--measure); margin: 1.5em auto; padding: 0 1.5em;"
-  "       font-family: var(--body-font); font-size: var(--font-size);"
-  "       line-height: var(--line-height); }"
-  "a { color: var(--link); }"
+  /* !important on the sovereignty rules: with publisher CSS honoured
+   * (EPUB, v0.79) the user's theme colors, chosen typography, and the
+   * reading column must still win over book-level body/html styling.
+   * Publisher rules keep everything more specific (headings, tables,
+   * drop caps); these guard only the reading surface itself. */
+  "html { background: var(--bg) !important; color: var(--fg) !important; }"
+  "body { max-width: var(--measure) !important;"
+  "       margin: 1.5em auto !important; padding: 0 1.5em !important;"
+  "       background: var(--bg) !important; color: var(--fg) !important;"
+  "       font-family: var(--body-font) !important;"
+  "       font-size: var(--font-size) !important;"
+  "       line-height: var(--line-height) !important; }"
+  "a { color: var(--link) !important; }"
   "section[data-spine] { margin: 0 0 2em 0; }"
   "section.cover { display: flex; align-items: center; justify-content: center;"
                   "min-height: 100vh; margin: 0; padding: 0; max-width: none; }"
@@ -99,11 +107,13 @@ is_active_element (xmlNodePtr node)
 /* TRUE when a URL-valued attribute resolves to a script scheme.  HTML's
  * URL parser strips tab / LF / CR anywhere in the input before scheme
  * resolution, so "java\nscript:" executes just like "javascript:" —
- * mirror that here rather than doing a naive prefix compare. */
-static gboolean
-url_has_script_scheme (const xmlChar *value)
+ * mirror that here rather than doing a naive prefix compare.  Exported
+ * as fw_reflow_url_is_script for backends that emit their own anchors
+ * (FB2) instead of going through fw_reflow_html_process. */
+gboolean
+fw_reflow_url_is_script (const char *value)
 {
-  const char *p = (const char *) value;
+  const char *p = value;
   while (*p && (guchar) *p <= 0x20)  /* leading whitespace/controls */
     p++;
   char scheme[16];
@@ -151,7 +161,7 @@ scrub_attributes (xmlNodePtr node)
       drop = TRUE;
     } else if (is_url_attr (a->name)) {
       xmlChar *val = xmlNodeListGetString (node->doc, a->children, 1);
-      drop = val && url_has_script_scheme (val);
+      drop = val && fw_reflow_url_is_script ((const char *) val);
       if (val) xmlFree (val);
     }
     if (drop)

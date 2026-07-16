@@ -1163,6 +1163,7 @@ fw_mobi_parse (const char *path, GError **error)
    * the SKEL and FRAG INDX tables to discover the splice plan;
    * its loadSection performs each splice. We do both inline. */
   GArray *kf8_toc = NULL;
+  GArray *kf8_frag_offsets = NULL;
   if (is_kf8 &&
       kf8_skel != 0xFFFFFFFF && kf8_skel + kf8_start < record_count &&
       kf8_frag != 0xFFFFFFFF && kf8_frag + kf8_start < record_count) {
@@ -1187,6 +1188,10 @@ fw_mobi_parse (const char *path, GError **error)
           && text_enc != 1252)
         kf8_toc = build_kf8_toc (data, raw_len, roff, record_count,
                                  kf8_start + kf8_ncx, frag_offsets);
+      /* Export the fragment table for in-body kindle:pos link
+       * resolution — valid under the same no-re-encode condition. */
+      if (text_enc != 1252)
+        kf8_frag_offsets = g_array_ref (frag_offsets);
     } else {
       g_warning ("mobi: KF8 INDX parse failed, falling back to raw body");
     }
@@ -1293,6 +1298,7 @@ fw_mobi_parse (const char *path, GError **error)
   p->cover_recindex = cover_recindex;
   p->is_kf8         = is_kf8;
   p->toc            = kf8_toc;
+  p->frag_offsets   = kf8_frag_offsets;
   return p;
 }
 
@@ -1312,5 +1318,6 @@ fw_mobi_parsed_free (FwMobiParsed *p)
       g_free (g_array_index (p->toc, FwMobiTocEntry, i).label);
     g_array_free (p->toc, TRUE);
   }
+  g_clear_pointer (&p->frag_offsets, g_array_unref);
   g_free (p);
 }

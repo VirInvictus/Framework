@@ -508,6 +508,24 @@ fb2_emit_node (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth)
     return;
   }
 
+  if (g_str_equal (l, "a")) {
+    /* Internal note/backref links ("#n1" → the notes-body section ids
+     * already emitted) and external URLs both become real anchors; the
+     * WebView policy hook routes external clicks to the browser.
+     * Script schemes are refused — FB2 bypasses the shared
+     * fw_reflow_html_process scrub. */
+    const char *href = fb2_get_href (n);
+    if (href && *href && !fw_reflow_url_is_script (href)) {
+      g_autofree char *e = g_markup_escape_text (href, -1);
+      g_string_append_printf (out, "<a href=\"%s\">", e);
+      fb2_emit_children (out, n, ctx, depth);
+      g_string_append (out, "</a>");
+      return;
+    }
+    fb2_emit_children (out, n, ctx, depth);
+    return;
+  }
+
   const char *itag = fb2_html_inline_tag (l);
   if (itag) {
     g_string_append_printf (out, "<%s>", itag);
@@ -515,7 +533,7 @@ fb2_emit_node (GString *out, xmlNode *n, Fb2HtmlCtx *ctx, int depth)
     g_string_append_printf (out, "</%s>", itag);
     return;
   }
-  /* Unknown / passthrough (style, span, a, ...): keep the text. */
+  /* Unknown / passthrough (style, span, ...): keep the text. */
   fb2_emit_children (out, n, ctx, depth);
 }
 
