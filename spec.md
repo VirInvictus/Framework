@@ -27,7 +27,7 @@ Framework dropped libadwaita at v0.80.0 while keeping GTK4, to belong on a tilin
 
 - **Owned stylesheet.** A single `data/style.css` is the styling authority, loaded via a `GtkCssProvider` at `GTK_STYLE_PROVIDER_PRIORITY_USER + 1` (above a user's `~/.config/gtk-4.0/gtk.css`). Flat, square, 1px hard borders, no shadows, denser spacing than adwaita. Kanagawa Dragon (dark) / Kanagawa Lotus (light) palette as `@define-color` named colours.
 - **Dark/light** follows the system via the `org.freedesktop.portal.Settings` `color-scheme` preference read over GDBus (no GNOME dependency), with live updates on `SettingChanged` and a **dark default** when no portal backend answers. Fixed reading themes (Light / Sepia / Kanagawa Dark) still force their own polarity; only the "system" reading theme tracks the portal.
-- **Titlebar.** A slim flat `GtkHeaderBar` promoted to the real window titlebar, with `show-title-buttons` off (the compositor and a `Ctrl+Q` quit accel handle window control). Consequence: GTK auto-hides the titlebar in fullscreen (F11), which suits a reader; the header's page/zoom entries are unreachable there, same as any GNOME app in fullscreen.
+- **Titlebar.** A slim flat `GtkHeaderBar` promoted to the real window titlebar, with `show-title-buttons` off (the compositor and a `Ctrl+Q` quit accel handle window control). Consequence: GTK auto-hides the titlebar in fullscreen (F11), which suits a reader; the header's page/zoom entries are unreachable there, same as any GTK app in fullscreen.
 - **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page — deliberate for narrow tiles. Width persists in the `sidebar-width` GSetting.
 - **Dialogs** (Reading Settings, Keyboard Shortcuts, Document Properties) are transient modal `GtkWindow`s built from owned `GtkListBox` "boxed-list" row composites, Escape-to-close.
 
@@ -127,34 +127,38 @@ A dynamic, strictly managed hash table of `cairo_surface_t` + cached `GdkTexture
 
 ### 2.3 Widget Tree
 
+Plain GTK4 since v0.80.0 (libadwaita dropped); the shell is an owned
+`GtkOverlay` with a floating TOC that never reallocates the page.
+
 ```text
-AdwApplicationWindow
-├── AdwHeaderBar
-│   ├── [left]  AdwSplitButton (sidebar toggle)
-│   ├── [left]  GtkButton (zoom out)
-│   ├── [left]  GtkEntry (zoom percentage, editable)
-│   ├── [left]  GtkButton (zoom in)
+GtkApplicationWindow (FwWindow)
+├── [titlebar] GtkHeaderBar (show-title-buttons off; owned stylesheet)
+│   ├── [start] GtkButton (sidebar toggle)
+│   ├── [start] GtkButton (zoom out)
+│   ├── [start] GtkEntry (zoom percentage, editable)
+│   ├── [start] GtkButton (zoom in)
 │   ├── [title] GtkLabel (filename)
-│   ├── [right] GtkEntry (page number / total, editable)
-│   ├── [right] GtkButton (previous page)
-│   ├── [right] GtkButton (next page)
-│   ├── [right] GtkToggleButton (search)
-│   └── [right] GtkMenuButton (primary menu)
-├── AdwOverlaySplitView
-│   ├── [sidebar] GtkScrolledWindow
-│   │   └── GtkTreeView / GtkListView (TOC)
-│   └── [content] GtkOverlay
-│       ├── GtkScrolledWindow
-│       │   └── FrameworkView (custom GtkWidget — renders pages)
-│       └── [overlay] GtkSearchBar
-│           └── GtkSearchEntry + match count + prev/next buttons
-└── [bottom] GtkActionBar (optional: status info, if needed)
+│   ├── [end]   GtkMenuButton (primary menu)
+│   ├── [end]   GtkToggleButton (search)
+│   ├── [end]   GtkButton (next page)
+│   ├── [end]   GtkButton (previous page)
+│   └── [end]   GtkEntry (page number / total, editable)
+└── GtkOverlay (root_overlay)
+    ├── [child]   GtkStack ("empty" | "document" | "webview")
+    │   ├── document: GtkScrolledWindow → FwView (custom widget, renders pages)
+    │   ├── webview:  FwWebView (WebKitGTK reflow renderer)
+    │   └── empty:    owned centered status box
+    ├── [overlay] GtkRevealer (floating TOC, F9, click-outside dismiss)
+    │   └── GtkScrolledWindow → FwSidebar / FwReflowSidebar (GtkListView)
+    ├── [overlay] GtkRevealer (bottom-center toast) → GtkLabel
+    └── [overlay] GtkSearchBar
+        └── GtkSearchEntry + match count + prev/next buttons
 ```
 
 ### 2.4 Application Object
 
 ```text
-FrameworkApplication : AdwApplication
+FwApplication : GtkApplication
 ├── Handles file open via command line args and GtkFileDialog
 ├── Single-instance (activate brings existing window forward)
 ├── No tabs, no multi-document — one document per window
@@ -162,11 +166,11 @@ FrameworkApplication : AdwApplication
 ├── Stores per-file state in XDG_DATA_HOME/framework/state.json:
 │   { "/path/to/file.pdf": { "page": 42, "zoom": 1.5, "scroll_y": 0.73 } }
 │   LRU-pruned (max 500 entries; entries >90 days dropped on startup).
-└── GSettings schema (`io.github.virinvictus.framework`) is currently a
-    skeleton — keys land here as features are wired up. The schema file
-    exists so `gnome.compile_schemas` runs in the build, but no keys are
-    declared. Pre-1.0 is the only safe time to ship a no-op schema; once
-    1.0 ships, removing keys becomes a back-compat issue.
+└── GSettings schema (`io.github.virinvictus.framework`) carries the
+    real keys (reading theme/font/size/line-height, publisher-styles,
+    kinetic-scrolling, reading-ruler, loupe, crop-margins, comic layout).
+    Compiled in-tree via `gnome.compile_schemas` (a Meson helper; the
+    only "gnome" left in the build, unrelated to the GNOME desktop).
 ```
 
 ---
@@ -181,7 +185,7 @@ Slim flat `GtkHeaderBar` promoted to the window titlebar (v0.80.0; was `AdwHeade
 
 | Control | Type | Behavior |
 |---------|------|----------|
-| Sidebar toggle | AdwSplitButton | Main click toggles TOC sidebar. Dropdown could offer Thumbnails (v1.1 candidate). Icon: `view-sidebar-symbolic` |
+| Sidebar toggle | GtkButton | Toggles the floating TOC sidebar (F9). Icon: `view-sidebar-symbolic` |
 | Zoom out | GtkButton | Decrease zoom by 10% (or step through preset levels). Icon: `zoom-out-symbolic` |
 | Zoom level | GtkEntry | Shows current zoom as "125%". User can type a number and press Enter. Validates input (clamp 10%-1000%). Width: ~5em |
 | Zoom in | GtkButton | Increase zoom by 10%. Icon: `zoom-in-symbolic` |
@@ -204,7 +208,7 @@ Slim flat `GtkHeaderBar` promoted to the window titlebar (v0.80.0; was `AdwHeade
 
 ### 3.2 TOC Sidebar
 
-Displayed via `AdwOverlaySplitView` so it overlays the content on narrow windows and sits beside it on wide windows. Populated from the document's outline/TOC structure.
+A floating `GtkRevealer` inside the root `GtkOverlay` (v0.80.0; was `AdwOverlaySplitView`): it slides in over the content and is dismissed by clicking outside, so it never reallocates the page. This is deliberately tiling-friendly: a narrow tile is never squeezed side by side. Populated from the document's outline/TOC structure.
 
 - Tree view with expandable nodes
 - Click a node → navigate to that page/destination
@@ -290,7 +294,7 @@ Custom `GtkWidget` subclass responsible for laying out and painting rendered pag
 
 ### 3.5 Search Bar
 
-Appears at top or bottom of the content area (GNOME convention: top, via `GtkSearchBar`).
+A `GtkSearchBar` overlaid on the content area.
 
 | Control | Behavior |
 |---------|----------|
@@ -311,7 +315,7 @@ Appears at top or bottom of the content area (GNOME convention: top, via `GtkSea
 ### 3.6 Fullscreen Mode
 
 - `F11` toggles fullscreen
-- Header bar auto-hides, revealed on mouse movement to top edge (standard GNOME fullscreen behavior)
+- GTK auto-hides the titlebar in fullscreen, revealed on mouse movement to the top edge
 - Search bar remains accessible via `Ctrl+F`
 - Escape exits fullscreen
 
@@ -323,7 +327,7 @@ If launched without a file argument, show an empty window with a centered "Open 
 
 ## 4. Keyboard Shortcuts
 
-Sumatra defaults adapted to GNOME conventions. All shortcuts visible in the Keyboard Shortcuts dialog (`Ctrl+?`).
+Sumatra defaults adapted to GTK conventions. All shortcuts visible in the Keyboard Shortcuts dialog (`Ctrl+?`).
 
 ### Navigation
 
@@ -464,8 +468,7 @@ Stored via GSettings. Schema: `io.github.virinvictus.framework` (adjust namespac
 
 | Dependency | Minimum Version | Purpose |
 |------------|----------------|---------|
-| gtk4 | 4.16+ | UI toolkit (GNOME 48 ships 4.16; GNOME 50 will ship 4.18+) |
-| libadwaita | 1.7+ | GNOME design patterns |
+| gtk4 | 4.16+ | UI toolkit (plain GTK4; libadwaita dropped in v0.80.0, the app owns its stylesheet) |
 | mupdf | 1.24+ | PDF / XPS / comic rendering |
 | djvulibre | 3.5.28+ | DjVu rendering |
 | libarchive | 3.6+ | CBR (RAR) decompression |
@@ -480,7 +483,7 @@ Stored via GSettings. Schema: `io.github.virinvictus.framework` (adjust namespac
 
 ### Runtime Dependencies
 
-All of the above as shared libraries, plus standard GNOME runtime (for Flatpak, this is the `org.gnome.Platform` runtime).
+All of the above as shared libraries. The Flatpak builds against the `org.gnome.Platform` runtime, which is simply the standard GTK4 Flatpak runtime; Framework links plain GTK4, not libadwaita, and does not depend on a GNOME session at runtime.
 
 ---
 
@@ -494,9 +497,10 @@ framework/
 ├── io.github.virinvictus.framework.yml   # Flatpak manifest (root, per Flathub convention)
 ├── src/
 │   ├── meson.build             # framework_sources list — no glob, add new files explicitly
-│   ├── main.c                  # entry point, AdwApplication setup
-│   ├── fw-application.c/h      # FwApplication (single-instance AdwApplication)
-│   ├── fw-window.c/h           # FwWindow (AdwApplicationWindow)
+│   ├── main.c                  # entry point, GtkApplication setup
+│   ├── fw-application.c/h      # FwApplication (single-instance GtkApplication)
+│   ├── fw-theme.c/h            # owned stylesheet + portal color-scheme reader
+│   ├── fw-window.c/h           # FwWindow (GtkApplicationWindow)
 │   ├── fw-view.c/h             # FwView (custom GtkScrollable, paints all visible pages)
 │   ├── fw-cache.c/h            # Three-tier velocity-driven pre-cache engine
 │   ├── fw-document.c/h         # Abstract FwDocument interface + factory
@@ -560,7 +564,7 @@ Primary distribution method. Framework is Flatpak-first. The manifest at the pro
 
 `data/io.github.virinvictus.framework.metainfo.xml.in` (translated and merged at build time) ships:
 - App name, summary, description (current format list, feature bullets)
-- `<developer>` block, `<categories>` (Office, Viewer, GNOME, GTK)
+- `<developer>` block, `<categories>` (Office, Viewer, GTK)
 - `<recommends>` (display ≥ 600 px, offline-only network), `<supports>` (pointing/keyboard/touch)
 - Release notes from v0.6.0 → current under honest versioning (the historical 1.x labels stay in `patchnotes.md` but are not surfaced to software centers)
 - Content rating: OARS 1.1, default (no objectionable content)
@@ -599,9 +603,9 @@ Dark-mode display for reading in low-light environments:
 
 | Condition | Behavior |
 |-----------|----------|
-| File not found | `AdwMessageDialog` with error message |
-| Unsupported format | `AdwMessageDialog`: "Framework cannot open this file type" |
-| Corrupted document | Attempt to open; if MuPDF/DjVuLibre returns error, show `AdwMessageDialog` with the error details |
+| File not found | `GtkAlertDialog` with error message |
+| Unsupported format | `GtkAlertDialog`: "Framework cannot open this file type" |
+| Corrupted document | Attempt to open; if MuPDF/DjVuLibre returns error, show `GtkAlertDialog` with the error details |
 | Render failure (single page) | Show error placeholder for that page, continue rendering others |
 | Out of memory (pre-cache) | Degrade gracefully: stop pre-caching remaining pages, render on-demand. Log warning |
 

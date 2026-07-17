@@ -7,6 +7,6 @@ Exec=framework %U
 Icon=io.github.virinvictus.framework
 Terminal=false
 Type=Application
-Categories=GTK;GNOME;Office;Viewer;
+Categories=GTK;Office;Viewer;
 MimeType=application/pdf;image/vnd.djvu;image/x-djvu;application/vnd.comicbook+zip;application/vnd.comicbook-rar;application/x-cbz;application/x-cbr;application/x-cb7;application/x-cbt;application/oxps;application/vnd.ms-xpsdocument;application/epub+zip;application/x-fictionbook+xml;application/x-mobipocket-ebook;text/markdown;
 StartupNotify=true

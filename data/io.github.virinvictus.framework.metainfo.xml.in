@@ -5,7 +5,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Framework</name>
-  <summary>Fast, native document viewer for GNOME</summary>
+  <summary>Fast, tiling-first document viewer for Linux</summary>
 
   <developer id="io.github.virinvictus">
     <name>Brandon LaRocque</name>
@@ -13,11 +13,13 @@
 
   <description>
     <p>
-      Framework is a fast, native GNOME document viewer for the modern Linux
-      desktop. It opens PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book
-      archives (CBZ, CB7, CBT, CBR) through MuPDF, DjVuLibre, and libarchive
-      backends, and is engineered around a velocity-driven render cache that
-      keeps scrolling smooth even on thousand-page textbooks.
+      Framework is a fast, native document viewer for the modern Linux
+      desktop, tiling-first on Wayland (Hyprland and any compositor) while
+      staying at home under GNOME. It opens PDF, DjVu, EPUB, MOBI, AZW3, FB2,
+      XPS, Markdown, and comic-book archives (CBZ, CB7, CBT, CBR) through
+      MuPDF, DjVuLibre, libarchive, and a WebKitGTK reflow pipeline, and is
+      engineered around a velocity-driven render cache that keeps scrolling
+      smooth even on thousand-page textbooks.
     </p>
     <p>Features:</p>
     <ul>
@@ -48,7 +50,6 @@
   <categories>
     <category>Office</category>
     <category>Viewer</category>
-    <category>GNOME</category>
     <category>GTK</category>
   </categories>
 
