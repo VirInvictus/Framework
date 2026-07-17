@@ -88,6 +88,22 @@ struct _FwWindow {
    * late page-geometry update — the CBR background probe — re-apply
    * fit-width without clobbering a manual zoom. */
   gboolean              fit_width_active;
+  /* Symmetric flag for fit-page (Ctrl+2). Both are cleared by any
+   * explicit zoom in set_zoom; whichever is set drives the live
+   * recompute when the viewport is resized (Phase 18, tiling WMs). */
+  gboolean              fit_page_active;
+  /* Live fit recompute on resize. resize_recompute_id debounces a
+   * resize storm (constant under a tiling WM) into one recompute after
+   * motion settles; last_fit_vw/vh are the viewport dims at the last
+   * applied fit, so an unchanged size is a no-op. */
+  guint                 resize_recompute_id;
+  int                   last_fit_vw;
+  int                   last_fit_vh;
+  /* Distraction-free windowed mode (Phase 18): hide the header bar
+   * (and the TOC sidebar, remembering whether it was open) without
+   * leaving the windowed/tiled state. Distinct from F11 fullscreen. */
+  gboolean              chrome_hidden;
+  gboolean              chrome_sidebar_was_open;
   char                 *file_path;   /* absolute path of current document */
 
   /* Deferred restore */
@@ -149,6 +165,8 @@ static void on_reading_dark_changed          (GObject *style_manager,
 static void on_reflow_sidebar_anchor_requested (FwReflowSidebar *bar,
                                                 const char      *anchor,
                                                 gpointer         user_data);
+static void on_viewport_geometry_changed        (GtkAdjustment *adj,
+                                                 gpointer       user_data);
 
 /* ── Zoom ─────────────────────────────────────────────────────────── */
 
@@ -168,9 +186,10 @@ set_zoom (FwWindow *self, double zoom)
   if (zoom > 10.0) zoom = 10.0;
   FW_TRACE_WINDOW ("set_zoom: %.2f", zoom);
   self->zoom = zoom;
-  /* Any explicit zoom drops fit-width tracking; the fit-width callers
-   * re-arm it right after they call set_zoom. */
+  /* Any explicit zoom drops fit-width/fit-page tracking; the fit callers
+   * re-arm the relevant flag right after they call set_zoom. */
   self->fit_width_active = FALSE;
+  self->fit_page_active = FALSE;
   update_zoom_entry (self);
 
   if (self->cache)
@@ -304,9 +323,18 @@ maybe_resize_for_spread (FwWindow *self)
   if (!gtk_widget_get_realized (win))
     return;
 
-  /* Don't fight the WM when the window is in a non-floating state. */
+  /* Don't fight the WM when the window is in a non-floating state.
+   * A tiled window (Hyprland and other tiling WMs) is neither maximized
+   * nor fullscreen, but the compositor owns its geometry all the same —
+   * requesting a size while tiled just gets ignored or fought, so treat
+   * any tiled edge like maximized and skip the spread auto-grow. */
   if (gtk_window_is_maximized (GTK_WINDOW (self))
       || gtk_window_is_fullscreen (GTK_WINDOW (self)))
+    return;
+  GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (self));
+  if (surface && GDK_IS_TOPLEVEL (surface)
+      && (gdk_toplevel_get_state (GDK_TOPLEVEL (surface))
+          & GDK_TOPLEVEL_STATE_TILED))
     return;
 
   int win_w = gtk_widget_get_width (win);
@@ -730,8 +758,8 @@ static void act_zoom_actual(GSimpleAction *a, GVariant *p, gpointer d) {
     set_zoom (w, 1.0);
   }
 }
-static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_width_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)))); w->fit_width_active = TRUE; }
-static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; set_zoom(w, fw_view_fit_page_zoom(w->view, gtk_widget_get_width(GTK_WIDGET(w->scroll)), gtk_widget_get_height(GTK_WIDGET(w->scroll)))); }
+static void act_zoom_fit_w (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; int vw=gtk_widget_get_width(GTK_WIDGET(w->scroll)); set_zoom(w, fw_view_fit_width_zoom(w->view, vw)); w->fit_width_active = TRUE; w->last_fit_vw = vw; w->last_fit_vh = gtk_widget_get_height(GTK_WIDGET(w->scroll)); }
+static void act_zoom_fit_p (GSimpleAction *a, GVariant *p, gpointer d) { (void)a;(void)p; FwWindow *w=d; int vw=gtk_widget_get_width(GTK_WIDGET(w->scroll)); int vh=gtk_widget_get_height(GTK_WIDGET(w->scroll)); set_zoom(w, fw_view_fit_page_zoom(w->view, vw, vh)); w->fit_page_active = TRUE; w->last_fit_vw = vw; w->last_fit_vh = vh; }
 static void act_next_page  (GSimpleAction *a, GVariant *p, gpointer d) {
   (void)a;(void)p; FwWindow *w=d;
   if (w->reflow_via_webview && w->webview) fw_webview_scroll_by_page (w->webview, +1);
@@ -761,6 +789,29 @@ static void act_toggle_fullscreen (GSimpleAction *a, GVariant *p, gpointer d)
     gtk_window_unfullscreen (GTK_WINDOW (w));
   else
     gtk_window_fullscreen (GTK_WINDOW (w));
+}
+
+/* Distraction-free windowed mode: hide the header bar (and the floating
+ * TOC, remembering whether it was open) so a tiled reading pane is all
+ * text, without pulling the window out of the compositor's layout the
+ * way F11 fullscreen does. Additive to fullscreen; toggled by the same
+ * key that hid the chrome. */
+static void act_toggle_chrome (GSimpleAction *a, GVariant *p, gpointer d)
+{
+  (void)a;(void)p;
+  FwWindow *w = d;
+  w->chrome_hidden = !w->chrome_hidden;
+  if (w->chrome_hidden) {
+    w->chrome_sidebar_was_open =
+      gtk_revealer_get_reveal_child (w->sidebar_revealer);
+    if (w->chrome_sidebar_was_open)
+      gtk_revealer_set_reveal_child (w->sidebar_revealer, FALSE);
+    gtk_widget_set_visible (GTK_WIDGET (w->header_bar), FALSE);
+  } else {
+    gtk_widget_set_visible (GTK_WIDGET (w->header_bar), TRUE);
+    if (w->chrome_sidebar_was_open)
+      gtk_revealer_set_reveal_child (w->sidebar_revealer, TRUE);
+  }
 }
 
 static void act_find (GSimpleAction *a, GVariant *p, gpointer d)
@@ -1406,6 +1457,7 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   GtkListBox *g_view = fw_pref_group (page, "View", NULL);
   add_shortcut_row (g_view, "Toggle sidebar",   "F9");
   add_shortcut_row (g_view, "Fullscreen",       "F11");
+  add_shortcut_row (g_view, "Hide chrome",      "F12");
   add_shortcut_row (g_view, "Invert colors",    "<Control>i");
   add_shortcut_row (g_view, "Reading ruler",    "F8");
   add_shortcut_row (g_view, "Magnifying loupe", "F7");
@@ -1851,6 +1903,15 @@ fw_window_constructed (GObject *object)
   if (vadj)
     g_signal_connect (vadj, "value-changed",
                       G_CALLBACK (on_scroll_changed), self);
+  /* Both adjustments' page-size tracks the viewport, so their "changed"
+   * signal is a live viewport-resize hook — drives the fit recompute. */
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (self->scroll);
+  if (vadj)
+    g_signal_connect (vadj, "changed",
+                      G_CALLBACK (on_viewport_geometry_changed), self);
+  if (hadj)
+    g_signal_connect (hadj, "changed",
+                      G_CALLBACK (on_viewport_geometry_changed), self);
   gtk_widget_set_vexpand (GTK_WIDGET (self->scroll), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->scroll), TRUE);
 
@@ -2064,6 +2125,7 @@ fw_window_constructed (GObject *object)
     { .name = "last-page",     .activate = act_last_page },
     { .name = "toggle-sidebar",.activate = act_toggle_sidebar },
     { .name = "fullscreen",    .activate = act_toggle_fullscreen },
+    { .name = "toggle-chrome", .activate = act_toggle_chrome },
     { .name = "find",          .activate = act_find },
     { .name = "find-next",     .activate = act_find_next },
     { .name = "find-prev",     .activate = act_find_prev },
@@ -2208,10 +2270,68 @@ apply_fit_width_tick (GtkWidget *widget, GdkFrameClock *clock,
   double fit_zoom = fw_view_fit_width_zoom (self->view, vw);
   set_zoom (self, fit_zoom);
   self->fit_width_active = TRUE;
+  self->last_fit_vw = vw;
+  self->last_fit_vh = gtk_widget_get_height (GTK_WIDGET (self->scroll));
 
   /* Remove ourselves — return FALSE stops the tick callback */
   (void) widget;
   return G_SOURCE_REMOVE;
+}
+
+/* ── Live fit recompute on viewport resize (Phase 18) ─────────────────
+ *
+ * A tiling WM resizes Framework constantly (a sibling opens, closes, or
+ * gets promoted). fw_view_fit_width_zoom / fit_page_zoom were only ever
+ * applied once at open and on the CBR geometry probe, so after that the
+ * active fit mode kept a stale zoom and over- or under-filled the new
+ * tile. We debounce the resize storm into one recompute once motion
+ * settles, and no-op when the viewport size hasn't actually changed. */
+static gboolean
+refit_after_resize (gpointer user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  self->resize_recompute_id = 0;
+
+  if (!self->view || !self->scroll || !self->document)
+    return G_SOURCE_REMOVE;
+  if (!self->fit_width_active && !self->fit_page_active)
+    return G_SOURCE_REMOVE;
+
+  int vw = gtk_widget_get_width (GTK_WIDGET (self->scroll));
+  int vh = gtk_widget_get_height (GTK_WIDGET (self->scroll));
+  if (vw <= 0 || vh <= 0)
+    return G_SOURCE_REMOVE;
+  if (vw == self->last_fit_vw && vh == self->last_fit_vh)
+    return G_SOURCE_REMOVE;  /* viewport unchanged — a zoom, not a resize */
+
+  self->last_fit_vw = vw;
+  self->last_fit_vh = vh;
+  if (self->fit_page_active) {
+    set_zoom (self, fw_view_fit_page_zoom (self->view, vw, vh));
+    self->fit_page_active = TRUE;  /* set_zoom cleared it */
+  } else {
+    set_zoom (self, fw_view_fit_width_zoom (self->view, vw));
+    self->fit_width_active = TRUE;
+  }
+  return G_SOURCE_REMOVE;
+}
+
+/* The scroll adjustments' page-size tracks the viewport extent, so their
+ * "changed" signal fires on every viewport resize (and, harmlessly, on
+ * content-size changes the dim guard in refit_after_resize filters out).
+ * Reset the debounce timer on each change so the recompute lands ~130 ms
+ * after the last resize event rather than mid-drag. */
+static void
+on_viewport_geometry_changed (GtkAdjustment *adj, gpointer user_data)
+{
+  (void) adj;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (!self->fit_width_active && !self->fit_page_active)
+    return;
+  if (self->resize_recompute_id)
+    g_source_remove (self->resize_recompute_id);
+  self->resize_recompute_id =
+    g_timeout_add (130, refit_after_resize, self);
 }
 
 /* ── Deferred state restore via tick callback ────────────────────── */
@@ -2836,6 +2956,11 @@ fw_window_dispose (GObject *object)
   if (self->toast_hide_id) {
     g_source_remove (self->toast_hide_id);
     self->toast_hide_id = 0;
+  }
+
+  if (self->resize_recompute_id) {
+    g_source_remove (self->resize_recompute_id);
+    self->resize_recompute_id = 0;
   }
 
   if (self->settings) {

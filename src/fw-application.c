@@ -186,6 +186,7 @@ fw_application_startup (GApplication *app)
     { "win.webtoon-mode",    { "F5", NULL } },
     { "win.facing-pages",    { "F10", NULL } },
     { "win.fullscreen",      { "F11", NULL } },
+    { "win.toggle-chrome",   { "F12", NULL } },
     { "win.find",            { "<Control>f", NULL } },
     { "win.find-next",       { "F3", NULL } },
     { "win.find-prev",       { "<Shift>F3", NULL } },

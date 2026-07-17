@@ -2,6 +2,19 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.81.0 (2026-07-17)
+
+*Phase 18 code items: the tiling-first behaviors that were latent under a floating window manager and only became visible under Hyprland. All three are additive; nothing regresses floating-window or GNOME behavior. The remaining Phase 18 items are verification passes (dialogs at quarter-tile, fractional scaling under Hyprland, xdg-activation focus, CSD with no GNOME schema) that need a real Hyprland session to sign off.*
+
+### Tiling-first geometry
+
+* **Live fit recompute on resize.** Fit-width and fit-page now track the viewport instead of freezing at the value computed on open. When a tile resizes (constant under a tiling WM as siblings open, close, or get promoted), the active fit mode is reapplied so the page keeps filling the tile rather than over- or under-filling it. A `fit_page_active` flag now mirrors the existing `fit_width_active`, and the recompute is debounced (130 ms) so a resize drag coalesces into one recomputation. A dimension-equality guard makes zoom-driven relayouts a no-op, so there is no feedback loop.
+* **No fighting the compositor while tiled.** The facing-pages spread auto-grow (which requests a wider window so a two-page spread fits without horizontal scroll) is now suppressed when the window is tiled, the same way it already was when maximized or fullscreen. A tiled window's geometry belongs to the compositor; Framework no longer issues a size request it would just lose.
+
+### Keyboard-first operation
+
+* **Distraction-free windowed mode (F12).** A new "Hide chrome" toggle hides the header bar (and the floating TOC if it is open, restoring it on toggle-off) without pulling the window out of the tile the way F11 fullscreen does. Reading in place, all text, still tiled. F11 fullscreen is unchanged; the new binding sits beside it under View in the Keyboard Shortcuts window.
+
 ## v0.80.0 (2026-07-16)
 
 *Phase 19 Path A: libadwaita is gone. Framework is now plain GTK4 under an owned Kanagawa Dragon stylesheet, tiling-first for Hyprland while staying fully functional under GNOME. The Zig-rewrite question that gated this phase is settled: no rewrite, and de-adwaita shipped before the 1.0 release so 1.0 goes out already Hyprland-native.*
