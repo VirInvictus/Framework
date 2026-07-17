@@ -45,6 +45,9 @@ struct _FwWebView {
   char              *pending_anchor;  /* ditto for scroll_to_anchor */
   char              *pending_style;   /* reading-style JS, run on load */
   char              *pending_pub;     /* publisher-styles JS, run on load */
+  char              *pending_dark;    /* dark color-transform JS, run on load
+                                       * — after pending_pub, since it reads
+                                       * computed styles post publisher toggle */
   char              *last_position;   /* latest {anchor,scroll_y} JSON from
                                        * the in-page scroll listener; read
                                        * synchronously at save time */
@@ -299,6 +302,11 @@ flush_pending_after_load (FwWebView *self)
     webkit_web_view_evaluate_javascript (
       self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
   }
+  if (self->pending_dark) {
+    g_autofree char *js = g_steal_pointer (&self->pending_dark);
+    webkit_web_view_evaluate_javascript (
+      self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
+  }
 }
 
 static void
@@ -491,6 +499,7 @@ fw_webview_dispose (GObject *object)
   g_clear_pointer (&self->pending_position, g_free);
   g_clear_pointer (&self->pending_style, g_free);
   g_clear_pointer (&self->pending_pub, g_free);
+  g_clear_pointer (&self->pending_dark, g_free);
   g_clear_pointer (&self->last_position, g_free);
   if (self->web) {
     gtk_widget_unparent (GTK_WIDGET (self->web));
@@ -625,6 +634,7 @@ fw_webview_load_html (FwWebView *self, const char *html, GHashTable *images,
   g_clear_pointer (&self->last_position, g_free);
   g_clear_pointer (&self->pending_style, g_free);
   g_clear_pointer (&self->pending_pub, g_free);
+  g_clear_pointer (&self->pending_dark, g_free);
   /* base_uri matches the framework-img: origin our images live in so
    * the document and images are same-origin.  Without this, WebKit's
    * mixed-origin rules silently drop the image fetches before they
@@ -834,6 +844,72 @@ fw_webview_set_publisher_styles (FwWebView *self, gboolean enabled)
   if (!self->load_done) {
     g_free (self->pending_pub);
     self->pending_pub = g_steal_pointer (&js);
+    return;
+  }
+  webkit_web_view_evaluate_javascript (
+    self->web, js, -1, NULL, NULL, NULL, NULL, NULL);
+}
+
+/* Dark-theme publisher-CSS color transformation (Calibre-style).
+ *
+ * A publisher stylesheet that paints an explicit light background on an
+ * inner container glares against a dark reading theme, and dark author
+ * text on a container we darken would vanish. The reading CSS's
+ * !important body rules only cover html/body, not these inner elements.
+ *
+ * This walks the document and inverts the *lightness* (in HSL, keeping
+ * hue and saturation) of two author-specified color kinds that are on
+ * the wrong side for dark mode: opaque light backgrounds → dark, and
+ * dark text → light. Correct colors (transparent backgrounds, already
+ * light themed text, our forced link color) are left untouched, so a
+ * light-blue callout becomes a dark-blue callout rather than being
+ * flattened. It runs in two passes — read every computed color, then
+ * apply — so there's no read/write layout thrash, and it's idempotent
+ * and reversible: each changed element is tagged data-fw-dark, reverted
+ * on the next call before re-applying (or when `on` is FALSE). */
+void
+fw_webview_set_dark_transform (FwWebView *self, gboolean on)
+{
+  g_return_if_fail (FW_IS_WEBVIEW (self));
+
+  g_autofree char *js = g_strdup_printf (
+    "(function(on){"
+    "  var old=document.querySelectorAll('[data-fw-dark]');"
+    "  for(var i=0;i<old.length;i++){var w=old[i].getAttribute('data-fw-dark');"
+    "    if(w.indexOf('b')>=0)old[i].style.removeProperty('background-color');"
+    "    if(w.indexOf('f')>=0)old[i].style.removeProperty('color');"
+    "    old[i].removeAttribute('data-fw-dark');}"
+    "  if(!on||!document.body)return;"
+    "  function parse(c){var m=c.match(/rgba?\\(([\\d.,\\s]+)\\)/);if(!m)return null;"
+    "    var p=m[1].split(',').map(parseFloat);"
+    "    return{r:p[0],g:p[1],b:p[2],a:p.length>3?p[3]:1};}"
+    "  function lum(c){return(0.2126*c.r+0.7152*c.g+0.0722*c.b)/255;}"
+    "  function invL(c){var r=c.r/255,g=c.g/255,b=c.b/255,"
+    "    mx=Math.max(r,g,b),mn=Math.min(r,g,b),l=(mx+mn)/2,h=0,s=0;"
+    "    if(mx!==mn){var d=mx-mn;s=l>0.5?d/(2-mx-mn):d/(mx+mn);"
+    "      h=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4;h/=6;}"
+    "    l=1-l;"
+    "    function hq(p,q,t){if(t<0)t+=1;if(t>1)t-=1;"
+    "      if(t<1/6)return p+(q-p)*6*t;if(t<0.5)return q;"
+    "      if(t<2/3)return p+(q-p)*(2/3-t)*6;return p;}"
+    "    var Q=l<0.5?l*(1+s):l+s-l*s,P=2*l-Q,"
+    "      R=s?hq(P,Q,h+1/3):l,G=s?hq(P,Q,h):l,B=s?hq(P,Q,h-1/3):l;"
+    "    return'rgb('+Math.round(R*255)+','+Math.round(G*255)+','+Math.round(B*255)+')';}"
+    "  var all=document.body.getElementsByTagName('*'),jobs=[];"
+    "  for(var i=0;i<all.length;i++){var el=all[i],cs=getComputedStyle(el),"
+    "    bg=parse(cs.backgroundColor),fg=parse(cs.color),nb=null,nf=null,tag='';"
+    "    if(bg&&bg.a>=0.4&&lum(bg)>0.55){nb=invL(bg);tag+='b';}"
+    "    if(fg&&fg.a>=0.4&&lum(fg)<0.45){nf=invL(fg);tag+='f';}"
+    "    if(tag)jobs.push([el,nb,nf,tag]);}"
+    "  for(var j=0;j<jobs.length;j++){var e=jobs[j][0];"
+    "    if(jobs[j][1])e.style.setProperty('background-color',jobs[j][1],'important');"
+    "    if(jobs[j][2])e.style.setProperty('color',jobs[j][2],'important');"
+    "    e.setAttribute('data-fw-dark',jobs[j][3]);}"
+    "})(%s);", on ? "true" : "false");
+
+  if (!self->load_done) {
+    g_free (self->pending_dark);
+    self->pending_dark = g_steal_pointer (&js);
     return;
   }
   webkit_web_view_evaluate_javascript (

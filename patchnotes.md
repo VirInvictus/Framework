@@ -2,6 +2,19 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.82.0 (2026-07-17)
+
+*Phase 17's two deferred follow-ups, closing the reflow publisher-CSS story: AZW3/KF8 books now render with their own stylesheets, and publisher CSS no longer glares against a dark reading theme.*
+
+### KF8 / AZW3 publisher CSS
+
+* **AZW3 books render with their own stylesheets.** KF8 packs its publisher CSS in separate "flow" records after the text; Framework discarded them at splice time, so AZW3 rendered unstyled. The MOBI parser now reads the FDST (Flow Data Section Table) record and slices each flow out of the decompressed stream, and the backend serves them as `flow/<i>.css` through the same `framework-img://<doc>/res/` scheme EPUB uses. The per-section `kindle:flow:<id>` stylesheet links are hoisted into the stitched document's head as toggleable `fw-pub` links, ordered ahead of the reading stylesheet. Verified on real AZW3s (two publisher stylesheets each); plain KF7 `.mobi` files, which carry no flows, are unaffected.
+* **Your settings still win.** As with EPUB, the reading stylesheet is emitted last with its `!important` body rules, so the theme, font, size, and reading column stay yours over the publisher's structure. The "Publisher styles" toggle now works on KF8 too.
+
+### Dark-theme publisher CSS
+
+* **No more glare in dark themes.** A publisher stylesheet that paints a light background on an inner container (a callout, a sidebar, a table) used to glare against a dark reading theme, and dark author text could vanish. When a dark reading theme is active, Framework now transforms those author colors: light backgrounds and dark text have their *lightness* inverted in HSL, keeping hue and saturation, so a light-blue callout becomes a dark-blue callout rather than a white slab, and its text stays legible. Colors already correct for dark (transparent backgrounds, light text, the themed link color) are left alone. The pass is reversible and re-runs when you change the theme or toggle publisher styles. Applies to EPUB and AZW3 alike.
+
 ## v0.81.0 (2026-07-17)
 
 *Phase 18 code items: the tiling-first behaviors that were latent under a floating window manager and only became visible under Hyprland. All three are additive; nothing regresses floating-window or GNOME behavior. The remaining Phase 18 items are verification passes (dialogs at quarter-tile, fractional scaling under Hyprland, xdg-activation focus, CSD with no GNOME schema) that need a real Hyprland session to sign off.*

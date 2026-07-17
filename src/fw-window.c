@@ -2597,6 +2597,16 @@ apply_reading_style (FwWindow *self)
   fw_webview_set_reading_style (self->webview, &style);
   fw_webview_set_publisher_styles (self->webview,
     g_settings_get_boolean (self->settings, "publisher-styles"));
+
+  /* Dark reading themes need publisher-CSS color transformation so an
+   * author's light inner-container backgrounds don't glare (see
+   * fw_webview_set_dark_transform). Resolve "system" against the desktop
+   * preference, matching reading_theme_colors. */
+  int rt = g_settings_get_enum (self->settings, "reading-theme");
+  gboolean dark = (rt == 0)
+    ? fw_theme_get_dark (fw_theme_get_default ())
+    : (rt == 3);
+  fw_webview_set_dark_transform (self->webview, dark);
 }
 
 static void

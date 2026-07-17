@@ -33,6 +33,11 @@ struct _FwReflowDocumentMobi {
   guint         cover_recindex; /* EXTH cover; 0 = none */
   GArray       *frag_offsets;   /* KF8 fid → body offset (owned ref;
                                  * NULL for KF7), for kindle:pos links */
+  /* KF8 publisher-CSS flows, keyed by the /res/ path a rewritten
+   * kindle:flow link points at ("flow/<i>.css" → GBytes). Backs
+   * mobi_get_resources / the framework-img://.../res/ scheme. NULL for
+   * KF7 and for KF8 without publisher flows. */
+  GHashTable   *resources;
   char         *path;
 };
 
@@ -404,6 +409,27 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     m->image_bytes = NULL;
   }
 
+  /* KF8 publisher-CSS flows → the /res/ table. Flow i (i >= 1) is served
+   * as "flow/<i>.css"; produce_html rewrites each in-body kindle:flow:<i>
+   * stylesheet link to framework-img://<doc>/res/flow/<i>.css, and the
+   * webview scheme handler serves it (extension-first MIME → text/css).
+   * Registering every non-empty flow is harmless: only the ones actually
+   * linked get fetched, and the reading CSS keeps its !important
+   * sovereignty over theme and typography (mirrors EPUB v0.79). */
+  g_clear_pointer (&self->resources, g_hash_table_unref);
+  if (m->flows) {
+    for (guint i = 0; i < m->flows->len; i++) {
+      GBytes *b = g_ptr_array_index (m->flows, i);
+      if (!b) continue;
+      if (!self->resources)
+        self->resources = g_hash_table_new_full (
+          g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_bytes_unref);
+      g_hash_table_insert (self->resources,
+                           g_strdup_printf ("flow/%u.css", i),
+                           g_bytes_ref (b));
+    }
+  }
+
   /* If a cover image was identified via EXTH-201, push it as the
    * first block — flagged FW_BLOCK_FLAG_COVER so FwReflowView
    * gives it a full-viewport page. */
@@ -512,6 +538,10 @@ static GHashTable *mobi_get_metadata (FwReflowDocument *doc) {
   FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
   return self->metadata ? g_hash_table_ref (self->metadata) : NULL;
 }
+static GHashTable *mobi_get_resources (FwReflowDocument *doc) {
+  FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
+  return self->resources ? g_hash_table_ref (self->resources) : NULL;
+}
 
 /* Resolve a MOBI <img> to its image-bytes key. Two reference forms,
  * both ported from foliate-js mobi.js:
@@ -590,6 +620,62 @@ mobi_rewrite_links (xmlNodePtr node, GArray *frag_offsets)
   }
 }
 
+/* Collect KF8 publisher stylesheets from the parsed document so they can
+ * be hoisted into the stitched shell's <head>. The body-only stitch
+ * below never sees the per-section <head>s where these live, which is
+ * why KF8 rendered without publisher CSS before. Two forms:
+ *   - <link rel="stylesheet" href="kindle:flow:<id>?mime=text/css">: the
+ *     base-32 id is the flow index; emit a /res/flow/<i>.css link that
+ *     resolves against self->resources, deduped by flow id.
+ *   - inline <style>: emitted verbatim.
+ * Both carry class="fw-pub" so fw_webview_set_publisher_styles can flip
+ * them live, matching the EPUB backend. */
+static void
+mobi_collect_head_css (xmlNodePtr node, const char *doc_id,
+                       GString *head_out, GHashTable *seen)
+{
+  for (xmlNodePtr n = node; n; n = n->next) {
+    if (n->type != XML_ELEMENT_NODE) {
+      continue;
+    }
+    if (xmlStrcasecmp (n->name, BAD_CAST "link") == 0) {
+      xmlChar *rel  = xmlGetProp (n, BAD_CAST "rel");
+      xmlChar *href = xmlGetProp (n, BAD_CAST "href");
+      if (rel && href
+          && g_ascii_strcasecmp ((const char *) rel, "stylesheet") == 0
+          && g_str_has_prefix ((const char *) href, "kindle:flow:")) {
+        const char *idp = (const char *) href + strlen ("kindle:flow:");
+        char idbuf[16];
+        gsize k = 0;
+        while (idp[k] && idp[k] != '?' && k < sizeof idbuf - 1)
+          idbuf[k] = idp[k], k++;
+        idbuf[k] = '\0';
+        guint fid = (guint) g_ascii_strtoull (idbuf, NULL, 32);
+        if (fid > 0
+            && !g_hash_table_contains (seen, GUINT_TO_POINTER (fid))) {
+          g_hash_table_add (seen, GUINT_TO_POINTER (fid));
+          g_string_append_printf (head_out,
+            "<link class=\"fw-pub\" rel=\"stylesheet\" "
+            "href=\"framework-img://%s/res/flow/%u.css\">",
+            doc_id, fid);
+        }
+      }
+      if (rel)  xmlFree (rel);
+      if (href) xmlFree (href);
+    } else if (xmlStrcasecmp (n->name, BAD_CAST "style") == 0) {
+      xmlChar *txt = xmlNodeGetContent (n);
+      if (txt && *txt) {
+        g_string_append (head_out, "<style class=\"fw-pub\">");
+        g_string_append (head_out, (const char *) txt);
+        g_string_append (head_out, "</style>");
+      }
+      if (txt) xmlFree (txt);
+    }
+    if (n->children)
+      mobi_collect_head_css (n->children, doc_id, head_out, seen);
+  }
+}
+
 /* WebView path: emit the marker-injected MOBI body as one stitched HTML
  * document with the shared reading CSS, img recindex rewritten to the
  * framework-img: scheme, scripts stripped. Returns the raw image bytes
@@ -609,20 +695,10 @@ mobi_produce_html (FwReflowDocument *doc, const char *doc_id,
   const char *lang  = self->metadata
                         ? g_hash_table_lookup (self->metadata, "lang") : NULL;
 
-  GString *out = g_string_new ("<!DOCTYPE html>\n<html");
-  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
-  g_string_append (out, "><head><meta charset=\"utf-8\">");
-  if (title && *title) {
-    g_autofree char *esc = g_markup_escape_text (title, -1);
-    g_string_append_printf (out, "<title>%s</title>", esc);
-  }
-  g_string_append (out, "<style>");
-  g_string_append (out, fw_reflow_reading_css ());
-  g_string_append (out, "</style></head><body>");
-
-  /* Build the body section separately so we can decide whether a
-   * synthetic cover is needed (some MOBIs carry the cover only via the
-   * EXTH coverOffset, with no <img> for it in the body). */
+  /* Parse first: collect the publisher (flow) stylesheets from the
+   * document's <head>s and build the body section, so the shell can
+   * order publisher CSS ahead of the reading stylesheet. */
+  g_autoptr (GString) pubcss = g_string_new (NULL);
   g_autoptr (GString) sec = g_string_new (NULL);
   htmlDocPtr d = htmlReadMemory (
     self->html_body, (int) self->html_len, NULL, "UTF-8",
@@ -630,6 +706,11 @@ mobi_produce_html (FwReflowDocument *doc, const char *doc_id,
     HTML_PARSE_NONET);
   if (d) {
     xmlNodePtr root = xmlDocGetRootElement (d);
+    if (root) {
+      g_autoptr (GHashTable) seen =
+        g_hash_table_new (g_direct_hash, g_direct_equal);
+      mobi_collect_head_css (root, doc_id, pubcss, seen);
+    }
     xmlNodePtr body = root ? fw_reflow_html_find_body (root) : NULL;
     if (body) {
       fw_reflow_html_process (body, doc_id, mobi_img_resolver,
@@ -647,6 +728,23 @@ mobi_produce_html (FwReflowDocument *doc, const char *doc_id,
     }
     xmlFreeDoc (d);
   }
+
+  GString *out = g_string_new ("<!DOCTYPE html>\n<html");
+  if (lang && *lang) g_string_append_printf (out, " lang=\"%s\"", lang);
+  g_string_append (out, "><head><meta charset=\"utf-8\">");
+  if (title && *title) {
+    g_autofree char *esc = g_markup_escape_text (title, -1);
+    g_string_append_printf (out, "<title>%s</title>", esc);
+  }
+  /* Publisher (flow) CSS first, then the reading stylesheet: its
+   * !important body rules keep theme/typography sovereignty. The
+   * fw-reading-css id lets fw_webview_set_publisher_styles leave it
+   * enabled while it toggles the fw-pub sheets (matches EPUB v0.79). */
+  if (pubcss->len)
+    g_string_append (out, pubcss->str);
+  g_string_append (out, "<style id=\"fw-reading-css\">");
+  g_string_append (out, fw_reflow_reading_css ());
+  g_string_append (out, "</style></head><body>");
 
   /* Synthetic cover: only when the EXTH cover image exists and the body
    * doesn't already reference it (avoids a doubled cover). */
@@ -680,6 +778,7 @@ fw_reflow_document_mobi_iface_init (FwReflowDocumentInterface *iface)
   iface->close                 = mobi_close;
   iface->get_toc               = mobi_get_toc;
   iface->get_metadata          = mobi_get_metadata;
+  iface->get_resources         = mobi_get_resources;
   iface->produce_html          = mobi_produce_html;
 }
 
@@ -692,6 +791,7 @@ fw_reflow_document_mobi_finalize (GObject *object)
   g_clear_pointer (&self->image_bytes, g_hash_table_unref);
   g_clear_pointer (&self->html_body, g_free);
   g_clear_pointer (&self->frag_offsets, g_array_unref);
+  g_clear_pointer (&self->resources, g_hash_table_unref);
   g_clear_pointer (&self->path,     g_free);
   G_OBJECT_CLASS (fw_reflow_document_mobi_parent_class)->finalize (object);
 }

@@ -704,6 +704,57 @@ indx_tag_value (const IndxEntry *e, guint tag, guint index)
   return g_array_index (vals, guint32, index);
 }
 
+/* g_bytes_unref that tolerates NULL — the flow array stores NULL for the
+ * text flow (index 0) and any range the FDST table couldn't be trusted
+ * for, so its free func must accept holes. */
+static void
+bytes_unref0 (gpointer p)
+{
+  if (p) g_bytes_unref (p);
+}
+
+/* Parse the KF8 FDST (Flow Data Section Table) record and slice each
+ * flow's bytes out of the decompressed stream `body`. FDST magic is at
+ * offset 0, the entry count at 8, then `count` [start, end] byte-offset
+ * pairs from offset 12 — offsets into the full decompressed text stream
+ * (foliate's KF8.init / loadFlow). Flow 0 is the text (SKEL+FRAG source)
+ * and is returned as a NULL hole; flows 1+ are the CSS / SVG resources
+ * that `kindle:flow:N` links reference. Returns NULL on any malformation
+ * — a book without a valid FDST simply renders without publisher CSS. */
+static GPtrArray *
+extract_kf8_flows (const guchar *data, gsize raw_len,
+                   const gsize *roff, guint32 record_count,
+                   guint32 fdst_rec, const char *body, gsize body_len)
+{
+  if (fdst_rec >= record_count) return NULL;
+  gsize off = roff[fdst_rec];
+  gsize end = roff[fdst_rec + 1];
+  if (end > raw_len || end < off || end - off < 12) return NULL;
+  const guchar *rec = data + off;
+  gsize rec_len = end - off;
+  if (memcmp (rec, "FDST", 4) != 0) return NULL;
+
+  guint32 num = read_be32 (rec + 8);
+  /* Guard the entry table against a bogus count that would run off the
+   * record (each entry is 8 bytes from offset 12). */
+  if (num == 0 || num > 4096) return NULL;
+  if ((gsize) 12 + (gsize) num * 8 > rec_len) return NULL;
+
+  GPtrArray *flows = g_ptr_array_new_with_free_func (bytes_unref0);
+  for (guint32 i = 0; i < num; i++) {
+    guint32 s = read_be32 (rec + 12 + (gsize) i * 8);
+    guint32 e = read_be32 (rec + 12 + (gsize) i * 8 + 4);
+    /* Flow 0 is the text body — skip it. Reject inverted or
+     * out-of-range ranges rather than trust the table. */
+    if (i == 0 || e <= s || e > body_len) {
+      g_ptr_array_add (flows, NULL);
+      continue;
+    }
+    g_ptr_array_add (flows, g_bytes_new (body + s, e - s));
+  }
+  return flows;
+}
+
 /* Splice fragments into their skeleton sections to form the real KF8
  * HTML body. When `frag_offsets` is non-NULL it receives one guint32 per
  * fragment (indexed by fragment id, matching the NCX `pos` fid): the
@@ -1086,6 +1137,11 @@ fw_mobi_parse (const char *path, GError **error)
   /* KF8 NCX index (foliate MOBI_HEADER `indx` offset 244). KF8-relative. */
   guint32 kf8_ncx  = (is_kf8 && r0 + 248 <= r0_end)
                       ? read_be32 (data + r0 + 244) : 0xffffffff;
+  /* KF8 FDST index (foliate KF8_HEADER `fdst` offset 192). KF8-relative.
+   * The FDST record maps the flow boundaries — flow 0 is text, flows 1+
+   * are publisher CSS / SVG. Feeds extract_kf8_flows below. */
+  guint32 kf8_fdst = (is_kf8 && r0 + 196 <= r0_end)
+                      ? read_be32 (data + r0 + 192) : 0xffffffff;
 
   /* EXTH (gated by exthFlag, bit 0x40). foliate exthFlag offset = 128. */
   char *meta_title = NULL, *meta_author = NULL;
@@ -1164,6 +1220,15 @@ fw_mobi_parse (const char *path, GError **error)
    * its loadSection performs each splice. We do both inline. */
   GArray *kf8_toc = NULL;
   GArray *kf8_frag_offsets = NULL;
+  /* Slice the auxiliary flows (publisher CSS etc.) out of the full
+   * decompressed stream now, before the SKEL+FRAG splice rewrites
+   * `body`. FDST offsets index this pre-splice concatenation. */
+  GPtrArray *kf8_flows = NULL;
+  if (is_kf8 && kf8_fdst != 0xffffffff
+      && kf8_fdst + kf8_start < record_count)
+    kf8_flows = extract_kf8_flows (data, raw_len, roff, record_count,
+                                   kf8_start + kf8_fdst,
+                                   body->str, body->len);
   if (is_kf8 &&
       kf8_skel != 0xFFFFFFFF && kf8_skel + kf8_start < record_count &&
       kf8_frag != 0xFFFFFFFF && kf8_frag + kf8_start < record_count) {
@@ -1299,6 +1364,7 @@ fw_mobi_parse (const char *path, GError **error)
   p->is_kf8         = is_kf8;
   p->toc            = kf8_toc;
   p->frag_offsets   = kf8_frag_offsets;
+  p->flows          = kf8_flows;
   return p;
 }
 
@@ -1319,5 +1385,6 @@ fw_mobi_parsed_free (FwMobiParsed *p)
     g_array_free (p->toc, TRUE);
   }
   g_clear_pointer (&p->frag_offsets, g_array_unref);
+  g_clear_pointer (&p->flows, g_ptr_array_unref);
   g_free (p);
 }

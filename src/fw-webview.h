@@ -85,6 +85,15 @@ void       fw_webview_set_reading_style  (FwWebView           *self,
 void       fw_webview_set_publisher_styles (FwWebView *self,
                                             gboolean   enabled);
 
+/* Dark-theme color transformation for publisher CSS: inverts the
+ * lightness of author-set light backgrounds and dark text so a
+ * publisher sheet doesn't glare against a dark reading theme. Pass TRUE
+ * only when a dark reading theme is active; FALSE reverts it. Idempotent
+ * and reversible; queued until load finishes if the document isn't
+ * ready. */
+void       fw_webview_set_dark_transform   (FwWebView *self,
+                                            gboolean   on);
+
 /* Latest reading position as JSON `{"anchor":"...","scroll_y":N}`, kept
  * current by a debounced in-page scroll listener that posts back to a
  * script-message handler.  Borrowed; valid until the next load or

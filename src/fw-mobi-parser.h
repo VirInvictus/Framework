@@ -79,6 +79,15 @@ typedef struct {
    * links to frag_offsets[F] + O. NULL for KF7 and for the rare cp1252
    * KF8 whose re-encode shifts offsets (same caveat as `toc`). */
   GArray       *frag_offsets;   /* guint32 */
+
+  /* KF8 auxiliary flows, sliced out of the decompressed stream via the
+   * FDST table. flows->pdata[i] is flow i's raw bytes (a GBytes*) or
+   * NULL. Flow 0 is the main text (the SKEL+FRAG-spliced HTML) and is
+   * always NULL here; flows 1+ are the publisher stylesheets (and other
+   * resources) that in-body `kindle:flow:N` links reference. NULL when
+   * the file isn't KF8 or carries no valid FDST record. Caller frees
+   * via fw_mobi_parsed_free. */
+  GPtrArray    *flows;   /* GBytes* per flow index; [0] = NULL */
 } FwMobiParsed;
 
 typedef struct {
