@@ -1,0 +1,165 @@
+/* Framework — owned application stylesheet (v0.80.0)
+ *
+ * Libadwaita is gone; this sheet is the single styling authority. It is
+ * loaded by fw-theme.c via a GtkCssProvider at PRIORITY_USER + 1, on top
+ * of a palette provider that injects the Kanagawa Dragon (dark) /
+ * Kanagawa Lotus (light) @define-color named colours (swapped live on
+ * the portal color-scheme preference).
+ *
+ * Posture: flat, square, 1px hard borders, no shadows, denser than
+ * adwaita. No font-family here — Framework ships no UI font; reading
+ * fonts flow through fw-fonts.c / WebKit, and chrome uses the system
+ * sans. SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/* ── Surfaces ───────────────────────────────────────────────────────── */
+
+window,
+.background {
+    background-color: @window_bg_color;
+    color: @window_fg_color;
+}
+
+/* Slim flat header — promoted to the real titlebar; the compositor
+ * draws no titlebar of its own and window buttons are hidden. */
+headerbar,
+.titlebar {
+    background-color: @headerbar_bg_color;
+    color: @headerbar_fg_color;
+    box-shadow: none;
+    border-bottom: 1px solid @borders;
+    min-height: 38px;
+}
+
+/* Popover / menu surfaces (the primary GMenu button, dropdown popups). */
+popover > contents,
+popover > arrow {
+    background-color: @popover_bg_color;
+    color: @popover_fg_color;
+    border: 1px solid @borders;
+    border-radius: 4px;
+    box-shadow: none;
+}
+
+tooltip {
+    background-color: @popover_bg_color;
+    color: @popover_fg_color;
+    border: 1px solid @borders;
+    border-radius: 4px;
+}
+
+/* ── Classes referenced by existing code ────────────────────────────── */
+
+.dim-label {
+    opacity: 0.6;
+}
+
+/* Zoom preset cluster: joined buttons, square-leaning. */
+.linked > button {
+    border-radius: 0;
+    margin-left: -1px;
+}
+.linked > button:first-child {
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+    margin-left: 0;
+}
+.linked > button:last-child {
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+}
+
+.suggested-action {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    border: 1px solid @accent_bg_color;
+}
+.suggested-action:hover {
+    background-image: linear-gradient(alpha(white, 0.08), alpha(white, 0.08));
+}
+
+/* ── Boxed lists (dialogs) — square, flat, 1px borders ──────────────── */
+
+.boxed-list {
+    background-color: @card_bg_color;
+    border: 1px solid @borders;
+    border-radius: 4px;
+}
+.boxed-list > row {
+    background-color: transparent;
+    padding: 0;
+}
+.boxed-list > row:not(:last-child) {
+    border-bottom: 1px solid alpha(@borders, 0.6);
+}
+
+.group-title {
+    font-weight: 600;
+    font-size: 15px;
+    margin: 4px 2px;
+}
+
+/* Owned preference-row composites (stand in for AdwPreferences spacing). */
+.owned-row {
+    padding: 12px 14px;
+}
+.owned-row-title {
+    font-size: 14px;
+    font-weight: 500;
+}
+.owned-row-subtitle {
+    font-size: 12px;
+}
+
+/* ── Toast (owned overlay revealer) ─────────────────────────────────── */
+
+.toast {
+    background-color: @card_bg_color;
+    color: @window_fg_color;
+    border: 1px solid @borders;
+    border-radius: 4px;
+    padding: 10px 18px;
+    font-size: 13px;
+}
+
+/* ── Empty state (owned status page) ────────────────────────────────── */
+
+.status-page {
+    padding: 24px;
+}
+.status-icon {
+    color: alpha(@window_fg_color, 0.5);
+}
+.status-title {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+.status-description {
+    font-size: 14px;
+}
+
+/* ── Floating TOC panel — opaque over the document ──────────────────── */
+
+.sidebar-panel {
+    background-color: @sidebar_bg_color;
+    border-right: 1px solid @borders;
+}
+
+/* ── Stock-widget nudges (GTK Default base, no adwaita sheet) ────────── */
+
+entry,
+spinbutton {
+    border: 1px solid @borders;
+    border-radius: 4px;
+    background-color: @view_bg_color;
+    color: @view_fg_color;
+}
+entry:focus-within,
+spinbutton:focus-within {
+    border-color: @accent_color;
+}
+
+button {
+    border-radius: 4px;
+}

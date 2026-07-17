@@ -8,12 +8,13 @@
 #include "fw-window.h"
 #include "fw-state.h"
 #include "fw-fonts.h"
+#include "fw-theme.h"
 
 struct _FwApplication {
-  AdwApplication parent_instance;
+  GtkApplication parent_instance;
 };
 
-G_DEFINE_FINAL_TYPE (FwApplication, fw_application, ADW_TYPE_APPLICATION)
+G_DEFINE_FINAL_TYPE (FwApplication, fw_application, GTK_TYPE_APPLICATION)
 
 static void
 fw_application_open (GApplication  *app,
@@ -147,6 +148,11 @@ fw_application_startup (GApplication *app)
    * widget tries to resolve a font family. Must happen before window
    * construction so the CSS provider's first load sees them. */
   fw_fonts_register ();
+
+  /* Install the owned stylesheet + portal-driven dark/light theming
+   * (the libadwaita replacement, v0.80.0). A display exists here
+   * (post chain-up), which the CSS providers need. */
+  fw_theme_install ();
 
   /* Prune stale state entries */
   fw_state_init ();

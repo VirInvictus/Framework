@@ -2,24 +2,34 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 3 (2026-04-30, tracks v0.21.0)
-**Target:** GNOME 50+, GTK4/libadwaita
+**Spec revision:** 4 (2026-07-16, tracks v0.80.0)
+**Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson
-**License:** GNU GPL v3.0 or later (to align with the GNOME ecosystem)
+**License:** GNU GPL v3.0 or later
 
 ---
 
 ## Influence
-Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performance, minimal UI, and a strict focus on being a viewer rather than an editor. It aims to be the "SumatraPDF for GNOME".
+Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performance, minimal UI, and a strict focus on being a viewer rather than an editor. It aims to be the "SumatraPDF for Linux".
 
 ## 1. Mission Statement
 
-Framework is a fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean libadwaita UI, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
+Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
 
 Reflowable formats (EPUB / FB2 / MOBI) get a fixed `fz_layout_document(600, 900, 11)` pass per render-instance open and do not re-flow on zoom or window resize — Framework is good as a single reader for "open everything," but specialized ebook readers (e.g., [Foliate](https://johnfactotum.github.io/foliate/)) handle reflow and font customization better.
 
-Design philosophy: **accessible to a grandma, useful to a power user.** Every action has a visible UI control. Every UI control has a keyboard shortcut. No vim bindings, no modal interfaces, no hidden commands. SumatraPDF is the reference implementation; GNOME HIG is the law.
+Design philosophy: **accessible to a grandma, useful to a power user.** Every action has a visible UI control. Every UI control has a keyboard shortcut. No vim bindings, no modal interfaces, no hidden commands. SumatraPDF is the reference implementation.
+
+### Design language (v0.80.0: de-adwaita, Hyprland-first)
+
+Framework dropped libadwaita at v0.80.0 while keeping GTK4, to belong on a tiling Wayland desktop (Hyprland) rather than read as a GNOME Shell app. It stays fully functional under GNOME; only the look and a few affordances changed. The visual language matches the sibling projects (Hermitage, Colophon):
+
+- **Owned stylesheet.** A single `data/style.css` is the styling authority, loaded via a `GtkCssProvider` at `GTK_STYLE_PROVIDER_PRIORITY_USER + 1` (above a user's `~/.config/gtk-4.0/gtk.css`). Flat, square, 1px hard borders, no shadows, denser spacing than adwaita. Kanagawa Dragon (dark) / Kanagawa Lotus (light) palette as `@define-color` named colours.
+- **Dark/light** follows the system via the `org.freedesktop.portal.Settings` `color-scheme` preference read over GDBus (no GNOME dependency), with live updates on `SettingChanged` and a **dark default** when no portal backend answers. Fixed reading themes (Light / Sepia / Kanagawa Dark) still force their own polarity; only the "system" reading theme tracks the portal.
+- **Titlebar.** A slim flat `GtkHeaderBar` promoted to the real window titlebar, with `show-title-buttons` off (the compositor and a `Ctrl+Q` quit accel handle window control). Consequence: GTK auto-hides the titlebar in fullscreen (F11), which suits a reader; the header's page/zoom entries are unreachable there, same as any GNOME app in fullscreen.
+- **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page — deliberate for narrow tiles. Width persists in the `sidebar-width` GSetting.
+- **Dialogs** (Reading Settings, Keyboard Shortcuts, Document Properties) are transient modal `GtkWindow`s built from owned `GtkListBox` "boxed-list" row composites, Escape-to-close.
 
 ---
 
@@ -165,7 +175,7 @@ FrameworkApplication : AdwApplication
 
 ### 3.1 Header Bar
 
-Standard AdwHeaderBar. No custom titlebar chrome. Follows GNOME HIG spacing and sizing.
+Slim flat `GtkHeaderBar` promoted to the window titlebar (v0.80.0; was `AdwHeaderBar`), window-control buttons hidden, styled by the owned stylesheet. See "Design language" above.
 
 **Left cluster — Sidebar + Zoom:**
 

@@ -5,13 +5,14 @@
 
 #pragma once
 
+#include <gtk/gtk.h>
 #include "fw-application.h"
 
 G_BEGIN_DECLS
 
 #define FW_TYPE_WINDOW (fw_window_get_type ())
 
-G_DECLARE_FINAL_TYPE (FwWindow, fw_window, FW, WINDOW, AdwApplicationWindow)
+G_DECLARE_FINAL_TYPE (FwWindow, fw_window, FW, WINDOW, GtkApplicationWindow)
 
 FwWindow *fw_window_new       (FwApplication *app);
 void      fw_window_open_file (FwWindow      *self,

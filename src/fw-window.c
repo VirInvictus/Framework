@@ -13,6 +13,7 @@
 #include "fw-reflow-document.h"
 #include "fw-reflow-sidebar.h"
 #include "fw-webview.h"
+#include "fw-theme.h"
 #include "fw-state.h"
 #include "fw-debug.h"
 #include <gdk/gdk.h>
@@ -24,14 +25,14 @@ typedef struct {
 } NavEntry;
 
 struct _FwWindow {
-  AdwApplicationWindow  parent_instance;
+  GtkApplicationWindow  parent_instance;
 
   /* Document state */
   FwDocument           *document;
   FwCache              *cache;
 
   /* Header bar controls */
-  AdwHeaderBar         *header_bar;
+  GtkHeaderBar         *header_bar;
   GtkButton            *sidebar_button;
   GtkButton            *zoom_out_button;
   GtkEntry             *zoom_entry;
@@ -42,9 +43,14 @@ struct _FwWindow {
   GtkButton            *next_page_button;
   GtkToggleButton      *search_toggle;
 
-  /* Layout */
-  AdwToastOverlay      *toast_overlay;  /* wraps content; hosts AdwToasts */
-  AdwOverlaySplitView  *split_view;
+  /* Layout — owned overlay stack (v0.80.0, libadwaita-free).
+   * root_overlay is the window child; the content stack is its base,
+   * the floating TOC sidebar and the toast are overlays on top. */
+  GtkOverlay           *root_overlay;
+  GtkRevealer          *sidebar_revealer;  /* floating TOC (F9) */
+  GtkRevealer          *toast_revealer;    /* bottom-center notification */
+  GtkLabel             *toast_label;
+  guint                 toast_hide_id;     /* g_timeout, 0 = none pending */
   FwSidebar            *sidebar;
   GtkStack             *content_stack;  /* "empty" | "document" | "webview" */
   GtkScrolledWindow    *scroll;
@@ -123,7 +129,7 @@ struct _FwWindow {
   gboolean              spread_resized;     /* true while we've grown for a spread */
 };
 
-G_DEFINE_FINAL_TYPE (FwWindow, fw_window, ADW_TYPE_APPLICATION_WINDOW)
+G_DEFINE_FINAL_TYPE (FwWindow, fw_window, GTK_TYPE_APPLICATION_WINDOW)
 
 static void fw_window_save_state           (FwWindow *self);
 static void nav_push_current               (FwWindow *self);
@@ -550,8 +556,26 @@ sidebar_clicked (GtkButton *button, gpointer user_data)
 {
   (void) button;
   FwWindow *self = FW_WINDOW (user_data);
-  gboolean visible = adw_overlay_split_view_get_show_sidebar (self->split_view);
-  adw_overlay_split_view_set_show_sidebar (self->split_view, !visible);
+  gboolean visible = gtk_revealer_get_reveal_child (self->sidebar_revealer);
+  gtk_revealer_set_reveal_child (self->sidebar_revealer, !visible);
+}
+
+/* Click-outside-to-dismiss for the floating TOC: when the sidebar is
+ * revealed, a press on the content stack hides it and claims the event
+ * so the same click doesn't also activate a link or page underneath.
+ * When the sidebar is hidden, do nothing (let the click through). */
+static void
+on_content_pressed_dismiss_sidebar (GtkGestureClick *gesture,
+                                    int n_press, double x, double y,
+                                    gpointer user_data)
+{
+  (void) n_press; (void) x; (void) y;
+  FwWindow *self = FW_WINDOW (user_data);
+  if (gtk_revealer_get_reveal_child (self->sidebar_revealer)) {
+    gtk_revealer_set_reveal_child (self->sidebar_revealer, FALSE);
+    gtk_gesture_set_state (GTK_GESTURE (gesture),
+                           GTK_EVENT_SEQUENCE_CLAIMED);
+  }
 }
 
 /* ── Sidebar TOC navigation ───────────────────────────────────────── */
@@ -843,7 +867,7 @@ extract_folder_chosen (GObject *source, GAsyncResult *result,
     }
   }
 
-  /* Toast-style summary via AdwAlertDialog. */
+  /* Extraction summary via GtkAlertDialog. */
   g_autofree char *heading = g_strdup_printf (
     "Extracted %d file%s%s",
     saved, saved == 1 ? "" : "s",
@@ -852,10 +876,10 @@ extract_folder_chosen (GObject *source, GAsyncResult *result,
     ? g_strdup_printf ("%d failed:%s", failed, errors->str)
     : g_strdup_printf ("Saved to %s", folder_path);
 
-  AdwAlertDialog *dlg = ADW_ALERT_DIALOG (
-    adw_alert_dialog_new (heading, body));
-  adw_alert_dialog_add_response (dlg, "ok", "OK");
-  adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (ctx->window));
+  GtkAlertDialog *dlg = gtk_alert_dialog_new ("%s", heading);
+  gtk_alert_dialog_set_detail (dlg, body);
+  gtk_alert_dialog_show (dlg, GTK_WINDOW (ctx->window));
+  g_object_unref (dlg);
 
   g_string_free (errors, TRUE);
   extract_ctx_free (ctx);
@@ -871,11 +895,11 @@ static void act_save_attachments (GSimpleAction *a, GVariant *p, gpointer d)
   GArray *list = fw_document_get_attachments (self->document);
   if (!list || list->len == 0) {
     if (list) g_array_unref (list);
-    AdwAlertDialog *dlg = ADW_ALERT_DIALOG (adw_alert_dialog_new (
-      "No Embedded Files",
-      "This document has no attached files to extract."));
-    adw_alert_dialog_add_response (dlg, "ok", "OK");
-    adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (self));
+    GtkAlertDialog *dlg = gtk_alert_dialog_new ("%s", "No Embedded Files");
+    gtk_alert_dialog_set_detail (dlg,
+      "This document has no attached files to extract.");
+    gtk_alert_dialog_show (dlg, GTK_WINDOW (self));
+    g_object_unref (dlg);
     return;
   }
 
@@ -1003,6 +1027,135 @@ static void act_copy (GSimpleAction *a, GVariant *p, gpointer d)
   }
 }
 
+/* ── Owned dialog + row helpers (libadwaita-free, v0.80.0) ──────────
+ *
+ * These stand in for AdwDialog/AdwToolbarView/AdwPreferences*: a modal
+ * transient GtkWindow with a flat header and Escape-to-close, and
+ * GtkListBox "boxed-list" rows whose padding/typography come from the
+ * owned stylesheet. Ported from the Hermitage sibling's widgets.py. */
+
+static gboolean
+on_dialog_escape (GtkEventControllerKey *key, guint keyval, guint keycode,
+                  GdkModifierType state, gpointer user_data)
+{
+  (void) key; (void) keycode; (void) state;
+  if (keyval == GDK_KEY_Escape) {
+    gtk_window_close (GTK_WINDOW (user_data));
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/* Build a modal dialog window; returns the window and hands back the
+ * vertical content box (inside a scroller) to fill. */
+static GtkWindow *
+fw_dialog_new (FwWindow *parent, const char *title, int w, int h,
+               GtkBox **out_content)
+{
+  GtkWindow *dlg = GTK_WINDOW (gtk_window_new ());
+  gtk_window_set_transient_for (dlg, GTK_WINDOW (parent));
+  gtk_window_set_modal (dlg, TRUE);
+  gtk_window_set_destroy_with_parent (dlg, TRUE);
+  gtk_window_set_title (dlg, title);
+  gtk_window_set_default_size (dlg, w, h);
+  gtk_window_set_titlebar (dlg, gtk_header_bar_new ());
+
+  GtkEventController *key = gtk_event_controller_key_new ();
+  g_signal_connect (key, "key-pressed", G_CALLBACK (on_dialog_escape), dlg);
+  gtk_widget_add_controller (GTK_WIDGET (dlg), key);
+
+  GtkWidget *scroll = gtk_scrolled_window_new ();
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroll),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  GtkBox *content = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 18));
+  gtk_widget_set_margin_top    (GTK_WIDGET (content), 24);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (content), 24);
+  gtk_widget_set_margin_start  (GTK_WIDGET (content), 24);
+  gtk_widget_set_margin_end    (GTK_WIDGET (content), 24);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroll),
+                                 GTK_WIDGET (content));
+  gtk_window_set_child (dlg, scroll);
+
+  *out_content = content;
+  return dlg;
+}
+
+static GtkListBox *
+fw_boxed_list (void)
+{
+  GtkListBox *list = GTK_LIST_BOX (gtk_list_box_new ());
+  gtk_list_box_set_selection_mode (list, GTK_SELECTION_NONE);
+  gtk_widget_add_css_class (GTK_WIDGET (list), "boxed-list");
+  return list;
+}
+
+/* Append a titled group (optional description) to `page` and return its
+ * boxed list for rows. */
+static GtkListBox *
+fw_pref_group (GtkBox *page, const char *title, const char *desc)
+{
+  GtkBox *group = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 6));
+  GtkWidget *tl = gtk_label_new (title);
+  gtk_widget_set_halign (tl, GTK_ALIGN_START);
+  gtk_widget_add_css_class (tl, "group-title");
+  gtk_box_append (group, tl);
+  if (desc && *desc) {
+    GtkWidget *dl = gtk_label_new (desc);
+    gtk_widget_set_halign (dl, GTK_ALIGN_START);
+    gtk_label_set_wrap (GTK_LABEL (dl), TRUE);
+    gtk_label_set_xalign (GTK_LABEL (dl), 0.0);
+    gtk_widget_add_css_class (dl, "dim-label");
+    gtk_box_append (group, dl);
+  }
+  GtkListBox *list = fw_boxed_list ();
+  gtk_box_append (group, GTK_WIDGET (list));
+  gtk_box_append (page, GTK_WIDGET (group));
+  return list;
+}
+
+/* A row: title (+ optional subtitle) on the left, a control on the
+ * right. `suffix` may be NULL (a plain value/label row). */
+static GtkWidget *
+fw_value_row (const char *title, const char *subtitle, GtkWidget *suffix)
+{
+  GtkWidget *row = gtk_list_box_row_new ();
+  gtk_list_box_row_set_activatable (GTK_LIST_BOX_ROW (row), FALSE);
+  GtkBox *hbox = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12));
+  gtk_widget_add_css_class (GTK_WIDGET (hbox), "owned-row");
+  gtk_widget_set_valign (GTK_WIDGET (hbox), GTK_ALIGN_CENTER);
+
+  GtkBox *text = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 2));
+  gtk_widget_set_hexpand (GTK_WIDGET (text), TRUE);
+  gtk_widget_set_valign (GTK_WIDGET (text), GTK_ALIGN_CENTER);
+  GtkWidget *tl = gtk_label_new (title);
+  gtk_widget_set_halign (tl, GTK_ALIGN_START);
+  gtk_label_set_ellipsize (GTK_LABEL (tl), PANGO_ELLIPSIZE_END);
+  gtk_widget_add_css_class (tl, "owned-row-title");
+  gtk_box_append (text, tl);
+  if (subtitle && *subtitle) {
+    GtkWidget *sl = gtk_label_new (subtitle);
+    gtk_widget_set_halign (sl, GTK_ALIGN_START);
+    gtk_label_set_wrap (GTK_LABEL (sl), TRUE);
+    gtk_label_set_xalign (GTK_LABEL (sl), 0.0);
+    gtk_label_set_selectable (GTK_LABEL (sl), TRUE);
+    gtk_widget_add_css_class (sl, "owned-row-subtitle");
+    gtk_widget_add_css_class (sl, "dim-label");
+    gtk_box_append (text, sl);
+  }
+  gtk_box_append (hbox, GTK_WIDGET (text));
+
+  if (suffix) {
+    /* NB: a GtkDropDown suffix triggers a benign GTK log warning about
+     * its internal arrow-image's baseline when measured inside the
+     * GtkListBox row. It's cosmetic (no layout effect) and unavoidable
+     * short of not using GtkDropDown; left as-is. */
+    gtk_widget_set_valign (suffix, GTK_ALIGN_CENTER);
+    gtk_box_append (hbox, suffix);
+  }
+  gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), GTK_WIDGET (hbox));
+  return row;
+}
+
 /* ── Reading Settings dialog (Phase 13.1 typography prefs) ─────── */
 
 static void
@@ -1047,15 +1200,15 @@ on_preset_clicked (GtkButton *btn, gpointer user_data)
   prefs_apply_preset (self, preset);
 }
 
-/* Combo row selection index maps 1:1 to the reading-theme enum
+/* Dropdown selection index maps 1:1 to the reading-theme enum
  * (system=0, light=1, sepia=2, dark=3). */
 static void
-on_theme_combo_changed (AdwComboRow *row, GParamSpec *pspec, gpointer user_data)
+on_theme_combo_changed (GtkDropDown *row, GParamSpec *pspec, gpointer user_data)
 {
   (void) pspec;
   FwWindow *self = FW_WINDOW (user_data);
   g_settings_set_enum (self->settings, "reading-theme",
-                       (int) adw_combo_row_get_selected (row));
+                       (int) gtk_drop_down_get_selected (row));
 }
 
 static const char *const READING_FONT_FAMILIES[] = {
@@ -1063,12 +1216,12 @@ static const char *const READING_FONT_FAMILIES[] = {
 };
 
 static void
-on_reading_font_combo_changed (AdwComboRow *row, GParamSpec *pspec,
+on_reading_font_combo_changed (GtkDropDown *row, GParamSpec *pspec,
                                gpointer user_data)
 {
   (void) pspec;
   FwWindow *self = FW_WINDOW (user_data);
-  guint i = adw_combo_row_get_selected (row);
+  guint i = gtk_drop_down_get_selected (row);
   if (i < G_N_ELEMENTS (READING_FONT_FAMILIES))
     g_settings_set_string (self->settings, "reading-font-family",
                            READING_FONT_FAMILIES[i]);
@@ -1081,148 +1234,107 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
   if (!self->settings)
     return;
 
-  AdwDialog *dlg = adw_dialog_new ();
-  adw_dialog_set_title (dlg, "Reading Settings");
-  adw_dialog_set_content_width (dlg, 480);
-  adw_dialog_set_content_height (dlg, 540);
+  GtkBox *page = NULL;
+  GtkWindow *dlg = fw_dialog_new (self, "Reading Settings", 480, 560, &page);
 
-  GtkWidget *toolbar = adw_toolbar_view_new ();
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar), adw_header_bar_new ());
-  adw_dialog_set_child (dlg, toolbar);
-
-  GtkWidget *page = adw_preferences_page_new ();
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
-
-  /* Appearance group — reading theme (EPUB / WebKit path). */
-  AdwPreferencesGroup *g_appear =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_appear, "Appearance");
-  adw_preferences_group_set_description (g_appear,
+  /* Appearance group — reading theme (EPUB / WebKit path) + publisher CSS. */
+  GtkListBox *g_appear = fw_pref_group (page, "Appearance",
     "Color theme for EPUB documents. Applies live.");
 
-  AdwComboRow *theme_row = ADW_COMBO_ROW (adw_combo_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (theme_row), "Theme");
-  /* Order matches the ReadingTheme enum: system, light, sepia, dark. */
+  /* Theme dropdown; order matches ReadingTheme enum: system/light/sepia/dark. */
   const char *theme_labels[] = {
     "Follow System", "Light", "Sepia", "Dark", NULL
   };
-  GtkStringList *theme_model = gtk_string_list_new (theme_labels);
-  adw_combo_row_set_model (theme_row, G_LIST_MODEL (theme_model));
-  adw_combo_row_set_selected (theme_row,
+  GtkWidget *theme_dd = gtk_drop_down_new_from_strings (theme_labels);
+  gtk_drop_down_set_selected (GTK_DROP_DOWN (theme_dd),
     (guint) g_settings_get_enum (self->settings, "reading-theme"));
   /* Connect after the initial set so it doesn't fire on open. */
-  g_signal_connect (theme_row, "notify::selected",
+  g_signal_connect (theme_dd, "notify::selected",
                     G_CALLBACK (on_theme_combo_changed), self);
-  adw_preferences_group_add (g_appear, GTK_WIDGET (theme_row));
+  gtk_list_box_append (g_appear, fw_value_row ("Theme", NULL, theme_dd));
 
-  /* Publisher styles — honour the book's own CSS (EPUB). Flips the
-   * stylesheets' DOM disabled state live; no reload. */
-  GtkWidget *pub_row = adw_switch_row_new ();
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (pub_row),
-                                 "Publisher styles");
-  adw_action_row_set_subtitle (ADW_ACTION_ROW (pub_row),
-    "Use the book's own stylesheets and fonts when it ships them");
+  /* Publisher styles — honour the book's own CSS (EPUB). */
+  GtkWidget *pub_sw = gtk_switch_new ();
   g_settings_bind (self->settings, "publisher-styles",
-                   pub_row, "active", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_appear, pub_row);
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_appear);
+                   pub_sw, "active", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_appear, fw_value_row ("Publisher styles",
+    "Use the book's own stylesheets and fonts when it ships them", pub_sw));
 
   /* Font group */
-  AdwPreferencesGroup *g_font =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_font, "Fonts");
-  adw_preferences_group_set_description (g_font,
+  GtkListBox *g_font = fw_pref_group (page, "Fonts",
     "Pick a bundled reading font, or type any installed family below. "
     "Empty falls back to the bundled serif.");
 
-  /* Reading font — combo over the three bundled families. Writes
-   * reading-font-family; the entry row below mirrors it and accepts
-   * custom families. */
-  AdwComboRow *font_row = ADW_COMBO_ROW (adw_combo_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (font_row), "Reading font");
   const char *font_labels[] = {
     "Crimson Pro (serif)", "Atkinson Hyperlegible", "OpenDyslexic", NULL
   };
-  GtkStringList *font_model = gtk_string_list_new (font_labels);
-  adw_combo_row_set_model (font_row, G_LIST_MODEL (font_model));
-  /* Preselect the matching family; leave at 0 (not written) when custom. */
+  GtkWidget *font_dd = gtk_drop_down_new_from_strings (font_labels);
   g_autofree char *cur_family = g_settings_get_string (self->settings,
                                                        "reading-font-family");
   for (guint i = 0; i < G_N_ELEMENTS (READING_FONT_FAMILIES); i++)
     if (g_strcmp0 (cur_family, READING_FONT_FAMILIES[i]) == 0) {
-      adw_combo_row_set_selected (font_row, i);
+      gtk_drop_down_set_selected (GTK_DROP_DOWN (font_dd), i);
       break;
     }
-  g_signal_connect (font_row, "notify::selected",
+  g_signal_connect (font_dd, "notify::selected",
                     G_CALLBACK (on_reading_font_combo_changed), self);
-  adw_preferences_group_add (g_font, GTK_WIDGET (font_row));
+  gtk_list_box_append (g_font, fw_value_row ("Reading font", NULL, font_dd));
 
-  /* Body family — AdwEntryRow bound to the GSetting. */
-  AdwEntryRow *body_row = ADW_ENTRY_ROW (adw_entry_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (body_row), "Body font family");
+  GtkWidget *body_entry = gtk_entry_new ();
+  gtk_widget_set_size_request (body_entry, 180, -1);
   g_settings_bind (self->settings, "reading-font-family",
-                   body_row, "text", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_font, GTK_WIDGET (body_row));
+                   body_entry, "text", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_font,
+    fw_value_row ("Body font family", NULL, body_entry));
 
-  AdwEntryRow *mono_row = ADW_ENTRY_ROW (adw_entry_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (mono_row), "Monospace family");
+  GtkWidget *mono_entry = gtk_entry_new ();
+  gtk_widget_set_size_request (mono_entry, 180, -1);
   g_settings_bind (self->settings, "reading-monospace-family",
-                   mono_row, "text", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_font, GTK_WIDGET (mono_row));
-
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_font);
+                   mono_entry, "text", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_font,
+    fw_value_row ("Monospace family", NULL, mono_entry));
 
   /* Size + line-height group */
-  AdwPreferencesGroup *g_size =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_size, "Size & spacing");
+  GtkListBox *g_size = fw_pref_group (page, "Size & spacing", NULL);
 
-  AdwSpinRow *size_row = ADW_SPIN_ROW (
-    adw_spin_row_new_with_range (8.0, 32.0, 0.5));
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (size_row), "Font size (pt)");
-  adw_spin_row_set_digits (size_row, 1);
+  GtkWidget *size_spin = gtk_spin_button_new_with_range (8.0, 32.0, 0.5);
+  gtk_spin_button_set_digits (GTK_SPIN_BUTTON (size_spin), 1);
   g_settings_bind (self->settings, "reading-font-size",
-                   size_row, "value", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_size, GTK_WIDGET (size_row));
+                   size_spin, "value", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_size, fw_value_row ("Font size (pt)", NULL, size_spin));
 
-  AdwSpinRow *lh_row = ADW_SPIN_ROW (
-    adw_spin_row_new_with_range (1.0, 2.5, 0.05));
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (lh_row), "Line height");
-  adw_spin_row_set_digits (lh_row, 2);
+  GtkWidget *lh_spin = gtk_spin_button_new_with_range (1.0, 2.5, 0.05);
+  gtk_spin_button_set_digits (GTK_SPIN_BUTTON (lh_spin), 2);
   g_settings_bind (self->settings, "reading-line-height",
-                   lh_row, "value", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_size, GTK_WIDGET (lh_row));
-
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_size);
+                   lh_spin, "value", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_size, fw_value_row ("Line height", NULL, lh_spin));
 
   /* Layout group — two-column toggle. */
-  AdwPreferencesGroup *g_layout =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_layout, "Layout");
-
-  AdwSwitchRow *two_col_row = ADW_SWITCH_ROW (adw_switch_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (two_col_row),
-                                 "Two-column spread");
-  adw_action_row_set_subtitle (ADW_ACTION_ROW (two_col_row),
-    "Pages render side-by-side; navigation advances by two pages "
-    "per step. Toggleable in-flow with F10.");
+  GtkListBox *g_layout = fw_pref_group (page, "Layout", NULL);
+  GtkWidget *two_col_sw = gtk_switch_new ();
   g_settings_bind (self->settings, "reading-two-column",
-                   two_col_row, "active", G_SETTINGS_BIND_DEFAULT);
-  adw_preferences_group_add (g_layout, GTK_WIDGET (two_col_row));
-
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_layout);
+                   two_col_sw, "active", G_SETTINGS_BIND_DEFAULT);
+  gtk_list_box_append (g_layout, fw_value_row ("Two-column spread",
+    "Pages render side-by-side; navigation advances by two pages "
+    "per step. Toggleable in-flow with F10.", two_col_sw));
 
   /* Presets */
-  AdwPreferencesGroup *g_pre =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_pre, "Presets");
-  adw_preferences_group_set_description (g_pre,
+  GtkBox *g_pre = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 6));
+  GtkWidget *pre_title = gtk_label_new ("Presets");
+  gtk_widget_set_halign (pre_title, GTK_ALIGN_START);
+  gtk_widget_add_css_class (pre_title, "group-title");
+  gtk_box_append (g_pre, pre_title);
+  GtkWidget *pre_desc = gtk_label_new (
     "Quick combinations of font, size and line-height. Apply, then "
     "fine-tune above.");
+  gtk_widget_set_halign (pre_desc, GTK_ALIGN_START);
+  gtk_label_set_wrap (GTK_LABEL (pre_desc), TRUE);
+  gtk_label_set_xalign (GTK_LABEL (pre_desc), 0.0);
+  gtk_widget_add_css_class (pre_desc, "dim-label");
+  gtk_box_append (g_pre, pre_desc);
 
   GtkBox *btn_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8));
   gtk_widget_set_margin_top    (GTK_WIDGET (btn_box), 4);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (btn_box), 4);
   gtk_widget_set_halign        (GTK_WIDGET (btn_box), GTK_ALIGN_CENTER);
   gtk_widget_add_css_class     (GTK_WIDGET (btn_box), "linked");
 
@@ -1240,26 +1352,19 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
                       G_CALLBACK (on_preset_clicked), self);
     gtk_box_append (btn_box, GTK_WIDGET (b));
   }
-  adw_preferences_group_add (g_pre, GTK_WIDGET (btn_box));
-  adw_preferences_page_add  (ADW_PREFERENCES_PAGE (page), g_pre);
+  gtk_box_append (g_pre, GTK_WIDGET (btn_box));
+  gtk_box_append (page, GTK_WIDGET (g_pre));
 
-  adw_dialog_present (dlg, GTK_WIDGET (self));
+  gtk_window_present (dlg);
 }
 
 /* ── Keyboard Shortcuts dialog ──────────────────────────────────── */
 
 static void
-add_shortcut_row (AdwPreferencesGroup *group, const char *title,
-                  const char *accel)
+add_shortcut_row (GtkListBox *group, const char *title, const char *accel)
 {
-  AdwActionRow *row = ADW_ACTION_ROW (adw_action_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), title);
-
   GtkWidget *label = gtk_shortcut_label_new (accel);
-  gtk_widget_set_valign (label, GTK_ALIGN_CENTER);
-  adw_action_row_add_suffix (row, label);
-
-  adw_preferences_group_add (group, GTK_WIDGET (row));
+  gtk_list_box_append (group, fw_value_row (title, NULL, label));
 }
 
 static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
@@ -1267,30 +1372,15 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   (void)a; (void)p;
   FwWindow *self = d;
 
-  AdwDialog *dlg = adw_dialog_new ();
-  adw_dialog_set_title (dlg, "Keyboard Shortcuts");
-  adw_dialog_set_content_width (dlg, 520);
-  adw_dialog_set_content_height (dlg, 640);
+  GtkBox *page = NULL;
+  GtkWindow *dlg = fw_dialog_new (self, "Keyboard Shortcuts", 520, 640, &page);
 
-  GtkWidget *toolbar = adw_toolbar_view_new ();
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar),
-                                 adw_header_bar_new ());
-  adw_dialog_set_child (dlg, toolbar);
-
-  GtkWidget *page = adw_preferences_page_new ();
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
-
-  AdwPreferencesGroup *g_file =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_file, "File");
+  GtkListBox *g_file = fw_pref_group (page, "File", NULL);
   add_shortcut_row (g_file, "Open",  "<Control>o");
   add_shortcut_row (g_file, "Print", "<Control>p");
   add_shortcut_row (g_file, "Quit",  "<Control>q <Control>w");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_file);
 
-  AdwPreferencesGroup *g_nav =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_nav, "Navigation");
+  GtkListBox *g_nav = fw_pref_group (page, "Navigation", NULL);
   add_shortcut_row (g_nav, "Next page",     "Page_Down");
   add_shortcut_row (g_nav, "Previous page", "Page_Up");
   add_shortcut_row (g_nav, "First page",    "Home");
@@ -1298,11 +1388,8 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   add_shortcut_row (g_nav, "Go to page…",   "<Control>g");
   add_shortcut_row (g_nav, "Go back",       "<Alt>Left");
   add_shortcut_row (g_nav, "Go forward",    "<Alt>Right");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_nav);
 
-  AdwPreferencesGroup *g_zoom =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_zoom, "Zoom & Rotation");
+  GtkListBox *g_zoom = fw_pref_group (page, "Zoom & Rotation", NULL);
   add_shortcut_row (g_zoom, "Zoom in",                  "<Control>plus");
   add_shortcut_row (g_zoom, "Zoom out",                 "<Control>minus");
   add_shortcut_row (g_zoom, "Actual size",              "<Control>0");
@@ -1310,56 +1397,38 @@ static void act_shortcuts (GSimpleAction *a, GVariant *p, gpointer d)
   add_shortcut_row (g_zoom, "Fit page",                 "<Control>2");
   add_shortcut_row (g_zoom, "Rotate clockwise",         "<Control><Shift>plus");
   add_shortcut_row (g_zoom, "Rotate counter-clockwise", "<Control><Shift>minus");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_zoom);
 
-  AdwPreferencesGroup *g_search =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_search, "Search");
+  GtkListBox *g_search = fw_pref_group (page, "Search", NULL);
   add_shortcut_row (g_search, "Find",          "<Control>f");
   add_shortcut_row (g_search, "Find next",     "F3");
   add_shortcut_row (g_search, "Find previous", "<Shift>F3");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_search);
 
-  AdwPreferencesGroup *g_view =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_view, "View");
+  GtkListBox *g_view = fw_pref_group (page, "View", NULL);
   add_shortcut_row (g_view, "Toggle sidebar",   "F9");
   add_shortcut_row (g_view, "Fullscreen",       "F11");
   add_shortcut_row (g_view, "Invert colors",    "<Control>i");
   add_shortcut_row (g_view, "Reading ruler",    "F8");
   add_shortcut_row (g_view, "Magnifying loupe", "F7");
   add_shortcut_row (g_view, "Crop margins",     "F6");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_view);
 
-  AdwPreferencesGroup *g_comic =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_comic, "Comic Layout");
-  add_shortcut_row (g_comic, "Manga mode (RTL)",      "F4");
-  add_shortcut_row (g_comic, "Webtoon mode",          "F5");
-  add_shortcut_row (g_comic, "Facing pages",          "F10");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_comic);
+  GtkListBox *g_comic = fw_pref_group (page, "Comic Layout", NULL);
+  add_shortcut_row (g_comic, "Manga mode (RTL)", "F4");
+  add_shortcut_row (g_comic, "Webtoon mode",     "F5");
+  add_shortcut_row (g_comic, "Facing pages",     "F10");
 
-  AdwPreferencesGroup *g_sel =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (g_sel, "Selection");
+  GtkListBox *g_sel = fw_pref_group (page, "Selection", NULL);
   add_shortcut_row (g_sel, "Copy", "<Control>c");
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), g_sel);
 
-  adw_dialog_present (dlg, GTK_WIDGET (self));
+  gtk_window_present (dlg);
 }
 
 /* ── Document Properties dialog ─────────────────────────────────── */
 
 static void
-add_property_row (AdwPreferencesGroup *group, const char *title,
-                  const char *value)
+add_property_row (GtkListBox *group, const char *title, const char *value)
 {
   if (!value || !*value) return;
-  AdwActionRow *row = ADW_ACTION_ROW (adw_action_row_new ());
-  adw_preferences_row_set_title (ADW_PREFERENCES_ROW (row), title);
-  adw_action_row_set_subtitle (row, value);
-  adw_action_row_set_subtitle_selectable (row, TRUE);
-  adw_preferences_group_add (group, GTK_WIDGET (row));
+  gtk_list_box_append (group, fw_value_row (title, value, NULL));
 }
 
 static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
@@ -1368,25 +1437,13 @@ static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
   FwWindow *self = d;
   if (!self->document) return;
 
-  AdwDialog *dlg = adw_dialog_new ();
-  adw_dialog_set_title (dlg, "Document Properties");
-  adw_dialog_set_content_width (dlg, 480);
-  adw_dialog_set_content_height (dlg, 560);
-
-  GtkWidget *toolbar = adw_toolbar_view_new ();
-  adw_toolbar_view_add_top_bar (ADW_TOOLBAR_VIEW (toolbar),
-                                 adw_header_bar_new ());
-  adw_dialog_set_child (dlg, toolbar);
-
-  GtkWidget *page = adw_preferences_page_new ();
-  adw_toolbar_view_set_content (ADW_TOOLBAR_VIEW (toolbar), page);
+  GtkBox *page = NULL;
+  GtkWindow *dlg = fw_dialog_new (self, "Document Properties", 480, 560, &page);
 
   GHashTable *meta = fw_document_get_metadata (self->document);
 
   /* Document group — backend metadata (title, author, dates, etc.) */
-  AdwPreferencesGroup *doc_group =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (doc_group, "Document");
+  GtkListBox *doc_group = fw_pref_group (page, "Document", NULL);
   if (meta) {
     add_property_row (doc_group, "Title",    g_hash_table_lookup (meta, "title"));
     add_property_row (doc_group, "Author",   g_hash_table_lookup (meta, "author"));
@@ -1397,13 +1454,9 @@ static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
     add_property_row (doc_group, "Created",  g_hash_table_lookup (meta, "creation-date"));
     add_property_row (doc_group, "Modified", g_hash_table_lookup (meta, "modification-date"));
   }
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), doc_group);
 
   /* File group — derived from the open path + backend format/encryption */
-  AdwPreferencesGroup *file_group =
-    ADW_PREFERENCES_GROUP (adw_preferences_group_new ());
-  adw_preferences_group_set_title (file_group, "File");
-
+  GtkListBox *file_group = fw_pref_group (page, "File", NULL);
   if (self->file_path) {
     g_autofree char *basename = g_path_get_basename (self->file_path);
     add_property_row (file_group, "Filename", basename);
@@ -1423,30 +1476,31 @@ static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
   g_autofree char *pages =
     g_strdup_printf ("%d", fw_document_get_page_count (self->document));
   add_property_row (file_group, "Pages", pages);
-  adw_preferences_page_add (ADW_PREFERENCES_PAGE (page), file_group);
 
   if (meta) g_hash_table_unref (meta);
 
-  adw_dialog_present (dlg, GTK_WIDGET (self));
+  gtk_window_present (dlg);
 }
 
 static void act_about (GSimpleAction *a, GVariant *p, gpointer d)
 {
   (void)a;(void)p;
   FwWindow *w = d;
-  AdwAboutDialog *dlg = ADW_ABOUT_DIALOG (adw_about_dialog_new ());
-  adw_about_dialog_set_application_name (dlg, "Framework");
-  adw_about_dialog_set_version (dlg, APP_VERSION);
-  adw_about_dialog_set_comments (dlg,
-    "A fast, native GNOME document viewer built on MuPDF and DjVuLibre.");
-  adw_about_dialog_set_application_icon (dlg, APP_ID);
-  adw_about_dialog_set_license_type (dlg, GTK_LICENSE_GPL_3_0);
-  adw_about_dialog_set_website (dlg, "https://github.com/VirInvictus/Framework");
-  adw_about_dialog_set_issue_url (dlg,
-    "https://github.com/VirInvictus/Framework/issues");
   const char *developers[] = { "Brandon LaRocque", NULL };
-  adw_about_dialog_set_developers (dlg, developers);
-  adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (w));
+  /* GtkAboutDialog has no issue-url; the repo website covers it. */
+  GtkAboutDialog *dlg = GTK_ABOUT_DIALOG (gtk_about_dialog_new ());
+  gtk_window_set_transient_for (GTK_WINDOW (dlg), GTK_WINDOW (w));
+  gtk_window_set_modal (GTK_WINDOW (dlg), TRUE);
+  gtk_about_dialog_set_program_name (dlg, "Framework");
+  gtk_about_dialog_set_version (dlg, APP_VERSION);
+  gtk_about_dialog_set_comments (dlg,
+    "A fast, native document viewer built on MuPDF and DjVuLibre.");
+  gtk_about_dialog_set_logo_icon_name (dlg, APP_ID);
+  gtk_about_dialog_set_license_type (dlg, GTK_LICENSE_GPL_3_0);
+  gtk_about_dialog_set_website (dlg, "https://github.com/VirInvictus/Framework");
+  gtk_about_dialog_set_website_label (dlg, "Project homepage");
+  gtk_about_dialog_set_authors (dlg, developers);
+  gtk_window_present (GTK_WINDOW (dlg));
 }
 
 /* ── Arrow key scrolling & Ctrl+Scroll zoom ─────────────────────── */
@@ -1651,14 +1705,17 @@ fw_window_constructed (GObject *object)
   gtk_window_set_title (GTK_WINDOW (self), "Framework");
 
   /* Header chrome that the reflow path manipulates needs to exist
-   * before adw_header_bar_pack_end references it. */
+   * before gtk_header_bar_pack_end references it. */
   self->reflow_page_label = GTK_LABEL (gtk_label_new (""));
   gtk_widget_set_size_request (GTK_WIDGET (self->reflow_page_label), 140, -1);
   gtk_widget_add_css_class    (GTK_WIDGET (self->reflow_page_label), "dim-label");
   gtk_widget_set_visible      (GTK_WIDGET (self->reflow_page_label), FALSE);
 
   /* ── Header bar ── */
-  self->header_bar = ADW_HEADER_BAR (adw_header_bar_new ());
+  self->header_bar = GTK_HEADER_BAR (gtk_header_bar_new ());
+  /* Tiling-first CSD posture (v0.80.0): the compositor owns window
+   * controls; hide the client-side buttons. Ctrl+Q quits (app.quit). */
+  gtk_header_bar_set_show_title_buttons (self->header_bar, FALSE);
 
   /* Left: sidebar toggle */
   self->sidebar_button = GTK_BUTTON (gtk_button_new_from_icon_name (
@@ -1667,7 +1724,7 @@ fw_window_constructed (GObject *object)
                                "Toggle Sidebar (F9)");
   g_signal_connect (self->sidebar_button, "clicked",
                     G_CALLBACK (sidebar_clicked), self);
-  adw_header_bar_pack_start (self->header_bar,
+  gtk_header_bar_pack_start (self->header_bar,
                               GTK_WIDGET (self->sidebar_button));
 
   /* Left: zoom controls */
@@ -1675,7 +1732,7 @@ fw_window_constructed (GObject *object)
     "zoom-out-symbolic"));
   g_signal_connect (self->zoom_out_button, "clicked",
                     G_CALLBACK (zoom_out_clicked), self);
-  adw_header_bar_pack_start (self->header_bar,
+  gtk_header_bar_pack_start (self->header_bar,
                               GTK_WIDGET (self->zoom_out_button));
 
   self->zoom_entry = GTK_ENTRY (gtk_entry_new ());
@@ -1683,20 +1740,20 @@ fw_window_constructed (GObject *object)
   gtk_entry_set_alignment (self->zoom_entry, 0.5);
   g_signal_connect (self->zoom_entry, "activate",
                     G_CALLBACK (zoom_entry_activated), self);
-  adw_header_bar_pack_start (self->header_bar,
+  gtk_header_bar_pack_start (self->header_bar,
                               GTK_WIDGET (self->zoom_entry));
 
   self->zoom_in_button = GTK_BUTTON (gtk_button_new_from_icon_name (
     "zoom-in-symbolic"));
   g_signal_connect (self->zoom_in_button, "clicked",
                     G_CALLBACK (zoom_in_clicked), self);
-  adw_header_bar_pack_start (self->header_bar,
+  gtk_header_bar_pack_start (self->header_bar,
                               GTK_WIDGET (self->zoom_in_button));
 
   /* Title */
   self->title_label = GTK_LABEL (gtk_label_new ("Framework"));
   gtk_label_set_ellipsize (self->title_label, PANGO_ELLIPSIZE_END);
-  adw_header_bar_set_title_widget (self->header_bar,
+  gtk_header_bar_set_title_widget (self->header_bar,
                                     GTK_WIDGET (self->title_label));
 
   /* Right: primary menu */
@@ -1733,7 +1790,7 @@ fw_window_constructed (GObject *object)
   GtkMenuButton *menu_button = GTK_MENU_BUTTON (gtk_menu_button_new ());
   gtk_menu_button_set_icon_name (menu_button, "open-menu-symbolic");
   gtk_menu_button_set_menu_model (menu_button, G_MENU_MODEL (menu));
-  adw_header_bar_pack_end (self->header_bar, GTK_WIDGET (menu_button));
+  gtk_header_bar_pack_end (self->header_bar, GTK_WIDGET (menu_button));
   g_object_unref (menu);
   g_object_unref (zoom_section);
 
@@ -1745,7 +1802,7 @@ fw_window_constructed (GObject *object)
                                "Find (Ctrl+F)");
   g_signal_connect (self->search_toggle, "toggled",
                     G_CALLBACK (search_toggled), self);
-  adw_header_bar_pack_end (self->header_bar,
+  gtk_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->search_toggle));
 
   /* Right: page navigation */
@@ -1753,14 +1810,14 @@ fw_window_constructed (GObject *object)
     "go-down-symbolic"));
   g_signal_connect (self->next_page_button, "clicked",
                     G_CALLBACK (next_page_clicked), self);
-  adw_header_bar_pack_end (self->header_bar,
+  gtk_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->next_page_button));
 
   self->prev_page_button = GTK_BUTTON (gtk_button_new_from_icon_name (
     "go-up-symbolic"));
   g_signal_connect (self->prev_page_button, "clicked",
                     G_CALLBACK (prev_page_clicked), self);
-  adw_header_bar_pack_end (self->header_bar,
+  gtk_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->prev_page_button));
 
   self->page_entry = GTK_ENTRY (gtk_entry_new ());
@@ -1768,13 +1825,13 @@ fw_window_constructed (GObject *object)
   gtk_entry_set_alignment (self->page_entry, 0.5);
   g_signal_connect (self->page_entry, "activate",
                     G_CALLBACK (page_entry_activated), self);
-  adw_header_bar_pack_end (self->header_bar,
+  gtk_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->page_entry));
   /* Reflow page label sits in the same slot — only one visible at a
    * time. pack_end stacks right-to-left so this lands just left of
    * the page entry, but with both invisible-by-default the visual
    * position is determined by which one we make visible. */
-  adw_header_bar_pack_end (self->header_bar,
+  gtk_header_bar_pack_end (self->header_bar,
                             GTK_WIDGET (self->reflow_page_label));
 
   /* ── Content area ── */
@@ -1857,18 +1914,36 @@ fw_window_constructed (GObject *object)
   gtk_widget_set_vexpand (GTK_WIDGET (overlay), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (overlay), TRUE);
 
-  /* Empty-state page shown when no document is open. */
-  AdwStatusPage *empty = ADW_STATUS_PAGE (adw_status_page_new ());
-  adw_status_page_set_icon_name (empty, APP_ID);
-  adw_status_page_set_title (empty, "Open a Document");
-  adw_status_page_set_description (empty,
+  /* Empty-state page shown when no document is open (owned composite,
+   * replacing AdwStatusPage). */
+  GtkBox *empty = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 12));
+  gtk_widget_add_css_class (GTK_WIDGET (empty), "status-page");
+  gtk_widget_set_halign (GTK_WIDGET (empty), GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (GTK_WIDGET (empty), GTK_ALIGN_CENTER);
+  gtk_widget_set_vexpand (GTK_WIDGET (empty), TRUE);
+  gtk_widget_set_hexpand (GTK_WIDGET (empty), TRUE);
+
+  GtkWidget *empty_icon = gtk_image_new_from_icon_name (APP_ID);
+  gtk_image_set_pixel_size (GTK_IMAGE (empty_icon), 96);
+  gtk_widget_add_css_class (empty_icon, "status-icon");
+  gtk_box_append (empty, empty_icon);
+
+  GtkWidget *empty_title = gtk_label_new ("Open a Document");
+  gtk_widget_add_css_class (empty_title, "status-title");
+  gtk_box_append (empty, empty_title);
+
+  GtkWidget *empty_desc = gtk_label_new (
     "Drop a PDF, DjVu, or CBZ file here, or use Ctrl+O.");
+  gtk_widget_add_css_class (empty_desc, "status-description");
+  gtk_widget_add_css_class (empty_desc, "dim-label");
+  gtk_box_append (empty, empty_desc);
+
   GtkButton *empty_btn = GTK_BUTTON (gtk_button_new_with_label ("Open File…"));
   gtk_actionable_set_action_name (GTK_ACTIONABLE (empty_btn), "app.open");
   gtk_widget_set_halign (GTK_WIDGET (empty_btn), GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_top (GTK_WIDGET (empty_btn), 6);
   gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "suggested-action");
-  gtk_widget_add_css_class (GTK_WIDGET (empty_btn), "pill");
-  adw_status_page_set_child (empty, GTK_WIDGET (empty_btn));
+  gtk_box_append (empty, GTK_WIDGET (empty_btn));
 
   /* WebKitGTK-backed reader — every reflow format renders here (EPUB /
    * MOBI / AZW3 / FB2 / TXT / Markdown). Constructed eagerly so the
@@ -1908,29 +1983,65 @@ fw_window_constructed (GObject *object)
   self->sidebar_scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (self->sidebar_scroll,
                                   GTK_WIDGET (self->sidebar));
+  gtk_widget_set_size_request (GTK_WIDGET (self->sidebar_scroll), 280, -1);
+  gtk_widget_add_css_class (GTK_WIDGET (self->sidebar_scroll), "sidebar-panel");
 
-  /* Split view */
-  self->split_view = ADW_OVERLAY_SPLIT_VIEW (adw_overlay_split_view_new ());
-  adw_overlay_split_view_set_sidebar (self->split_view,
-                                       GTK_WIDGET (self->sidebar_scroll));
-  adw_overlay_split_view_set_content (self->split_view,
-                                       GTK_WIDGET (self->content_stack));
-  adw_overlay_split_view_set_show_sidebar (self->split_view, FALSE);
-  adw_overlay_split_view_set_max_sidebar_width (self->split_view, 280);
-  gtk_widget_set_vexpand (GTK_WIDGET (self->split_view), TRUE);
+  /* ── Owned overlay stack (v0.80.0, replacing AdwOverlaySplitView +
+   * AdwToastOverlay). The content stack is the base; the TOC sidebar and
+   * the toast float on top and never influence content measurement, so a
+   * narrow tile is never squeezed. ── */
+  self->root_overlay = GTK_OVERLAY (gtk_overlay_new ());
+  gtk_overlay_set_child (self->root_overlay, GTK_WIDGET (self->content_stack));
 
-  /* ── Main box ── */
-  GtkBox *box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
-  gtk_box_append (box, GTK_WIDGET (self->header_bar));
-  gtk_box_append (box, GTK_WIDGET (self->split_view));
+  /* Floating TOC sidebar: a left-anchored revealer over the document,
+   * toggled by F9 / the header button, dismissed by clicking outside. */
+  self->sidebar_revealer = GTK_REVEALER (gtk_revealer_new ());
+  gtk_revealer_set_transition_type (self->sidebar_revealer,
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
+  gtk_revealer_set_transition_duration (self->sidebar_revealer, 200);
+  gtk_revealer_set_reveal_child (self->sidebar_revealer, FALSE);
+  gtk_revealer_set_child (self->sidebar_revealer,
+                          GTK_WIDGET (self->sidebar_scroll));
+  gtk_widget_set_halign (GTK_WIDGET (self->sidebar_revealer), GTK_ALIGN_START);
+  gtk_widget_set_valign (GTK_WIDGET (self->sidebar_revealer), GTK_ALIGN_FILL);
+  gtk_overlay_add_overlay (self->root_overlay,
+                           GTK_WIDGET (self->sidebar_revealer));
+  gtk_overlay_set_measure_overlay (self->root_overlay,
+                                   GTK_WIDGET (self->sidebar_revealer), FALSE);
 
-  /* Toast overlay wraps the entire content so AdwToasts (e.g.,
-   * "Document updated" on auto-reload) float above everything else. */
-  self->toast_overlay = ADW_TOAST_OVERLAY (adw_toast_overlay_new ());
-  adw_toast_overlay_set_child (self->toast_overlay, GTK_WIDGET (box));
+  /* Click-outside-to-dismiss: a capture-phase gesture on the content
+   * stack hides the sidebar and claims the click so it doesn't also hit
+   * a link/page underneath. */
+  GtkGesture *dismiss = GTK_GESTURE (gtk_gesture_click_new ());
+  gtk_event_controller_set_propagation_phase (
+    GTK_EVENT_CONTROLLER (dismiss), GTK_PHASE_CAPTURE);
+  g_signal_connect (dismiss, "pressed",
+                    G_CALLBACK (on_content_pressed_dismiss_sidebar), self);
+  gtk_widget_add_controller (GTK_WIDGET (self->content_stack),
+                             GTK_EVENT_CONTROLLER (dismiss));
 
-  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
-                                       GTK_WIDGET (self->toast_overlay));
+  /* Toast: a bottom-center revealer notification (replacing AdwToast). */
+  self->toast_label = GTK_LABEL (gtk_label_new (NULL));
+  gtk_label_set_wrap (self->toast_label, TRUE);
+  gtk_label_set_max_width_chars (self->toast_label, 60);
+  gtk_widget_add_css_class (GTK_WIDGET (self->toast_label), "toast");
+  self->toast_revealer = GTK_REVEALER (gtk_revealer_new ());
+  gtk_revealer_set_transition_type (self->toast_revealer,
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+  gtk_revealer_set_transition_duration (self->toast_revealer, 200);
+  gtk_revealer_set_reveal_child (self->toast_revealer, FALSE);
+  gtk_revealer_set_child (self->toast_revealer, GTK_WIDGET (self->toast_label));
+  gtk_widget_set_halign (GTK_WIDGET (self->toast_revealer), GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (GTK_WIDGET (self->toast_revealer), GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->toast_revealer), 24);
+  gtk_overlay_add_overlay (self->root_overlay,
+                           GTK_WIDGET (self->toast_revealer));
+  gtk_overlay_set_measure_overlay (self->root_overlay,
+                                   GTK_WIDGET (self->toast_revealer), FALSE);
+
+  /* ── Window shell: flat titlebar + content ── */
+  gtk_window_set_titlebar (GTK_WINDOW (self), GTK_WIDGET (self->header_bar));
+  gtk_window_set_child (GTK_WINDOW (self), GTK_WIDGET (self->root_overlay));
 
   /* Initialize state */
   self->zoom = 1.0;
@@ -2042,7 +2153,7 @@ fw_window_constructed (GObject *object)
     for (gsize i = 0; i < G_N_ELEMENTS (style_keys); i++)
       g_signal_connect (self->settings, style_keys[i],
                         G_CALLBACK (on_reading_style_changed), self);
-    g_signal_connect (adw_style_manager_get_default (), "notify::dark",
+    g_signal_connect (fw_theme_get_default (), "notify::dark",
                       G_CALLBACK (on_reading_dark_changed), self);
   }
 
@@ -2183,14 +2294,29 @@ on_prefer_fixed_setting_changed (GSettings *settings, const char *key,
 
 /* ── Auto-reload via GFileMonitor ────────────────────────────────── */
 
+static gboolean
+toast_hide_cb (gpointer user_data)
+{
+  FwWindow *self = FW_WINDOW (user_data);
+  self->toast_hide_id = 0;
+  gtk_revealer_set_reveal_child (self->toast_revealer, FALSE);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 fw_window_show_toast (FwWindow *self, const char *text)
 {
-  if (!self->toast_overlay)
+  if (!self->toast_revealer)
     return;
-  AdwToast *toast = adw_toast_new (text);
-  adw_toast_set_timeout (toast, 2);
-  adw_toast_overlay_add_toast (self->toast_overlay, toast);
+  /* Newest-wins: cancel any pending auto-hide so back-to-back toasts
+   * don't dismiss each other early. */
+  if (self->toast_hide_id) {
+    g_source_remove (self->toast_hide_id);
+    self->toast_hide_id = 0;
+  }
+  gtk_label_set_text (self->toast_label, text);
+  gtk_revealer_set_reveal_child (self->toast_revealer, TRUE);
+  self->toast_hide_id = g_timeout_add_seconds (2, toast_hide_cb, self);
 }
 
 static gboolean
@@ -2309,7 +2435,7 @@ reading_theme_colors (FwWindow *self,
 {
   int theme = g_settings_get_enum (self->settings, "reading-theme");
   if (theme == 0)  /* system */
-    theme = adw_style_manager_get_dark (adw_style_manager_get_default ())
+    theme = fw_theme_get_dark (fw_theme_get_default ())
               ? 3 : 1;
   switch (theme) {
     case 2:  *fg = "#5b4636"; *bg = "#f4ecd8"; *link = "#8a5a2b"; break; /* sepia */
@@ -2362,12 +2488,12 @@ on_reading_style_changed (GSettings *settings, const char *key,
 }
 
 static void
-on_reading_dark_changed (GObject *style_manager, GParamSpec *pspec,
+on_reading_dark_changed (GObject *theme, GParamSpec *pspec,
                          gpointer user_data)
 {
-  (void) style_manager; (void) pspec;
+  (void) theme; (void) pspec;
   FwWindow *self = FW_WINDOW (user_data);
-  /* Only the "system" theme tracks the libadwaita dark preference. */
+  /* Only the "system" theme tracks the desktop dark preference. */
   if (g_settings_get_enum (self->settings, "reading-theme") == 0)
     apply_reading_style (self);
 }
@@ -2532,10 +2658,10 @@ fw_window_open_file (FwWindow *self, const char *path)
   self->document = fw_document_new_for_path (path, &error);
 
   if (!self->document) {
-    AdwAlertDialog *dlg = ADW_ALERT_DIALOG (
-      adw_alert_dialog_new ("Cannot Open Document", error->message));
-    adw_alert_dialog_add_response (dlg, "ok", "OK");
-    adw_dialog_present (ADW_DIALOG (dlg), GTK_WIDGET (self));
+    GtkAlertDialog *dlg = gtk_alert_dialog_new ("%s", "Cannot Open Document");
+    gtk_alert_dialog_set_detail (dlg, error->message);
+    gtk_alert_dialog_show (dlg, GTK_WINDOW (self));
+    g_object_unref (dlg);
     return;
   }
 
@@ -2706,6 +2832,11 @@ fw_window_dispose (GObject *object)
 
   fw_window_save_state (self);
   fw_window_stop_monitor (self);
+
+  if (self->toast_hide_id) {
+    g_source_remove (self->toast_hide_id);
+    self->toast_hide_id = 0;
+  }
 
   if (self->settings) {
     if (self->settings_kinetic_handler)

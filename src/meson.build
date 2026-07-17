@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 gtk_dep = dependency('gtk4', version: '>= 4.16')
-adw_dep = dependency('libadwaita-1', version: '>= 1.7')
 cairo_dep = dependency('cairo', version: '>= 1.18')
 glib_dep = dependency('glib-2.0', version: '>= 2.82')
 json_glib_dep = dependency('json-glib-1.0', version: '>= 1.10')
@@ -54,6 +53,7 @@ framework_lib_sources = files(
   'fw-debug.c',
   'fw-sandbox.c',
   'fw-fonts.c',
+  'fw-theme.c',
   'fw-webview.c',
 )
 
@@ -61,7 +61,6 @@ framework_main_sources = files('main.c')
 
 framework_deps = [
   gtk_dep,
-  adw_dep,
   cairo_dep,
   glib_dep,
   json_glib_dep,

@@ -159,12 +159,11 @@
       <summary>Color theme for EPUB reading (WebKit reflow path)</summary>
       <description>
         Reading theme for EPUB documents rendered through WebKitGTK.
-        'system' follows the libadwaita light/dark preference; 'light'
-        is dark text on near-white; 'sepia' is warm paper; 'dark' is a
-        Kanagawa Dragon-flavored dark. Sets CSS background / foreground /
-        link colors; applied live without reopening the document.
-        Other reflow formats (MOBI / AZW3 / FB2 / TXT) on the legacy
-        view ignore this for now.
+        'system' follows the desktop light/dark preference (read from the
+        settings portal); 'light' is dark text on near-white; 'sepia' is
+        warm paper; 'dark' is a Kanagawa Dragon-flavored dark. Sets CSS
+        background / foreground / link colors; applied live without
+        reopening the document.
       </description>
     </key>
 

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-libadwaita-4a86cf" alt="GTK4"></a>
+  <a href="https://www.gtk.org/"><img src="https://img.shields.io/badge/GTK4-Wayland-4a86cf" alt="GTK4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0"></a>
 </p>
 
@@ -13,13 +13,13 @@
 
 # Framework
 
-A fast, native GNOME document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, **AZW3**, and **Markdown** documents, and is engineered for performance — utilizing aggressive pre-caching and a modern libadwaita UI to provide a "SumatraPDF-like" experience for Linux.
+A fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, **AZW3**, and **Markdown** documents, and is engineered for performance — utilizing aggressive pre-caching and a tiling-first plain-GTK4 UI (an owned Kanagawa Dragon stylesheet, portal-driven dark/light) to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
-Linux document viewers often fall into two categories: feature-heavy clients (like Okular) that bring extensive dependencies to GNOME, or minimal MuPDF wrappers that lack a functional UI. Framework fills the gap by providing a native, high-performance GNOME solution that prioritizes rendering speed and kinetic scrolling without the bloat of an editor.
+Linux document viewers often fall into two categories: feature-heavy clients (like Okular) that bring extensive dependencies, or minimal MuPDF wrappers that lack a functional UI. Framework fills the gap by providing a native, high-performance GTK4 solution that prioritizes rendering speed and kinetic scrolling without the bloat of an editor.
 
-I'm not pretending I came up with the architecture. Framework is a deliberate synthesis: the cache + threading idioms of **SumatraPDF**, the zero-copy MuPDF→cairo pipeline and `GThreadPool` priority dispatch from **zathura-pdf-mupdf** / **zathura**, the magnifying loupe and double-spread detection from **YACReader**, and the native-GTK reflow architecture from **Foliate** (and its parser library **foliate-js**), all glued into a minimalist libadwaita UI for GNOME. Patterns are also borrowed from Sioyek, Plato, MComix, and Komikku where they had something specific to teach. Per-pattern attribution lives in the [Influences](#influences-and-borrowed-techniques) section below — every borrow is named with its upstream file:line and the Framework version it shipped in.
+I'm not pretending I came up with the architecture. Framework is a deliberate synthesis: the cache + threading idioms of **SumatraPDF**, the zero-copy MuPDF→cairo pipeline and `GThreadPool` priority dispatch from **zathura-pdf-mupdf** / **zathura**, the magnifying loupe and double-spread detection from **YACReader**, and the WebKitGTK reflow architecture from **Foliate** (and its parser library **foliate-js**), all glued into a minimalist plain-GTK4 UI under an owned stylesheet. Patterns are also borrowed from Sioyek, Plato, MComix, and Komikku where they had something specific to teach. Per-pattern attribution lives in the [Influences](#influences-and-borrowed-techniques) section below — every borrow is named with its upstream file:line and the Framework version it shipped in.
 
 ## Features
 
@@ -113,8 +113,7 @@ You can also drop a file directly onto the window to open it.
 
 | Dependency | Purpose |
 |------------|---------|
-| gtk4 (4.16+) | UI toolkit |
-| libadwaita (1.7+) | GNOME design patterns |
+| gtk4 (4.16+) | UI toolkit (plain GTK4; libadwaita dropped in v0.80.0) |
 | mupdf (1.24+) | PDF / CBZ / XPS rendering (and fallback ebook layout) |
 | djvulibre (3.5.28+) | DjVu rendering |
 | libarchive (3.6+) | CBR (RAR) decompression and EPUB (ZIP) reading |
@@ -130,7 +129,7 @@ You can also drop a file directly onto the window to open it.
 On Fedora:
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel mupdf-devel djvulibre-devel \
+sudo dnf install gtk4-devel mupdf-devel djvulibre-devel \
                  libarchive-devel libxml2-devel webkitgtk6.0-devel \
                  fontconfig-devel cairo-devel glib2-devel json-glib-devel \
                  meson gcc
@@ -283,7 +282,8 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 
 ### Platform (system libraries, no source vendored)
 
-- **[GTK](https://www.gtk.org/)** (4.16+) and **[libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)** (1.7+) — UI toolkit. LGPL-2.1-or-later.
+- **[GTK](https://www.gtk.org/)** (4.16+) — UI toolkit (plain GTK4; the app owns its stylesheet, libadwaita was dropped in v0.80.0). LGPL-2.1-or-later.
+- **[WebKitGTK](https://webkitgtk.org/)** (6.0, 2.46+) — the web engine that renders the reflow formats (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown). LGPL-2.1 / BSD.
 - **[Cairo](https://www.cairographics.org/)** (1.18+) — image surface management, the buffer MuPDF and DjVuLibre render directly into. LGPL-2.1-or-later / MPL-1.1.
 - **[GLib](https://docs.gtk.org/glib/)** (2.82+) — data structures, threading (`GThreadPool`), GObject, async I/O via GIO (file monitoring, archives, portals). LGPL-2.1-or-later.
 - **[JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/)** (1.10+) — per-document state persistence at `$XDG_DATA_HOME/framework/state.json`. LGPL-2.1-or-later.
@@ -296,7 +296,7 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 - **[gettext](https://www.gnu.org/software/gettext/)** — i18n scaffolding (active translations are TBD; the infrastructure is wired).
 - **[gcc](https://gcc.gnu.org/)** / **[clang](https://clang.llvm.org/)** + **[AddressSanitizer / UndefinedBehaviorSanitizer](https://github.com/google/sanitizers)** — used during development; not shipping deps.
 
-Thanks to the [GNOME](https://www.gnome.org/) project for the platform that makes this kind of single-purpose viewer possible at all.
+Thanks to the [GTK](https://www.gtk.org/) project for the platform that makes this kind of single-purpose viewer possible at all.
 
 ## License
 

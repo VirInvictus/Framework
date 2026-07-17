@@ -22,6 +22,15 @@ install_data(
   install_dir: get_option('datadir') / 'glib-2.0' / 'schemas',
 )
 
+# Owned application stylesheet (v0.80.0 de-adwaita). Loaded at startup by
+# fw-theme.c from ${datadir}/framework/style.css (dev runs fall back to
+# the source tree). This is the single styling authority now that
+# libadwaita is gone.
+install_data(
+  'style.css',
+  install_dir: get_option('datadir') / 'framework',
+)
+
 gnome.compile_schemas(build_by_default: true)
 
 # Bundled reading fonts (Phase 13.1). Three OFL families:

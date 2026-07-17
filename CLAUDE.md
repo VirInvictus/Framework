@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Framework is a native GNOME multi-format document viewer (PDF, DjVu, CBZ, CB7, CBT, CBR, XPS, EPUB, FB2, MOBI, AZW3, Markdown) — C17, GTK4/libadwaita, Meson. It has **two render pipelines**: a velocity-driven pre-cache engine for fixed-layout formats (PDF/DjVu/comics/XPS), and a native-GTK reflow stack for ebook formats (EPUB/FB2/MOBI/AZW3/TXT) that bypasses MuPDF's fixed layout. Project version lives in `meson.build` (currently 0.65.0 — pre-1.0; see the v0.6.0 patchnote for why we backed off the earlier 1.x line). `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
+Framework is a native Linux (Hyprland-first, GNOME-compatible) multi-format document viewer (PDF, DjVu, CBZ, CB7, CBT, CBR, XPS, EPUB, FB2, MOBI, AZW3, Markdown) — C17, plain GTK4 under an owned Kanagawa Dragon stylesheet (libadwaita dropped in v0.80.0), Meson. It has **two render pipelines**: a velocity-driven pre-cache engine for fixed-layout formats (PDF/DjVu/comics/XPS), and a WebKitGTK reflow stack for ebook formats (EPUB/FB2/MOBI/AZW3/TXT/Markdown) that bypasses MuPDF's fixed layout. Project version lives in `meson.build`. `spec.md` is the authoritative design doc; `roadmap.md` tracks phase status; `patchnotes.md` is per-release notes.
 
 ## Build & run
 

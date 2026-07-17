@@ -2,6 +2,28 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.80.0 (2026-07-16)
+
+*Phase 19 Path A: libadwaita is gone. Framework is now plain GTK4 under an owned Kanagawa Dragon stylesheet, tiling-first for Hyprland while staying fully functional under GNOME. The Zig-rewrite question that gated this phase is settled: no rewrite, and de-adwaita shipped before the 1.0 release so 1.0 goes out already Hyprland-native.*
+
+### De-adwaita
+
+* **libadwaita dropped, GTK4 kept.** The binary no longer links libadwaita; the dependency is out of `meson.build`. Every `Adw*` widget was replaced with a plain-GTK4 equivalent, and the app now owns its entire look.
+* **Owned stylesheet.** New `data/style.css` is the single styling authority, loaded by the new `fw-theme.c` via a `GtkCssProvider` at `PRIORITY_USER + 1` (above a user's `~/.config/gtk-4.0/gtk.css`). Flat, square, 1px borders, no shadows, denser than adwaita. Kanagawa Dragon (dark) / Kanagawa Lotus (light) palettes as `@define-color` named colours.
+* **Portal-driven dark/light.** `fw-theme.c` reads the `org.freedesktop.portal.Settings` `color-scheme` preference over D-Bus and swaps the palette live on `SettingChanged`, with a dark default when no portal backend answers. No GNOME dependency; the reading "Follow System" theme tracks the same signal. (Replaces the old `AdwStyleManager`.)
+
+### The new shell
+
+* **Flat titlebar, hidden window buttons.** The header bar is a slim `GtkHeaderBar` promoted to the real titlebar with client-side window-control buttons off — the compositor owns them, and `Ctrl+Q` quits. GTK auto-hides the titlebar in fullscreen (F11), which suits a reader.
+* **Floating TOC sidebar.** The table-of-contents sidebar (F9) now floats over the document as a `GtkRevealer` in a `GtkOverlay`, dismissed by clicking outside, and never squeezes the page — deliberate for narrow tiles (it used to dock via `AdwOverlaySplitView`).
+* **Owned toasts.** The "Document updated" / extraction-summary notifications are now a bottom-center `GtkRevealer` (2s auto-dismiss, newest-wins), replacing `AdwToast`.
+* **Rebuilt dialogs.** Reading Settings, Keyboard Shortcuts, and Document Properties are now modal `GtkWindow`s built from owned `GtkListBox` "boxed-list" rows (Escape closes). Alerts use `GtkAlertDialog`, About uses `GtkAboutDialog`, and the empty state is an owned centered composite (was `AdwStatusPage`).
+
+### Notes
+
+* **No behavior regression.** Only the look and a few affordances changed; all keybindings, actions, search, reflow, and the publisher-styles toggle work as before, under both Hyprland and GNOME.
+* The Flatpak still builds against the `org.gnome.Platform` runtime (libadwaita was never a separate module there). The meson `gnome` module and the `GNOME` desktop/metainfo category tokens are unchanged — this release drops the GNOME *branding*, not the GTK platform.
+
 ## v0.79.0 (2026-07-16)
 
 *Phase 17.x closes Phase 17: EPUBs render with their own stylesheets and fonts, internal links and TOC navigation actually work across all reflow formats, and books can't touch the network.*
