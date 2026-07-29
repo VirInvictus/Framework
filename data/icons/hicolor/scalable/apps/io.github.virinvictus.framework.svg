@@ -1,41 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Framework application icon.
+     Palette is the app's own Kanagawa Dragon set (see src/fw-theme.c):
+     dragonBlack0 #181616, dragonBlack1 #1f1e1b, dragonBlack5 #393836,
+     dragonWhite #c5c9c5, dragonBlue2 #8ba4b0. Deliberately not Adwaita
+     blue — libadwaita was dropped in v0.80.0 and the app owns its theme. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#3584e4"/>
-      <stop offset="100%" stop-color="#1a5fb4"/>
-    </linearGradient>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#f0f0f0"/>
+    <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f1e1b"/>
+      <stop offset="100%" stop-color="#181616"/>
     </linearGradient>
   </defs>
 
-  <!-- Rounded app background -->
-  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- App base -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#base)"/>
+  <!-- Hairline edge so the icon still reads against a dark dock -->
+  <rect x="4.5" y="4.5" width="119" height="119" rx="27.5" fill="none"
+        stroke="#8ba4b0" stroke-width="1" opacity="0.25"/>
 
-  <!-- Outer frame — the "framework" -->
-  <rect x="20" y="14" width="88" height="100" rx="4" fill="none"
-        stroke="#ffffff" stroke-width="3" opacity="0.35"/>
+  <!-- The outer frame — the "framework" the document is held in -->
+  <rect x="18" y="16" width="92" height="96" rx="3" fill="none"
+        stroke="#8ba4b0" stroke-width="3" opacity="0.55"/>
 
-  <!-- Document page -->
-  <rect x="30" y="22" width="68" height="88" rx="3" fill="url(#page)"
-        filter="drop-shadow(0 2px 4px rgba(0,0,0,0.2))"/>
+  <!-- Document page, corner folded -->
+  <path d="M 28 28 H 86 L 100 42 V 102 H 28 Z" fill="#c5c9c5"/>
+  <!-- The turned corner, in the page's shadow tone -->
+  <path d="M 86 28 V 42 H 100 Z" fill="#a3a6a0"/>
 
-  <!-- Dog-ear fold -->
-  <path d="M 82 22 L 98 22 L 98 38 Z" fill="#e0e0e0"/>
-  <path d="M 82 22 L 82 38 L 98 38 Z" fill="#d0d0d0"/>
-
-  <!-- Text lines -->
-  <rect x="38" y="34" width="36" height="3.5" rx="1.5" fill="#1a5fb4" opacity="0.7"/>
-  <rect x="38" y="43" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="50" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="57" width="42" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="64" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="71" width="46" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="78" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="85" width="38" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="92" width="50" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
-  <rect x="38" y="99" width="30" height="3" rx="1.5" fill="#3d3d3d" opacity="0.4"/>
+  <!-- Heading rule, in the accent so the palette closes -->
+  <rect x="38" y="54" width="40" height="4" rx="2" fill="#8ba4b0"/>
+  <!-- Body rules -->
+  <rect x="38" y="66" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+  <rect x="38" y="74" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+  <rect x="38" y="82" width="46" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+  <rect x="38" y="90" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
 </svg>

@@ -1,54 +1,50 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Framework project logo: the application icon plus the wordmark.
+     The icon half is the byte-identical artwork from
+     data/icons/hicolor/scalable/apps/io.github.virinvictus.framework.svg,
+     dropped in through a nested viewBox so the two assets scale from one
+     set of coordinates and cannot drift apart the way they had before
+     (the icon moved to Kanagawa Dragon while this file stayed Adwaita blue).
+     No font is bundled or assumed: the wordmark names generic families and
+     ends at sans-serif. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="420" height="120" viewBox="0 0 420 120">
   <style>
-    .logo-text { fill: #1a1a1a; }
+    /* Kanagawa: dragonBlack1 on light, dragonWhite on dark */
+    .logo-text { fill: #1f1e1b; }
     @media (prefers-color-scheme: dark) {
-      .logo-text { fill: #f0f0f0; }
+      .logo-text { fill: #c5c9c5; }
     }
   </style>
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#3584e4"/>
-      <stop offset="100%" stop-color="#1a5fb4"/>
-    </linearGradient>
-    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#f0f0f0"/>
-    </linearGradient>
-  </defs>
 
-  <!-- Icon portion -->
-  <g transform="translate(10, 4)">
-    <!-- Rounded app background -->
-    <rect x="0" y="0" width="112" height="112" rx="24" fill="url(#bg)"/>
+  <!-- Icon portion — nested 128-unit viewBox, identical to the app icon -->
+  <svg x="8" y="4" width="112" height="112" viewBox="0 0 128 128">
+    <defs>
+      <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#1f1e1b"/>
+        <stop offset="100%" stop-color="#181616"/>
+      </linearGradient>
+    </defs>
 
-    <!-- Outer frame -->
-    <rect x="16" y="10" width="80" height="92" rx="4" fill="none"
-          stroke="#ffffff" stroke-width="2.5" opacity="0.35"/>
+    <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#base)"/>
+    <rect x="4.5" y="4.5" width="119" height="119" rx="27.5" fill="none"
+          stroke="#8ba4b0" stroke-width="1" opacity="0.25"/>
 
-    <!-- Document page -->
-    <rect x="24" y="17" width="64" height="80" rx="3" fill="url(#page)"/>
+    <rect x="18" y="16" width="92" height="96" rx="3" fill="none"
+          stroke="#8ba4b0" stroke-width="3" opacity="0.55"/>
 
-    <!-- Dog-ear -->
-    <path d="M 74 17 L 88 17 L 88 31 Z" fill="#e0e0e0"/>
-    <path d="M 74 17 L 74 31 L 88 31 Z" fill="#d0d0d0"/>
+    <path d="M 28 28 H 86 L 100 42 V 102 H 28 Z" fill="#c5c9c5"/>
+    <path d="M 86 28 V 42 H 100 Z" fill="#a3a6a0"/>
 
-    <!-- Text lines -->
-    <rect x="31" y="28" width="32" height="3" rx="1.5" fill="#1a5fb4" opacity="0.7"/>
-    <rect x="31" y="36" width="46" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="42" width="46" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="48" width="38" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="54" width="46" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="60" width="42" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="66" width="46" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="72" width="34" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="78" width="46" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-    <rect x="31" y="84" width="28" height="2.5" rx="1.2" fill="#3d3d3d" opacity="0.4"/>
-  </g>
+    <rect x="38" y="54" width="40" height="4" rx="2" fill="#8ba4b0"/>
+    <rect x="38" y="66" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+    <rect x="38" y="74" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+    <rect x="38" y="82" width="46" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+    <rect x="38" y="90" width="52" height="3" rx="1.5" fill="#393836" opacity="0.55"/>
+  </svg>
 
-  <!-- Text: "Framework" -->
-  <text x="140" y="72" font-family="Inter, Cantarell, sans-serif"
+  <!-- Wordmark -->
+  <text x="136" y="72" font-family="Inter, Cantarell, sans-serif"
         font-size="46" font-weight="700" class="logo-text"
         letter-spacing="-1">Framework</text>
 </svg>
