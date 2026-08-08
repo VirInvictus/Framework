@@ -38,11 +38,31 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
 | **Reflowable formats via WebKitGTK** | EPUB, MOBI/AZW3, FB2, TXT, and Markdown render through WebKitGTK (Phase 17): real text reflow with a serif reading font, light/sepia/dark themes, and live typography. The foliate-js-derived parsers (EPUB/MOBI/AZW3/FB2) and md4c (Markdown) feed stitched HTML to the WebView. Falls back to MuPDF fixed layout if an ebook won't parse. |
 
-## Screenshot
+## Screenshots
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4f2a77a5-76f1-4d56-8238-a3190bb1be2e" alt="Framework Screenshot" style="max-width: 100%; border-radius: 8px;">
+  <img src="data/screenshots/reading.png" alt="A technical PDF open in Framework, showing a colour figure and mathematics" width="900">
 </p>
+
+<p align="center"><em>A 1,677-page textbook at fit-page zoom. Continuous scroll, no page-turn seams.</em></p>
+
+<p align="center">
+  <img src="data/screenshots/contents.png" alt="The table-of-contents sidebar expanded to the section currently on screen" width="900">
+</p>
+
+<p align="center"><em>The table-of-contents sidebar (F9) follows the page you are on: it expands the ancestors and highlights the current section as you scroll. It floats over the page rather than squeezing it, so the reading column never reflows when you open it.</em></p>
+
+<p align="center">
+  <img src="data/screenshots/search.png" alt="Search results highlighted across two pages with a live match counter" width="900">
+</p>
+
+<p align="center"><em>Search runs on a worker thread and surfaces hits as it finds them, so the counter climbs while you read. The active hit is orange, the rest are yellow.</em></p>
+
+<p align="center">
+  <img src="data/screenshots/reflow.png" alt="An EPUB rendered as reflowed serif prose in a dark reading theme" width="900">
+</p>
+
+<p align="center"><em>EPUB, MOBI, AZW3, FB2, and Markdown go through the WebKitGTK reflow pipeline instead of being laid out as fixed pages: real reflowed text, a serif reading font, and light, sepia, or dark themes.</em></p>
 
 ## Keyboard shortcuts
 
