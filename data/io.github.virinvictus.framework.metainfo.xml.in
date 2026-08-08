@@ -81,40 +81,95 @@
   </screenshots>
   -->
 
+  <!-- Curated milestones, not every point release: AppStream is a changelog for
+       users, and software centers show only the most recent entries. Full
+       per-release detail lives in patchnotes.md. Add an entry here only when a
+       release changes something a reader would notice. Never list a version
+       that has not shipped. -->
   <releases>
+    <release version="0.82.0" date="2026-07-17">
+      <description>
+        <p>AZW3 and KF8 books now render with their own publisher stylesheets, and publisher CSS no longer glares against a dark reading theme.</p>
+      </description>
+    </release>
+    <release version="0.81.0" date="2026-07-17">
+      <description>
+        <p>Tiling-first geometry: fit-width and fit-page track the viewport as a tile resizes, and Framework no longer fights the compositor over the size of a tiled window.</p>
+      </description>
+    </release>
+    <release version="0.80.0" date="2026-07-16">
+      <description>
+        <p>Framework is now plain GTK4 under its own Kanagawa Dragon stylesheet, with dark and light following the desktop portal preference. No libadwaita, and no GNOME dependency.</p>
+      </description>
+    </release>
+    <release version="0.79.0" date="2026-07-16">
+      <description>
+        <p>EPUBs render with their own stylesheets and embedded fonts, with a "Publisher styles" toggle. Internal links and table-of-contents navigation work across every reflow format, and books cannot reach the network.</p>
+      </description>
+    </release>
+    <release version="0.78.0" date="2026-07-16">
+      <description>
+        <p>Security hardening: scripts, inline event handlers, and javascript: URLs are stripped out of ebook HTML before it reaches the renderer, and the Landlock execute-permission drop is back.</p>
+      </description>
+    </release>
+    <release version="0.75.0" date="2026-05-28">
+      <description>
+        <p>Markdown (.md) is a supported format, rendered with GitHub-flavored syntax and the same reading themes and typography as the other reflowable formats.</p>
+      </description>
+    </release>
+    <release version="0.70.0" date="2026-05-28">
+      <description>
+        <p>Comics whose pages carry inconsistent embedded DPI now render at a uniform size, fixing the "every other page is a tiny thumbnail" look on some scanlated CBZ files.</p>
+      </description>
+    </release>
+    <release version="0.69.0" date="2026-05-28">
+      <description>
+        <p>Fit-width sizes to the typical body page, so an oversized cover or a centerfold spread no longer shrinks every normal page. CBR comics learn their real page sizes in the background.</p>
+      </description>
+    </release>
+    <release version="0.67.0" date="2026-05-27">
+      <description>
+        <p>AZW3 and KF8 books get a working table of contents, ebooks show a "% read" progress indicator, and a new toggle forces reflowable formats through the fixed-page renderer.</p>
+      </description>
+    </release>
+    <release version="0.66.0" date="2026-05-27">
+      <description>
+        <p>Ctrl+F now searches inside EPUB, FB2, MOBI, AZW3, and plain-text documents, with match highlighting.</p>
+      </description>
+    </release>
+    <release version="0.52.0" date="2026-05-02">
+      <description>
+        <p>MOBI support: Kindle .mobi files open with full text through a native parser.</p>
+      </description>
+    </release>
+    <release version="0.42.0" date="2026-05-02">
+      <description>
+        <p>EPUB support on the reflow pipeline: real reflowed text with a proper table of contents, rather than a fixed page layout.</p>
+      </description>
+    </release>
+    <release version="0.40.0" date="2026-05-02">
+      <description>
+        <p>The reflow pipeline arrives. Reflowable ebook formats get their own render path instead of being laid out as fixed pages.</p>
+      </description>
+    </release>
+    <release version="0.38.0" date="2026-05-01">
+      <description>
+        <p>Landlock sandboxing: Framework drops filesystem execute permission at startup, so a malicious document that exploits a parser cannot launch a program.</p>
+      </description>
+    </release>
+    <release version="0.21.0" date="2026-04-30">
+      <description>
+        <p>Automatic reload. Recompile a LaTeX or Typst document and Framework refreshes it, restoring the exact scroll position and zoom.</p>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-04-30">
       <description>
-        <p>Phase 9 — Session Resilience: Document Properties dialog and Keyboard Shortcuts dialog (Ctrl+? / F1).</p>
-      </description>
-    </release>
-    <release version="0.11.0" date="2026-04-30">
-      <description>
-        <p>XPS / EPUB / FB2 / MOBI support, real CBR via libarchive, embedded file extraction, and a GtkListView-based TOC sidebar rewrite.</p>
-      </description>
-    </release>
-    <release version="0.10.0" date="2026-04-30">
-      <description>
-        <p>Empty-window state with drag-and-drop file open, and printing via GtkPrintOperation (Ctrl+P).</p>
-      </description>
-    </release>
-    <release version="0.9.0" date="2026-04-30">
-      <description>
-        <p>Comic-book archive support — CBZ files now open through the MuPDF backend.</p>
-      </description>
-    </release>
-    <release version="0.8.0" date="2026-04-30">
-      <description>
-        <p>TOC sidebar follows the current page; navigation history with Alt+Left / Alt+Right; internal link click navigation.</p>
-      </description>
-    </release>
-    <release version="0.7.0" date="2026-04-30">
-      <description>
-        <p>Async progressive search with live highlighting, F3/Shift+F3 navigation, and "3 of 47" match counts.</p>
+        <p>Document Properties and Keyboard Shortcuts dialogs (Ctrl+? / F1).</p>
       </description>
     </release>
     <release version="0.6.0" date="2026-04-29">
       <description>
-        <p>Honest pre-1.0 versioning. Earlier 1.x release labels are preserved in patch notes as historical record.</p>
+        <p>Honest pre-1.0 versioning. Earlier 1.x release labels are preserved in the patch notes as historical record.</p>
       </description>
     </release>
   </releases>
