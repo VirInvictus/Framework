@@ -348,3 +348,20 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] Presentation mode (page-at-a-time, no chrome)
 - [ ] Smooth pinch-to-zoom on touchscreens
 - [ ] Configurable keybindings via GSettings
+
+## Phase 19: Code Sweep & Stability Hardening (2026-08-23)
+*Context: Identified permanent cancellation locks and memory leaks during sweep.*
+
+### Bugs to Fix
+- [ ] **Critical CBR Cancellation Lock:** Reset `cancel_flag` after cancellation in `fw-document-cbr.c`. Currently, cancelling one comic render breaks all future renders permanently.
+- [ ] **Stuck Search Indicator:** Clear `self->worker = NULL` after `search_worker` finishes so the UI doesn't permanently display "Searching...".
+- [ ] **NULL Pointer Dereference:** Guard trace logging in `fw_document_new_for_path` when `error == NULL`.
+- [ ] **Theme Portal Logic & Leaks:** Fix inverted scheme check (portal 0 must default to dark) and unref the `GVariant` child in `query_dark()`.
+- [ ] **File Dialog Leak:** Unref `GtkFileDialog` in the application open action.
+- [ ] **MOBI Error Leaks:** Free `huffcdic` tables on error paths in the MOBI parser.
+
+### Refactoring & Growth
+- [ ] **Unify Cancellation Pattern:** Switch the CBR backend from binary flags to the monotonic generation counter (`cancel_gen`) used by DjVu.
+- [ ] **Extract Dialog Rows:** Move custom GTK4 boxed list and row helpers out of `fw-window.c` (3,030 lines) into `fw-dialog-widgets.c`.
+- [ ] **ComicInfo.xml Parsing:** Extract embedded `ComicInfo.xml` metadata in CBR/CBZ files to populate the document properties dialog.
+- [ ] **Reflow Scroll Percentage:** Display fractional reading progress in the header bar during WebKit EPUB renders.
