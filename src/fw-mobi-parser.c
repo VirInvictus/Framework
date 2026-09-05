@@ -1175,6 +1175,9 @@ fw_mobi_parse (const char *path, GError **error)
    * trailing-data stripping before LZ77 (matches foliate's
    * loadText: removeTrailingEntries → decompress). */
   if (text_records == 0 || (gsize) text_records >= record_count) {
+    /* HuffDic built its tables above when compression == 17480; this is
+     * the only error return after that point that didn't free them. */
+    huffcdic_free (huff);
     g_free (meta_title); g_free (meta_author);
     g_free (meta_publisher); g_free (meta_language);
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
