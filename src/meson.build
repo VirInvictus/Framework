@@ -54,6 +54,7 @@ framework_lib_sources = files(
   'fw-sandbox.c',
   'fw-fonts.c',
   'fw-theme.c',
+  'fw-dialog-widgets.c',
   'fw-webview.c',
 )
 
