@@ -304,7 +304,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 *From the full-codebase audit after the reflow-search work. The codebase is in good shape; these are refinements, not rot. Items marked done were applied during the audit pass; the rest are tracked for when they're worth the change. None are blockers.*
 
 ### Remaining (lower priority — none are blockers)
-- [ ] **Split `fw-window.c` (2551 lines)** — cleanly sectioned but large. Extraction candidates: the three dialogs (~360 lines → `fw-dialogs.c`) and the ~400-line `build_ui` constructor (→ `build_header_bar` / `build_search_bar` / … helpers). Cohesive as-is, so this is polish. (Explicitly deferred in v0.67.0: high churn / low value, best done alongside the Phase 15 1.0 restructuring.)
+- [ ] **Split `fw-window.c` (2,936 lines after the v0.83.0 dialog-helpers extraction; 2,551 when this box was written, 3,030 at the Phase 20 sweep)** — cleanly sectioned but large. The dialog/row helpers moved out in v0.83.0 (`fw-dialog-widgets.c`); remaining extraction candidates are the ~400-line `build_ui` constructor (→ `build_header_bar` / `build_search_bar` / … helpers) and the action handlers. Cohesive as-is, so this is polish. (Explicitly deferred in v0.67.0: high churn / low value, best done alongside the Phase 15 1.0 restructuring.)
 
 ### Done in v0.67.0 (the rest of the audit list + format/feature items)
 - [x] **DjVu `get_text` rectangle filtering** — selection now copies only the words inside the rect (DjVu bottom-left pixel space, y-flipped) instead of the whole page. Coordinate convention is DjVu's documented one; precision worth an in-app confirm.
