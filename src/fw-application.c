@@ -71,7 +71,10 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   if (!win)
     return;
 
-  GtkFileDialog *dialog = gtk_file_dialog_new ();
+  /* gtk_file_dialog_open does not take ownership of the dialog; keep
+   * it alive only for this call (the async callback reads the finished
+   * result off the source object, not off this instance). */
+  g_autoptr (GtkFileDialog) dialog = gtk_file_dialog_new ();
   gtk_file_dialog_set_title (dialog, "Open Document");
 
   GtkFileFilter *filter = gtk_file_filter_new ();
