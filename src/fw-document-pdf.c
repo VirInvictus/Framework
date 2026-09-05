@@ -10,6 +10,7 @@
  */
 
 #include "fw-document-pdf.h"
+#include "fw-comicinfo.h"
 #include "fw-debug.h"
 
 #include <gio/gio.h>
@@ -1292,6 +1293,30 @@ pdf_get_metadata (FwDocument *doc)
                fz_caught_message (self->ctx));
   }
   g_mutex_unlock (&self->lock);
+
+  /* Comic archives routed here (CBZ/CB7/CBT) carry their metadata as a
+   * ComicInfo.xml sidecar MuPDF knows nothing about. Walk the archive
+   * for it (cheap: ZIP/7z/tar have directories) and fill only the keys
+   * MuPDF didn't supply, so a PDF's own Info dict stays authoritative
+   * for PDFs. Runs outside self->lock: no fz state involved. */
+  {
+    const char *dot = self->path ? strrchr (self->path, '.') : NULL;
+    if (dot && (!g_ascii_strcasecmp (dot, ".cbz") ||
+                !g_ascii_strcasecmp (dot, ".cb7") ||
+                !g_ascii_strcasecmp (dot, ".cbt"))) {
+      GHashTable *comic = fw_comicinfo_extract_from_path (self->path);
+      if (comic) {
+        GHashTableIter it;
+        gpointer k, v;
+        g_hash_table_iter_init (&it, comic);
+        while (g_hash_table_iter_next (&it, &k, &v)) {
+          if (!g_hash_table_contains (out, k))
+            g_hash_table_insert (out, g_strdup (k), g_strdup (v));
+        }
+        g_hash_table_unref (comic);
+      }
+    }
+  }
 
   if (g_hash_table_size (out) == 0) {
     g_hash_table_unref (out);

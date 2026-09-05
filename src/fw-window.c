@@ -1381,6 +1381,14 @@ static void act_properties (GSimpleAction *a, GVariant *p, gpointer d)
     add_property_row (doc_group, "Producer", g_hash_table_lookup (meta, "producer"));
     add_property_row (doc_group, "Created",  g_hash_table_lookup (meta, "creation-date"));
     add_property_row (doc_group, "Modified", g_hash_table_lookup (meta, "modification-date"));
+    /* ComicInfo.xml extras (v0.83.0) — present only when the comic
+     * archive carries the sidecar; absent keys are skipped. */
+    add_property_row (doc_group, "Series",    g_hash_table_lookup (meta, "series"));
+    add_property_row (doc_group, "Number",    g_hash_table_lookup (meta, "number"));
+    add_property_row (doc_group, "Volume",    g_hash_table_lookup (meta, "volume"));
+    add_property_row (doc_group, "Penciller", g_hash_table_lookup (meta, "penciller"));
+    add_property_row (doc_group, "Publisher", g_hash_table_lookup (meta, "publisher"));
+    add_property_row (doc_group, "Genre",     g_hash_table_lookup (meta, "genre"));
   }
 
   /* File group — derived from the open path + backend format/encryption */

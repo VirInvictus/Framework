@@ -25,6 +25,7 @@
  */
 
 #include "fw-document-cbr.h"
+#include "fw-comicinfo.h"
 #include "fw-debug.h"
 
 #include <gio/gio.h>
@@ -85,6 +86,13 @@ struct _FwDocumentCbr {
    * couldn't agree on a prefix and the filename signal is disabled. */
   char         *common_prefix;
   int           max_spread_digits;
+
+  /* ComicInfo.xml metadata (v0.83.0), parsed during the open-time
+   * enumeration walk — a RAR stream decompresses front-to-back, so
+   * mining it at dialog time would stall the UI on big archives.
+   * NULL when the archive carries no ComicInfo.xml. Keys/values match
+   * the fw_document_get_metadata table ("title", "author", …). */
+  GHashTable   *comic_info;
 
   /* Background dimension probe (v0.69). At open every page defaults to
    * the cover's size (see cbr_open); a one-shot worker decompresses the
@@ -597,6 +605,27 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
   struct archive_entry *entry;
   while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
     const char *name = archive_entry_pathname (entry);
+    if (fw_comicinfo_name_matches (name)) {
+      /* The one non-page entry we care about: pull it now, during the
+       * walk we are already paying for. Its data read is a few KB. */
+      gint64 ci_sz = archive_entry_size (entry);
+      if (ci_sz > 0 && ci_sz <= 1024 * 1024) {
+        guint8 *ci = g_malloc ((size_t) ci_sz);
+        size_t total = 0;
+        while (total < (size_t) ci_sz) {
+          la_ssize_t got = archive_read_data (a, ci + total,
+                                              (size_t) ci_sz - total);
+          if (got <= 0)
+            break;
+          total += (size_t) got;
+        }
+        if (total == (size_t) ci_sz)
+          self->comic_info = fw_comicinfo_parse ((const char *) ci, total);
+        g_free (ci);
+      }
+      archive_read_data_skip (a);
+      continue;
+    }
     if (!is_image_name (name)) {
       archive_read_data_skip (a);
       continue;
@@ -721,6 +750,7 @@ cbr_close (FwDocument *doc)
   g_clear_pointer (&self->page_heights, g_free);
   g_clear_pointer (&self->path,         g_free);
   g_clear_pointer (&self->common_prefix, g_free);
+  g_clear_pointer (&self->comic_info,   g_hash_table_unref);
   if (self->ctx) {
     fz_drop_context (self->ctx);
     self->ctx = NULL;
@@ -732,6 +762,29 @@ static int
 cbr_get_page_count (FwDocument *doc)
 {
   return FW_DOCUMENT_CBR (doc)->page_count;
+}
+
+/* Metadata for the Document Properties dialog: the ComicInfo.xml fields
+ * harvested at open, plus an extension-derived format row (the table is
+ * NULL when there is nothing to say — matches the interface's
+ * empty-means-NULL contract). */
+static GHashTable *
+cbr_get_metadata (FwDocument *doc)
+{
+  FwDocumentCbr *self = FW_DOCUMENT_CBR (doc);
+  if (!self->comic_info)
+    return NULL;
+
+  GHashTable *out = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                           g_free, g_free);
+  GHashTableIter it;
+  gpointer k, v;
+  g_hash_table_iter_init (&it, self->comic_info);
+  while (g_hash_table_iter_next (&it, &k, &v))
+    g_hash_table_replace (out, g_strdup (k), g_strdup (v));
+  g_hash_table_replace (out, g_strdup ("format"),
+                        g_strdup ("Comic (RAR)"));
+  return out;
 }
 
 static void
@@ -988,6 +1041,7 @@ fw_document_cbr_iface_init (FwDocumentInterface *iface)
   iface->search                  = cbr_search;
   iface->get_text                = cbr_get_text;
   iface->get_links               = cbr_get_links;
+  iface->get_metadata            = cbr_get_metadata;
   iface->open_page               = cbr_open_page;
   iface->close_page              = cbr_close_page;
   iface->render_page_from_handle = cbr_render_page_from_handle;

@@ -138,3 +138,22 @@ test('stress-reflow',
   protocol: 'exitcode',
   is_parallel: false,
 )
+
+# Phase 20 regression net: ComicInfo.xml metadata, the CBR cancel fix,
+# and the search-indicator clear. Builds its own synthetic archives, so
+# it needs no corpus and runs anywhere.
+regress_phase20 = executable(
+  'regress-phase20',
+  'regress-phase20.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
+test('regress-phase20',
+  regress_phase20,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 60,
+  protocol: 'exitcode',
+  is_parallel: false,
+)
