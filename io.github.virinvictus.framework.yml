@@ -92,6 +92,17 @@ modules:
     buildsystem: meson
     config-opts:
       - --buildtype=release
+      # Skip installing the scalable SVG icon: appstream compose (run by
+      # flatpak-builder at the end of the build) reads hicolor icons via
+      # GdkPixbuf, which has no SVG loader in the runtime, and one
+      # unreadable icon fails the whole compose. The 128px PNG installs
+      # in every configuration.
+      - -Dflatpak=true
+    # gnome.compile_schemas() compiles for in-tree dev runs but does not
+    # install the compiled cache; flatpak-builder's finish step did not
+    # run it either, and the app aborts at startup without it.
+    post-install:
+      - glib-compile-schemas /app/share/glib-2.0/schemas
     sources:
       - type: dir
         path: .

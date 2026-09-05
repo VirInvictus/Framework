@@ -12,3 +12,9 @@ option('sanitize',
   value: [],
   description: 'Enable one or more compiler sanitizers (-fsanitize=...). address+undefined is the standard dev combo. Cannot mix thread with address/leak.',
 )
+
+option('flatpak',
+  type: 'boolean',
+  value: false,
+  description: 'Building inside a Flatpak sandbox. The appstream compose step cannot read SVG hicolor icons (no SVG GdkPixbuf loader in the runtimes), so the scalable icon is only installed for non-Flatpak builds; the 128px PNG installs everywhere.',
+)

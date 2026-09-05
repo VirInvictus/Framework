@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 6 (2026-09-04, tracks v0.83.0)
+**Spec revision:** 7 (2026-09-04, tracks v0.83.1)
 **Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson
@@ -549,7 +549,7 @@ The stress/bench harness is gated by `-Dstress=true` (Phase 12, shipped):
 
 ## 9. Flatpak Distribution
 
-Primary distribution method. Framework is Flatpak-first. The manifest at the project root (`io.github.virinvictus.framework.yml`) builds and runs end-to-end. Local install workflow tested against `org.gnome.Platform//50` + `org.gnome.Sdk//50`.
+Primary distribution method. Framework is Flatpak-first. The manifest at the project root (`io.github.virinvictus.framework.yml`) builds and runs end-to-end (first verified 2026-09-04, see roadmap Phase 15 for the icon and schema fixes the first real build required). Local install workflow tested against `org.gnome.Platform//50` + `org.gnome.Sdk//50`.
 
 ### 9.1 Manifest Realized
 
@@ -566,7 +566,7 @@ Primary distribution method. Framework is Flatpak-first. The manifest at the pro
 - `<recommends>` (display ≥ 600 px, offline-only network), `<supports>` (pointing/keyboard/touch)
 - Release notes from v0.6.0 → current under honest versioning (the historical 1.x labels stay in `patchnotes.md` but are not surfaced to software centers)
 - Content rating: OARS 1.1, default (no objectionable content)
-- Screenshots: TODO before Flathub submission. The `<screenshots>` block sits commented in the metainfo as a template — once `data/screenshots/` exists with stable filenames, uncomment the block and update the GitHub raw URLs.
+- Screenshots: four real captures from `data/screenshots/` wired into the `<screenshots>` block at stable raw GitHub URLs on `main` (2026-09-04), the first carrying `type="default"`; `appstreamcli validate --no-net` passes. Flathub prefers 16:9 and the captures are 1500x980; recrop before submission if flagged.
 
 `appstreamcli validate` and `desktop-file-validate` must both pass before any release tag.
 
@@ -660,6 +660,6 @@ Framework v1.0 is done when all of the following hold. As of v0.21.0, only the r
 | ✅ | Bytes-aware cache cap (v0.16) — per-surface byte tracking replaces the old fixed page-count window. |
 | ✅ | Smart text selection (v0.19): double-click word, triple-click line; v0.20 per-line drag highlights. |
 | ✅ | Auto-reload via `GFileMonitor` (v0.21) — recompile and the document refreshes with state restored. |
-| ☐ | A `<screenshots>` block exists in the AppStream metainfo before any Flathub submission. |
+| ✅ | A `<screenshots>` block exists in the AppStream metainfo before any Flathub submission. |
 | ☐ | Tagged `1.0.0`, signed if applicable. |
 | ✅ | A grandma can open a PDF and read it without asking for help. |

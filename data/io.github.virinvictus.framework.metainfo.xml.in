@@ -70,16 +70,30 @@
     <control>touch</control>
   </supports>
 
-  <!-- Screenshots will be added before 1.0 ships. Each <screenshot> entry
-       points at a stable raw URL on the project's GitHub. The first entry
-       must carry type="default" and is what software centers feature.
+  <!-- Real captures from the Hyprland session (data/screenshots/, tracked).
+       The first entry must carry type="default" and is what software centers
+       feature. The raw URLs resolve on the GitHub side as soon as main is
+       pushed; Flathub prefers 16:9 and these are 1500x980 — recrop before
+       submission if the reviewer flags it (validation accepts them).
+       16:9 target for a future recrop: 1500x844. -->
   <screenshots>
     <screenshot type="default">
-      <caption>A textbook open with the table-of-contents sidebar</caption>
-      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/main.png</image>
+      <caption>A 1,677-page textbook in continuous scroll</caption>
+      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/reading.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Table-of-contents sidebar tracking the current section</caption>
+      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/contents.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Asynchronous full-document search with live match counts</caption>
+      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/search.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An EPUB reflowing in the dark reading theme with serif typography</caption>
+      <image>https://raw.githubusercontent.com/VirInvictus/Framework/main/data/screenshots/reflow.png</image>
     </screenshot>
   </screenshots>
-  -->
 
   <!-- Curated milestones, not every point release: AppStream is a changelog for
        users, and software centers show only the most recent entries. Full

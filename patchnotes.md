@@ -2,6 +2,15 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.83.1 (2026-09-04)
+
+*The 1.0 release tail: AppStream screenshots wired, the Flatpak built for the first time (and the two things that build surfaced), and the sandbox permissions audited. The only remaining 1.0 item is the tag itself.*
+
+* **Screenshots are live in the AppStream metadata.** The `<screenshots>` block ships four real captures (textbook reading as the featured shot, the TOC sidebar, search with live match counts, and an EPUB in the dark reading theme) pointed at stable raw GitHub URLs, and `appstreamcli validate --no-net` passes.
+* **The Flatpak manifest builds and installs — first time ever.** The first real build against `org.gnome.Platform//50` surfaced two genuine breakers, both fixed: the app's SVG icons failed the build (the appstream compose step and flatpak's export validator both read icons through GdkPixbuf, which ships no SVG loader in the runtime or on current Fedora hosts), so a 128x128 PNG icon rendered from the Kanagawa source now installs everywhere and the SVGs stay a non-Flatpak-only install; and the GSettings schema compiled for dev runs but never inside the package, so the Flatpak aborted at startup until a `glib-compile-schemas` post-install step landed. The built Flatpak launches on Hyprland, renders a 901-page PDF, and restores reading state (screenshot-verified).
+* **Permissions audit verdict: the sandbox is tight as-is.** No network; display via Wayland and X11 fallback; GPU via `dri`; documents reach the app through portals or the three read-only xdg shortcuts; the theme reader rides the always-available `org.freedesktop.portal.Settings`. Verified live: files outside the granted roots are refused with a proper error dialog.
+* **The only 1.0 item left open is Tag 1.0.0 & Release** — Brandon-gated; the manifest's `type: git` + `tag:` swap rides that tag.
+
 ## v0.83.0 (2026-09-04)
 
 *Phase 20: the code sweep and stability hardening pass. Six bug fixes (one critical), two new reader-facing features, and one structural refactor, from the 2026-08-23 sweep list plus the workspace audit.*
