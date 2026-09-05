@@ -353,18 +353,18 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 *Context: Identified permanent cancellation locks and memory leaks during sweep. (Numbered Phase 20 as of 2026-09-04: the section was originally written as a second "Phase 19", colliding with the de-adwaita decision record above. No box text changed, only the number and this note — patchnotes and older audit citations saying "Phase 19" for the sweep mean this section.)*
 
 ### Bugs to Fix
-- [ ] **Critical CBR Cancellation Lock:** Reset `cancel_flag` after cancellation in `fw-document-cbr.c`. Currently, cancelling one comic render breaks all future renders permanently.
-- [ ] **Stuck Search Indicator:** Clear `self->worker = NULL` after `search_worker` finishes so the UI doesn't permanently display "Searching...".
-- [ ] **NULL Pointer Dereference:** Guard trace logging in `fw_document_new_for_path` when `error == NULL`.
-- [ ] **Theme Portal Logic & Leaks:** Fix inverted scheme check (portal 0 must default to dark) and unref the `GVariant` child in `query_dark()`.
-- [ ] **File Dialog Leak:** Unref `GtkFileDialog` in the application open action.
-- [ ] **MOBI Error Leaks:** Free `huffcdic` tables on error paths in the MOBI parser.
+- [x] **Critical CBR Cancellation Lock:** Reset `cancel_flag` after cancellation in `fw-document-cbr.c`. Currently, cancelling one comic render breaks all future renders permanently. *(Fixed by removal, not reset: the binary flag is gone entirely — see the unification item below. Closed in v0.83.0.)*
+- [x] **Stuck Search Indicator:** Clear `self->worker = NULL` after `search_worker` finishes so the UI doesn't permanently display "Searching...". *(The finished idle message drops the main thread's thread handle on the main thread, mirroring the existing detach pattern; pinned by `regress-phase20`. v0.83.0.)*
+- [x] **NULL Pointer Dereference:** Guard trace logging in `fw_document_new_for_path` when `error == NULL`. *(v0.83.0.)*
+- [x] **Theme Portal Logic & Leaks:** Fix inverted scheme check (portal 0 must default to dark) and unref the `GVariant` child in `query_dark()`. *(Both real and fixed in v0.83.0: the `scheme == 1` test meant "no preference" (0) flipped Framework light against its dark default — only an explicit 2 is light now, in `query_dark` and the live `SettingChanged` handler. The leak was verified under LeakSanitizer before fixing: `unwrap`'s `g_variant_ref_sink` adds a reference on a non-floating variant, so `query_dark` was leaking the wrapper and its child per portal query; it now unrefs both, the signal handler was already correct, and `unwrap` documents the ownership quirk.)*
+- [x] **File Dialog Leak:** Unref `GtkFileDialog` in the application open action. *(v0.83.0.)*
+- [x] **MOBI Error Leaks:** Free `huffcdic` tables on error paths in the MOBI parser. *(The one unfreed path was the `text_records` validation return, after `huffcdic_build` had already run for compression 17480. v0.83.0.)*
 
 ### Refactoring & Growth
-- [ ] **Unify Cancellation Pattern:** Switch the CBR backend from binary flags to the monotonic generation counter (`cancel_gen`) used by DjVu.
-- [ ] **Extract Dialog Rows:** Move custom GTK4 boxed list and row helpers out of `fw-window.c` (3,030 lines) into `fw-dialog-widgets.c`.
-- [ ] **ComicInfo.xml Parsing:** Extract embedded `ComicInfo.xml` metadata in CBR/CBZ files to populate the document properties dialog.
-- [ ] **Reflow Scroll Percentage:** Display fractional reading progress in the header bar during WebKit EPUB renders.
+- [x] **Unify Cancellation Pattern:** Switch the CBR backend from binary flags to the monotonic generation counter (`cancel_gen`) used by DjVu. *(Landed together with the critical bug above — the counter is the fix. Workers capture the generation at entry and bail wherever it moved; close bumps it to stop the background probe early. v0.83.0.)*
+- [x] **Extract Dialog Rows:** Move custom GTK4 boxed list and row helpers out of `fw-window.c` (3,030 lines) into `fw-dialog-widgets.c`. *(Verbatim move; `fw_boxed_list` stays private; call sites pass `GTK_WINDOW (self)` since the module takes a plain `GtkWindow` parent. Window file down to ~2,905 lines. v0.83.0.)*
+- [x] **ComicInfo.xml Parsing:** Extract embedded `ComicInfo.xml` metadata in CBR/CBZ files to populate the document properties dialog. *(New `fw-comicinfo.{c,h}`: libxml2 field walk + libarchive reader. CBR parses during its open-time enumeration walk (RAR is front-to-back; a dialog-time pass would stall); CBZ/CB7/CBT merge lazily in `pdf_get_metadata`, filling only keys MuPDF didn't supply. Dialog gains Series/Number/Volume/Penciller/Publisher/Genre rows; CBR gains a `get_metadata` implementation plus a "Comic (RAR)" format row. Pinned by `regress-phase20`. v0.83.0.)*
+- [x] **Reflow Scroll Percentage:** Display fractional reading progress in the header bar during WebKit EPUB renders. *(Position messages carry a 0..1 fraction; the webview parses it (json-glib), emits `progress-changed`, and the window paints it into the previously-unused `reflow_page_label` header slot. Saved state unaffected (the save path treats the message as opaque). Verified live on Hyprland: tracks page turns. v0.83.0.)*
 
 ---
 

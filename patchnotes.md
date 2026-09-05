@@ -2,6 +2,28 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.83.0 (2026-09-04)
+
+*Phase 20: the code sweep and stability hardening pass. Six bug fixes (one critical), two new reader-facing features, and one structural refactor, from the 2026-08-23 sweep list plus the workspace audit.*
+
+### Fixed
+
+* **Comics no longer die after one scrub.** Cancelling a CBR render (fast scrolling through a comic) set a cancel flag that nothing ever cleared, so every future render of that comic returned nothing: one flick of the scrollbar and the rest of the book stayed blank. The flag is gone entirely, replaced with the same monotonic generation counter the DjVu backend uses: a cancel now discards exactly the renders in flight when it happened, and nothing else. *(Critical.)*
+* **The search count no longer sticks on "Searching…".** A search that ran to completion never told the header it was done, so the label kept claiming a scan was in flight (or kept the "+" suffix) until you searched again. Fixed, with a regression test that drives a real scan.
+* **"No preference" no longer forces light mode.** The desktop color-scheme portal answers 0 for "no preference", 1 for dark, 2 for light; Framework treated only 1 as dark, so a system with no explicit preference got the light palette against the app's documented dark default. Only an explicit "light" turns the lights on now, on startup and on live changes.
+* **A GVariant leaked on every theme query.** Verified under LeakSanitizer and fixed; the portal query path now releases both references the unwrap helper hands back.
+* **Two smaller leaks.** The file-open dialog leaked per invocation; crafted HuffDic MOBIs with a bogus text-record count leaked their decompression dictionaries on the failure path.
+
+### New
+
+* **Comic book metadata.** CBZ/CB7/CBT/CBR archives that carry a `ComicInfo.xml` sidecar now fill the Document Properties dialog: Title, Author (Writer), Series, Number, Volume, Penciller, Publisher, and Genre. RAR archives are mined during the normal open walk, so there is no extra wait; ZIP comics are read lazily when you open the dialog. CBR archives without a sidecar behave exactly as before.
+* **Reading progress for ebooks.** The header now shows a percentage while you read any reflow format (EPUB, MOBI, AZW3, FB2, TXT, Markdown), in the slot where fixed-layout documents show the page number. It updates as you scroll and page through the book.
+
+### Changed
+
+* **`fw-window.c` slimmed.** The owned dialog and boxed-list row helpers moved to a new `fw-dialog-widgets.c` (about 125 lines out of the 3,000-line window file). No behavior change.
+* **New regression suite target.** `regress-phase20` builds synthetic comic archives in-memory and pins the CBR cancel fix, the search-indicator fix, and the ComicInfo paths; the stress suite is now seven registered tests.
+
 ## v0.82.1 (2026-09-04)
 
 *Documentation and build-hygiene repair from the workspace audit. No code changes; the binary is unchanged except for the version string.*

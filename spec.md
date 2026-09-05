@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 5 (2026-09-04, tracks v0.82.1)
+**Spec revision:** 6 (2026-09-04, tracks v0.83.0)
 **Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson
@@ -507,6 +507,7 @@ framework/
 │   ├── fw-document-pdf.c/h     # MuPDF backend (PDF, CBZ/CB7/CBT, XPS; EPUB/FB2/MOBI fallback)
 │   ├── fw-document-djvu.c/h    # DjVuLibre backend
 │   ├── fw-document-cbr.c/h     # libarchive backend (CBR, plus any RAR/7z/tar of images)
+│   ├── fw-comicinfo.c/h        # ComicInfo.xml metadata extraction (comic properties)
 │   ├── fw-webview.c/h          # WebKitWebView reflow renderer + framework-img: scheme
 │   ├── fw-reflow-document.c/h  # FwReflowDocument interface + reflow factory
 │   ├── fw-reflow-html.c/h      # Shared reading CSS + HTML emit helpers (reflow)
@@ -518,6 +519,7 @@ framework/
 │   ├── fw-fonts.c/h            # Registers bundled reading fonts with FontConfig
 │   ├── fw-sandbox.c/h          # Landlock LSM hardening
 │   ├── fw-state.c/h            # Per-document state persistence (LRU JSON)
+│   ├── fw-dialog-widgets.c/h   # Owned dialog shell + boxed-list rows
 │   └── fw-debug.c/h            # Runtime trace domains (FW_DEBUG=1 → timestamped logs)
 ├── data/
 │   ├── meson.build

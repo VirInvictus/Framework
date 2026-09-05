@@ -87,6 +87,11 @@
        release changes something a reader would notice. Never list a version
        that has not shipped. -->
   <releases>
+    <release version="0.83.0" date="2026-09-04">
+      <description>
+        <p>Comic archives now show their ComicInfo metadata (series, writer, publisher, and more) in Document Properties, ebooks show a reading percentage in the header, and a fast scroll through a comic can no longer blank the rest of the book. Several smaller memory and theme fixes.</p>
+      </description>
+    </release>
     <release version="0.82.0" date="2026-07-17">
       <description>
         <p>AZW3 and KF8 books now render with their own publisher stylesheets, and publisher CSS no longer glares against a dark reading theme.</p>
