@@ -94,13 +94,17 @@ void       fw_webview_set_publisher_styles (FwWebView *self,
 void       fw_webview_set_dark_transform   (FwWebView *self,
                                             gboolean   on);
 
-/* Latest reading position as JSON `{"anchor":"...","scroll_y":N}`, kept
- * current by a debounced in-page scroll listener that posts back to a
+/* Latest reading position as JSON `{"anchor":"...","scroll_y":N,"frac":F}`,
+ * kept current by a debounced in-page scroll listener that posts back to a
  * script-message handler.  Borrowed; valid until the next load or
  * dispose.  Returns NULL before the first scroll/load of the current
  * document.  Synchronous — meant for the save-on-teardown path where the
  * async fw_webview_get_position round-trip can't complete in time. */
 const char *fw_webview_get_cached_position (FwWebView  *self);
+
+/* Latest scroll progress, 0..1, from the same position messages. Updates
+ * with every "progress-changed" emission; 0.0 before the first one. */
+double     fw_webview_get_scroll_fraction (FwWebView  *self);
 
 /* WebKitFindController-backed search.  `needle` of NULL/empty clears
  * the highlight; the view emits "search-changed" once the match count

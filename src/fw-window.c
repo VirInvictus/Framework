@@ -66,7 +66,7 @@ struct _FwWindow {
   gboolean              reflow_via_webview;
   gulong                webview_search_handler;
   GtkScrolledWindow    *sidebar_scroll; /* host for the active sidebar widget */
-  GtkLabel             *reflow_page_label;  /* unused (no fixed pages in reflow) */
+  GtkLabel             *reflow_page_label;  /* reading % (reflow, Phase 20) */
   FwSearch             *search;
   GtkSearchBar         *search_bar;
   GtkSearchEntry       *search_entry;
@@ -241,6 +241,20 @@ update_page_entry (FwWindow *self)
   g_snprintf (buf, sizeof buf, "%d / %d", self->current_page + 1, total);
   GtkEntryBuffer *buffer = gtk_entry_get_buffer (self->page_entry);
   gtk_entry_buffer_set_text (buffer, buf, -1);
+}
+
+/* Reflow scroll progress (Phase 20): the WebView's in-page scroll
+ * listener posts a 0..1 fraction; show it as a percentage in the header
+ * slot where fixed-layout documents show "page N". Connected swapped. */
+static void
+update_reflow_progress (FwWindow *self)
+{
+  if (!self->reflow_via_webview || !self->reflow_page_label)
+    return;
+  double frac = fw_webview_get_scroll_fraction (self->webview);
+  char buf[16];
+  g_snprintf (buf, sizeof buf, "%d%%", (int) (frac * 100.0 + 0.5));
+  gtk_label_set_text (self->reflow_page_label, buf);
 }
 
 static void
@@ -1925,6 +1939,11 @@ fw_window_constructed (GObject *object)
     self->webview, "search-changed",
     G_CALLBACK (update_search_count_label), self);
 
+  /* Reflow reading progress: the webview's scroll listener posts a
+   * fraction on every (debounced) scroll; paint it into the header. */
+  g_signal_connect_swapped (self->webview, "progress-changed",
+                            G_CALLBACK (update_reflow_progress), self);
+
   self->sidebar_scroll = GTK_SCROLLED_WINDOW (gtk_scrolled_window_new ());
   gtk_scrolled_window_set_child (self->sidebar_scroll,
                                   GTK_WIDGET (self->sidebar));
@@ -2565,9 +2584,13 @@ fw_window_open_reflow (FwWindow *self, const char *path)
    * vertical (scroll) to horizontal (page-turn) glyphs. */
   if (self->page_entry)
     gtk_widget_set_visible (GTK_WIDGET (self->page_entry), FALSE);
-  if (self->reflow_page_label)
-    /* WebKit-rendered HTML has no notion of fixed pages. */
-    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label), FALSE);
+  if (self->reflow_page_label) {
+    /* Reflow has no fixed pages; this slot carries the reading
+     * percentage instead (updated by the webview's progress-changed
+     * signal). Starts at 0% until the page's first position report. */
+    gtk_label_set_text (self->reflow_page_label, "0%");
+    gtk_widget_set_visible (GTK_WIDGET (self->reflow_page_label), TRUE);
+  }
   if (self->zoom_entry) {
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_entry),    FALSE);
     gtk_widget_set_visible (GTK_WIDGET (self->zoom_in_button),  FALSE);

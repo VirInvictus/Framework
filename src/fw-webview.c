@@ -20,6 +20,7 @@
 #include "fw-webview.h"
 
 #include <webkit/webkit.h>
+#include <json-glib/json-glib.h>
 #include <string.h>
 
 #define FW_IMG_SCHEME "framework-img"
@@ -48,14 +49,18 @@ struct _FwWebView {
   char              *pending_dark;    /* dark color-transform JS, run on load
                                        * — after pending_pub, since it reads
                                        * computed styles post publisher toggle */
-  char              *last_position;   /* latest {anchor,scroll_y} JSON from
-                                       * the in-page scroll listener; read
-                                       * synchronously at save time */
+  char              *last_position;   /* latest {anchor,scroll_y,frac} JSON
+                                       * from the in-page scroll listener;
+                                       * read synchronously at save time */
+  double             last_fraction;   /* 0..1 scroll progress parsed out of
+                                       * the same message; drives the
+                                       * header-bar percentage */
 };
 
 enum {
   SIG_LOAD_DONE,
   SIG_SEARCH_CHANGED,
+  SIG_PROGRESS,
   N_SIGNALS,
 };
 static guint signals[N_SIGNALS];
@@ -340,6 +345,25 @@ on_position_message (WebKitUserContentManager *ucm G_GNUC_UNUSED,
     return;
   g_free (self->last_position);
   self->last_position = jsc_value_to_string (value);
+
+  /* Pull the scroll fraction out of the message for the header-bar
+   * percentage. json-glib only enters through here — the save/restore
+   * path still treats last_position as an opaque string. */
+  JsonParser *parser = json_parser_new ();
+  if (json_parser_load_from_data (parser, self->last_position, -1, NULL)) {
+    JsonNode *root = json_parser_get_root (parser);
+    if (root && JSON_NODE_HOLDS_OBJECT (root)) {
+      JsonObject *obj = json_node_get_object (root);
+      double frac = -1.0;
+      if (json_object_has_member (obj, "frac"))
+        frac = json_object_get_double_member (obj, "frac");
+      if (frac < 0.0) frac = 0.0;
+      if (frac > 1.0) frac = 1.0;
+      self->last_fraction = frac;
+      g_signal_emit (self, signals[SIG_PROGRESS], 0);
+    }
+  }
+  g_object_unref (parser);
 }
 
 /* User script: a passive, 200ms-debounced scroll listener (plus one shot
@@ -348,7 +372,11 @@ on_position_message (WebKitUserContentManager *ucm G_GNUC_UNUSED,
 static const char FW_POS_USER_SCRIPT[] =
   "(function () {"
   "  function snap() {"
-  "    var y = document.scrollingElement ? document.scrollingElement.scrollTop : window.scrollY;"
+  "    var se = document.scrollingElement || document.documentElement;"
+  "    var y = se ? se.scrollTop : window.scrollY;"
+  "    var max = se ? (se.scrollHeight - window.innerHeight) : 0;"
+  "    var f = max > 0 ? y / max : 0;"
+  "    f = f < 0 ? 0 : (f > 1 ? 1 : f);"
   "    var a = null;"
   "    var nodes = document.querySelectorAll('[id]');"
   "    for (var i = 0; i < nodes.length; i++) {"
@@ -356,7 +384,7 @@ static const char FW_POS_USER_SCRIPT[] =
   "      if (r.top >= 0) { a = nodes[i].id; break; }"
   "    }"
   "    try { window.webkit.messageHandlers." FW_POS_HANDLER
-  "          .postMessage(JSON.stringify({ anchor: a, scroll_y: y })); } catch (e) {}"
+  "          .postMessage(JSON.stringify({ anchor: a, scroll_y: y, frac: f })); } catch (e) {}"
   "  }"
   "  var t = null;"
   "  window.addEventListener('scroll', function () {"
@@ -535,6 +563,13 @@ fw_webview_class_init (FwWebViewClass *klass)
    * or failed-to-find).  Consumers read hit_count via the getter. */
   signals[SIG_SEARCH_CHANGED] = g_signal_new (
     "search-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+    0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+  /* Fired when the in-page scroll listener posts a new position;
+   * consumers read fw_webview_get_scroll_fraction for the header
+   * percentage. */
+  signals[SIG_PROGRESS] = g_signal_new (
+    "progress-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
     0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
@@ -726,14 +761,18 @@ fw_webview_get_position (FwWebView           *self,
 
   const char *script =
     "(function () {"
-    "  var y = document.scrollingElement ? document.scrollingElement.scrollTop : window.scrollY;"
+    "  var se = document.scrollingElement || document.documentElement;"
+    "  var y = se ? se.scrollTop : window.scrollY;"
+    "  var max = se ? (se.scrollHeight - window.innerHeight) : 0;"
+    "  var f = max > 0 ? y / max : 0;"
+    "  f = f < 0 ? 0 : (f > 1 ? 1 : f);"
     "  var a = null;"
     "  var nodes = document.querySelectorAll('[id]');"
     "  for (var i = 0; i < nodes.length; i++) {"
     "    var r = nodes[i].getBoundingClientRect();"
     "    if (r.top >= 0) { a = nodes[i].id; break; }"
     "  }"
-    "  return { anchor: a, scroll_y: y };"
+    "  return { anchor: a, scroll_y: y, frac: f };"
     "})()";
   PositionRequest *pr = g_new0 (PositionRequest, 1);
   pr->cb        = cb;
@@ -773,6 +812,13 @@ fw_webview_get_cached_position (FwWebView *self)
 {
   g_return_val_if_fail (FW_IS_WEBVIEW (self), NULL);
   return self->last_position;
+}
+
+double
+fw_webview_get_scroll_fraction (FwWebView *self)
+{
+  g_return_val_if_fail (FW_IS_WEBVIEW (self), 0.0);
+  return self->last_fraction;
 }
 
 /* Append a `r.setProperty('--name', '<value>')` call, escaping the value
