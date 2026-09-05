@@ -83,6 +83,15 @@ hit_message_apply (gpointer data)
 
   if (msg->finished) {
     self->finish_idle_id = 0;
+    /* The scan completed on its own; drop the main thread's thread
+     * handle so fw_search_is_running() stops reporting a finished scan
+     * as in-flight (the "Searching…" indicator never cleared).
+     * stop_worker_locked() only runs when a scan is superseded, so
+     * without this the worker field outlived the worker. */
+    if (self->worker) {
+      g_thread_unref (self->worker);
+      self->worker = NULL;
+    }
     g_signal_emit (self, signals[SIGNAL_SEARCH_FINISHED], 0);
     return G_SOURCE_REMOVE;
   }
