@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 4 (2026-07-16, tracks v0.80.0)
+**Spec revision:** 5 (2026-09-04, tracks v0.82.1)
 **Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson
@@ -17,7 +17,7 @@ Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performa
 
 Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
 
-Reflowable formats (EPUB / FB2 / MOBI) get a fixed `fz_layout_document(600, 900, 11)` pass per render-instance open and do not re-flow on zoom or window resize — Framework is good as a single reader for "open everything," but specialized ebook readers (e.g., [Foliate](https://johnfactotum.github.io/foliate/)) handle reflow and font customization better.
+Reflowable formats (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown) do not go through MuPDF's fixed-layout engine by default: they are converted to HTML and rendered in a `WebKitWebView` with real reflow, typography, and themes (§2.4, Phase 17). MuPDF's fixed-layout rasterization remains the automatic fallback when the reflow parser refuses a file (toggleable via the "Render as Fixed Pages" setting).
 
 Design philosophy: **accessible to a grandma, useful to a power user.** Every action has a visible UI control. Every UI control has a keyboard shortcut. No vim bindings, no modal interfaces, no hidden commands. SumatraPDF is the reference implementation.
 
@@ -527,18 +527,14 @@ framework/
 │   └── icons/
 │       └── hicolor/
 │           └── scalable/apps/io.github.virinvictus.framework.svg
-│           # symbolic/apps/io.github.virinvictus.framework-symbolic.svg — TODO
+│           └── symbolic/apps/io.github.virinvictus.framework-symbolic.svg
 └── po/                         # i18n scaffolding
     └── POTFILES.in
 ```
 
-Future structure (per roadmap Phase 12, gated on `-Dstress=true`):
-```text
-├── meson_options.txt           # not present yet — added when Phase 12 lands
-├── tests/                      # not present yet — added when Phase 12 lands
-│   ├── corpus.json
-│   ├── stress/  bench/  scripts/
-```
+The stress/bench harness is gated by `-Dstress=true` (Phase 12, shipped):
+`meson_options.txt` at the root, `tests/` with `corpus.json`, `stress/`,
+`bench/`, and `scripts/`.
 
 ### 8.2 Naming Conventions
 

@@ -48,10 +48,12 @@ Registered tests: `stress-scrub`, `stress-zoom-storm`,
 `bench-cache-hit-rate`) are built but not registered; invoke them
 directly.
 
-`stress-reflow` covers the native reflow pipeline (the EPUB/MOBI/AZW3
-parsers and the search core) at the document layer. Pagination and
-search-highlight rendering live in `FwReflowView`, a GtkWidget, so they
-are verified by running the app rather than in the headless suite.
+`stress-reflow` covers the reflow pipeline (the EPUB/MOBI/AZW3/FB2/TXT/MD
+backends and the search core) at the document layer: parsing,
+`produce_html` output, and content scrubbing. Presentation — pagination,
+highlight rendering, themes, typography — happens inside the
+`WebKitWebView` (`fw-webview.c`), so it is verified by running the app
+rather than in the headless suite.
 
 ## Sanitizers
 

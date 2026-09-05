@@ -349,8 +349,8 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] Smooth pinch-to-zoom on touchscreens
 - [ ] Configurable keybindings via GSettings
 
-## Phase 19: Code Sweep & Stability Hardening (2026-08-23)
-*Context: Identified permanent cancellation locks and memory leaks during sweep.*
+## Phase 20: Code Sweep & Stability Hardening (2026-08-23)
+*Context: Identified permanent cancellation locks and memory leaks during sweep. (Numbered Phase 20 as of 2026-09-04: the section was originally written as a second "Phase 19", colliding with the de-adwaita decision record above. No box text changed, only the number and this note — patchnotes and older audit citations saying "Phase 19" for the sweep mean this section.)*
 
 ### Bugs to Fix
 - [ ] **Critical CBR Cancellation Lock:** Reset `cancel_flag` after cancellation in `fw-document-cbr.c`. Currently, cancelling one comic render breaks all future renders permanently.
@@ -365,3 +365,45 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [ ] **Extract Dialog Rows:** Move custom GTK4 boxed list and row helpers out of `fw-window.c` (3,030 lines) into `fw-dialog-widgets.c`.
 - [ ] **ComicInfo.xml Parsing:** Extract embedded `ComicInfo.xml` metadata in CBR/CBZ files to populate the document properties dialog.
 - [ ] **Reflow Scroll Percentage:** Display fractional reading progress in the header bar during WebKit EPUB renders.
+
+---
+
+## AUDIT_THREE reconciliation (2026-09-04)
+
+*Findings from the workspace audit (`~/.gitrepos/AUDIT_THREE.md` §3), filed
+here before fixing per the audit's own rule. The hygiene box below is the
+audit's Stage 0 work package for this repo; the Phase 20 sweep boxes above
+are its Stage 5 packages. Two decisions this audit routes to Brandon are
+recorded open at the end.*
+
+- [x] **Stage 0 hygiene (docs/CI repair).** The CI workflow still installed
+      and named `libadwaita-devel` and its comment claimed the app requires
+      libadwaita (dropped at v0.80.0); CLAUDE.md's test-suite list omitted
+      the registered `stress-reflow` and claimed the corpus default was
+      `/home/bdkl/docs/Calibre Library/` when the registered tests default
+      to the gitignored `.testfiles/`; `tests/README.md` still said
+      pagination and highlight rendering live in the deleted
+      `FwReflowView`; spec §1 said reflowables never reflow and always
+      take the `fz_layout_document(600, 900, 11)` pass, contradicting
+      spec §2.4's WebKit pipeline, while the header tracked v0.80.0; the
+      metainfo screenshots placeholder named a nonexistent `main.png`
+      (resolved with the real wiring under the 1.0 Screenshots item, not
+      here); the Flatpak manifest skip-list named seven reference
+      directories removed in v0.39.0 (now: the three live clones plus
+      `.testfiles`, whose copyrighted documents must never enter a build
+      context); the stale `pick-it-up.md` handoff doc (four releases old,
+      self-marked "delete or refresh") deleted; the duplicate "Phase 19"
+      renumbered to Phase 20. Spec §8.1's "tests/ not present yet" note
+      and the symbolic-icon TODO were caught in the same pass — both long
+      shipped. (v0.82.1)
+- [ ] **Parked branch backup (§5.10; Brandon's call).** The
+      `parking/phase-16-hyphenation` branch (Phase 16 Pillar 1,
+      commit `88d2e72`) exists only on this machine; `origin` carries
+      `main` only. Push the branch to origin, or accept the single-disk
+      risk explicitly. Losing the clone loses the only copy of the
+      hyphenation work.
+- [ ] **Tag backlog (§5.10/§5.12; Brandon's call).** Framework has zero
+      tags across ~20 shipped releases; the Flathub path hard-requires a
+      tag, so at minimum 1.0.0 gets one. Whether to backfill the history
+      or tag forward-only from 1.0.0 is the same workspace-wide policy
+      question the audit raises; not decided here.

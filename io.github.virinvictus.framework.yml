@@ -99,12 +99,10 @@ modules:
           - builddir
           - build-flatpak
           - .git
-          - .sumatrapdf
-          - .zathura
-          - .zathura-mupdf
-          - .sioyek
-          - .plato
-          - .fractal
+          # Read-only reference clones (gitignored, not part of the build).
+          - .foliate
+          - .foliate-js
           - .komikku
-          - .mcomix
-          - .yacreader
+          # Local stress-test corpus: copyrighted documents, never commit
+          # or ship them.
+          - .testfiles

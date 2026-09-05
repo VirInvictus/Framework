@@ -2,6 +2,17 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v0.82.1 (2026-09-04)
+
+*Documentation and build-hygiene repair from the workspace audit. No code changes; the binary is unchanged except for the version string.*
+
+* **CI no longer mentions libadwaita.** The workflow still installed `libadwaita-devel` and its comment claimed Framework requires it; libadwaita was dropped at v0.80.0. The dependency list and comment now match `src/meson.build` (GTK4 ≥ 4.16, WebKitGTK 6.0 ≥ 2.46).
+* **Test-suite docs tell the truth.** CLAUDE.md's suite list now includes the registered `stress-reflow`, and the corpus default is documented correctly: the registered tests resolve the gitignored `.testfiles/` directory (populate per `tests/README.md`, or override with `FW_TEST_CORPUS_ROOT`), not the Calibre Library. `tests/README.md` no longer credits pagination and highlight rendering to the deleted `FwReflowView`; that work lives in the `WebKitWebView`.
+* **Spec §1 matches spec §2.4.** The mission statement still said reflowable formats get a fixed `fz_layout_document(600, 900, 11)` pass and never re-flow, contradicting the WebKit reflow pipeline the spec itself describes (and that has shipped since v0.68). Rewritten; the MuPDF fixed-layout path is named as the fallback it is. Spec header tracks v0.82.1 (was v0.80.0).
+* **Flatpak manifest skip-list un-staled.** It excluded seven reference directories removed in v0.39.0 (`.sumatrapdf`, `.zathura`, and friends) and missed the three live clones (`.foliate`, `.foliate-js`) plus the `.testfiles/` corpus, whose copyrighted documents should never enter a build context.
+* **Roadmap renumbering.** The 2026-08-23 sweep section was the second section named "Phase 19"; it is now Phase 20, and citations to the sweep are unambiguous again. The stale `pick-it-up.md` handoff doc (self-marked "delete or refresh when the next chunk lands", four releases ago) is deleted.
+* **Spec §8.1 housekeeping.** The structure listing no longer marks `meson_options.txt`/`tests/` as "not present yet" (Phase 12 shipped them) and the symbolic app icon is no longer a TODO (shipped in the 1.0 assets pass).
+
 ## v0.82.0 (2026-07-17)
 
 *Phase 17's two deferred follow-ups, closing the reflow publisher-CSS story: AZW3/KF8 books now render with their own stylesheets, and publisher CSS no longer glares against a dark reading theme.*
