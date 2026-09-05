@@ -52,7 +52,14 @@ struct _FwDocumentCbr {
   GMutex        ctx_lock;         /* serializes ctx access */
   GMutex        archive_lock;     /* serializes libarchive reads of self->path */
 
-  volatile int  cancel_flag;      /* set during scrubbing aborts */
+  /* Cancel uses a monotonic generation counter, not a flag. Workers
+   * capture cancel_gen at entry and bail at any later checkpoint
+   * where the live value differs, so a cancel discards exactly the
+   * renders in flight when it fired — and only those. (The earlier
+   * binary cancel_flag was never reset, so one scrubbing abort
+   * permanently broke all future renders of the document.) Same
+   * pattern as the DjVu backend's djvu_cancel_render. */
+  volatile gint      cancel_gen;
 
   /* Per-page bytes cache (Phase 14 follow-up). RAR has no central
    * directory, so seeking to entry N requires sequentially decompressing
@@ -185,9 +192,14 @@ cbr_extract_entry (FwDocumentCbr *self, int page)
   if (page < 0 || page >= self->page_count)
     return NULL;
 
+  /* Capture the cancel generation before any work — if a concurrent
+   * cancel lands between this read and the walk, discarding the
+   * extract is the safe direction. */
+  gint start_gen = g_atomic_int_get (&self->cancel_gen);
+
   g_mutex_lock (&self->archive_lock);
 
-  if (g_atomic_int_get (&self->cancel_flag)) {
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
     g_mutex_unlock (&self->archive_lock);
     return NULL;
   }
@@ -220,7 +232,7 @@ cbr_extract_entry (FwDocumentCbr *self, int page)
   struct archive_entry *entry;
 
   while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
-    if (g_atomic_int_get (&self->cancel_flag))
+    if (g_atomic_int_get (&self->cancel_gen) != start_gen)
       break;
 
     const char *name = archive_entry_pathname (entry);
@@ -277,11 +289,13 @@ cbr_extract_entry (FwDocumentCbr *self, int page)
 static cairo_surface_t *
 cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 {
+  gint start_gen = g_atomic_int_get (&self->cancel_gen);
+
   GBytes *gbytes = cbr_extract_entry (self, page);
   if (!gbytes)
     return NULL;
 
-  if (g_atomic_int_get (&self->cancel_flag)) {
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
     g_bytes_unref (gbytes);
     return NULL;
   }
@@ -398,6 +412,7 @@ typedef struct {
   int     n;
   double *widths;
   double *heights;
+  gint    start_gen;   /* cancel_gen captured when the probe started */
 } CbrDims;
 
 static void
@@ -415,7 +430,7 @@ cbr_dims_free (CbrDims *d)
  * independent (the file is read-only), so this runs alongside render
  * workers; ctx access is serialized on ctx_lock. Archive order need not
  * match page (filename-sorted) order, so dims are placed by name lookup.
- * Bails out on cancel_flag. */
+ * Bails out when cancel_gen moves. */
 static void
 cbr_probe_dims_thread (GTask        *task,
                        gpointer      source,
@@ -427,6 +442,7 @@ cbr_probe_dims_thread (GTask        *task,
 
   CbrDims *d = g_new0 (CbrDims, 1);
   d->n       = self->page_count;
+  d->start_gen = g_atomic_int_get (&self->cancel_gen);
   d->widths  = g_new (double, self->page_count);
   d->heights = g_new (double, self->page_count);
   /* Seed with the open-time defaults so any entry we can't read keeps a
@@ -447,7 +463,7 @@ cbr_probe_dims_thread (GTask        *task,
   if (a) {
     struct archive_entry *entry;
     while (archive_read_next_header (a, &entry) == ARCHIVE_OK) {
-      if (g_atomic_int_get (&self->cancel_flag))
+      if (g_atomic_int_get (&self->cancel_gen) != d->start_gen)
         break;
       const char *name = archive_entry_pathname (entry);
       gpointer slot = name ? g_hash_table_lookup (name_to_page, name) : NULL;
@@ -513,7 +529,7 @@ cbr_probe_dims_done (GObject *source, GAsyncResult *res, gpointer user_data)
   if (!d)
     return;
 
-  gboolean cancelled = g_atomic_int_get (&self->cancel_flag);
+  gboolean cancelled = g_atomic_int_get (&self->cancel_gen) != d->start_gen;
   if (!cancelled && d->n == self->page_count) {
     g_mutex_lock (&self->ctx_lock);
     for (int i = 0; i < self->page_count; i++) {
@@ -681,9 +697,9 @@ cbr_close (FwDocument *doc)
   /* Stop any in-flight background dimension probe before tearing down
    * the entries / path it reads. The GTask holds a ref on self, so
    * dispose (hence this close) can't actually run mid-probe — but on a
-   * scrubbing-triggered close the flag lets the worker bail early
+   * scrubbing-triggered close the bump lets the worker bail early
    * instead of finishing a pointless full decompress. */
-  g_atomic_int_set (&self->cancel_flag, 1);
+  g_atomic_int_inc (&self->cancel_gen);
 
   /* Drop the per-page bytes cache before any of the surrounding state.
    * GBytes destroy via the hash's GDestroyNotify. */
@@ -954,7 +970,10 @@ static void
 cbr_cancel_render (FwDocument *doc)
 {
   FwDocumentCbr *self = FW_DOCUMENT_CBR (doc);
-  g_atomic_int_set (&self->cancel_flag, 1);
+  FW_TRACE_DOC ("cbr cancel_render: gen %u → %u",
+                (guint) g_atomic_int_get (&self->cancel_gen),
+                (guint) g_atomic_int_get (&self->cancel_gen) + 1);
+  g_atomic_int_inc (&self->cancel_gen);
 }
 
 static void

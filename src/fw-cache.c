@@ -520,7 +520,7 @@ render_worker (gpointer data, gpointer user_data)
   g_mutex_lock (&self->lock);
 
   /* If the render returned NULL because cancel_gen was bumped during
-   * the render (PDF fz_cookie abort, CBR cancel_flag flip), treat it
+   * the render (PDF fz_cookie abort, CBR/DjVu cancel_gen bump), treat it
    * as a transient cancellation — clear `rendering` but DON'T mark
    * `render_gen=current`. Otherwise the v0.24.0 sticky-fail check in
    * `submit_next_jobs` would skip this page until the next zoom or
