@@ -387,7 +387,12 @@ fw_document_new_for_path (const char *path, GError **error)
   FW_TRACE_DOC ("opening '%s' with %s backend", path, backend_label);
 
   if (!fw_document_open (doc, path, error)) {
-    FW_TRACE_DOC ("open FAILED: %s", (*error)->message);
+    /* Callers may legally pass error == NULL; don't deref it for the
+     * trace line. */
+    if (error && *error)
+      FW_TRACE_DOC ("open FAILED: %s", (*error)->message);
+    else
+      FW_TRACE_DOC ("open FAILED (no error set)");
     g_object_unref (doc);
     return NULL;
   }
