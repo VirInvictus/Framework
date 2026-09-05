@@ -225,7 +225,13 @@ get_proxy (FwTheme *self)
 }
 
 /* Descend through nested 'v' wrappers to the concrete value.  ReadOne
- * returns (v); the deprecated Read double-wraps. */
+ * returns (v); the deprecated Read double-wraps.
+ *
+ * Ownership quirk (verify before "simplifying"; LSan proved this):
+ * g_variant_ref_sink ADDS a reference when handed a non-floating
+ * variant, so after unwrap() the caller holds a reference to BOTH the
+ * returned value AND the wrapper it passed in, and must unref both.
+ * on_settings_signal does; query_dark must too. */
 static GVariant *
 unwrap (GVariant *v)
 {
@@ -239,7 +245,9 @@ unwrap (GVariant *v)
 }
 
 /* Query the portal for the preferred colour scheme.  1=dark, 2=light,
- * 0/none/no-portal → dark default. */
+ * 0/none/no-portal → dark default. Framework's no-answer default is
+ * dark, so "no preference" (0) and any unknown value stay dark too;
+ * only an explicit 2 turns the lights on. */
 static gboolean
 query_dark (FwTheme *self)
 {
@@ -265,9 +273,16 @@ query_dark (FwTheme *self)
   GVariant *val = unwrap (child);
   guint32 scheme = (val && g_variant_is_of_type (val, G_VARIANT_TYPE_UINT32))
                      ? g_variant_get_uint32 (val) : 0;
-  if (val) g_variant_unref (val);
+  /* See unwrap(): both the value and the wrapper carry a reference
+   * here. Missing the wrapper's unref leaked one GVariant tree per
+   * portal query (the sweep's "unref the GVariant child" finding). */
+  if (val && val != child)
+    g_variant_unref (val);
+  g_variant_unref (child);
   g_variant_unref (ret);
-  return scheme == 1;
+  /* scheme == 2 is the portal's only "light" answer; 0 (no preference)
+   * and 1 (dark) both keep the dark palette. */
+  return scheme != 2;
 }
 
 static void
@@ -289,9 +304,10 @@ on_settings_signal (GDBusProxy *proxy G_GNUC_UNUSED,
     guint32 scheme = (inner && g_variant_is_of_type (inner, G_VARIANT_TYPE_UINT32))
                        ? g_variant_get_uint32 (inner) : 0;
     if (inner) g_variant_unref (inner);
-    apply_scheme (self, scheme == 1);
+    /* Same contract as query_dark: only an explicit 2 is light. */
+    apply_scheme (self, scheme != 2);
     FW_TRACE_WINDOW ("theme: portal scheme changed → %s",
-                     scheme == 1 ? "dark" : "light");
+                     scheme != 2 ? "dark" : "light");
   }
   if (val) g_variant_unref (val);
 }
