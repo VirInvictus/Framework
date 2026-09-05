@@ -38,7 +38,7 @@ GSETTINGS_SCHEMA_DIR=builddir/data \
 # revert: meson configure builddir -Dsanitize=
 ```
 
-The src layer is now a `framework-core` static library plus a thin `framework` executable. Tests link against `framework_lib_dep` to reach internal symbols. `meson test -C builddir` runs registered targets — the suite is `stress-scrub`, `stress-zoom-storm`, `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`, `stress-reflow` (60–300 s timeouts). The registered tests default to the repo's gitignored `.testfiles/` corpus — populate it per `tests/README.md`, or point `FW_TEST_CORPUS_ROOT` at a directory holding the same canonical filenames. `bench-render` is built but not registered (latency benchmark, not pass/fail) — invoke directly with `--pages` / `--stride` / `--zoom`.
+The src layer is now a `framework-core` static library plus a thin `framework` executable. Tests link against `framework_lib_dep` to reach internal symbols. `meson test -C builddir` runs registered targets — the suite is `stress-scrub`, `stress-zoom-storm`, `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`, `stress-reflow`, `regress-phase20` (60–300 s timeouts). The registered tests default to the repo's gitignored `.testfiles/` corpus — populate it per `tests/README.md`, or point `FW_TEST_CORPUS_ROOT` at a directory holding the same canonical filenames. `bench-render` is built but not registered (latency benchmark, not pass/fail) — invoke directly with `--pages` / `--stride` / `--zoom`.
 
 ## Runtime debug tracing
 

@@ -318,6 +318,11 @@ Phase 16 Pillar 1 (en_US Knuth-Liang hyphenation, ASan-clean, verified on real E
 
 ## v0.66.0 (2026-05-27)
 
+*(Note, added 2026-09-05: no v0.66.0 release commit or tag exists; the tree went
+0.65.0 straight to 0.67.0 in a single release commit whose subject carries this
+entry's reflow-search work. The entry is kept for the narrative — cite v0.67.0
+for the code.)*
+
 *Reflow search. Ctrl+F now works inside EPUB / FB2 / MOBI / AZW3 / TXT, with match highlighting in the GtkListView. Closes the last functional gap in the Phase 13.1 reflow stack.*
 
 Fixed-layout search (PDF / DjVu / comics) has worked since v0.7, but the reflow pipeline shipped its `search()` backend hooks as stubs; typing in the search bar with an ebook open did nothing. This release implements reflow search end to end.
