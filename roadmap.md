@@ -250,6 +250,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **Flatpak Manifest** — Built, installed, and run end-to-end for the first time on 2026-09-04 (all modules from source under `org.gnome.Platform//50`, launched via `systemd-run --user --scope` per the memory note — no OOM events, no re-open-trigger trip; the 901-page Effective Java PDF rendered with state restore, verified by screenshot). Three manifest-level fixes came out of the first real build: (1) the skip-list staled in v0.39 was replaced (Stage 0) and a 128x128 PNG icon was added with the scalable/symbolic SVGs gated behind `-Dflatpak=false`, because both the appstream-compose step and flatpak's export icon-validator read icons via GdkPixbuf, and neither the Sdk nor a current Fedora host ships an SVG pixbuf loader — one unreadable icon failed the whole build ("file-read-error" at compose, "Format not recognized" at export); (2) a `glib-compile-schemas` post-install step, without which the app aborted at startup (schema present as XML, cache never compiled — `gnome.compile_schemas()` only serves in-tree dev runs); (3) `appstreamcli compose` in the Sdk validated cleanly once the icon was readable. Local install: `flatpak run io.github.virinvictus.framework`. The Flathub `type: git` + `tag:` swap still rides the 1.0.0 tag. (v0.83.1)
 - [x] **Permissions Audit** — Verdict (2026-09-04): the manifest's `finish-args` are tight and complete; no changes. No network share (matching the offline-only reflow content filter), display via `--socket=wayland` + `--fallback-x11`, GPU via `--device=dri`, `--share=ipc` for the WebKit/GTK shared-memory path, and three read-only xdg shortcuts for CLI invocations; everything else reaches the app through portals (FileChooser/OpenURI/Print are auto-wired, and the theme reader goes through `org.freedesktop.portal.Settings`, which sandboxes can always reach — no `--talk-name=` flags). Per-app GSettings and `XDG_DATA_HOME` state land in the sandbox's own dirs; auto-reload's `GFileMonitor` rides the document-portal grant. The spec §9.1 prose and the manifest agree (both say the xdg shortcuts are read-only). (v0.83.1)
 - [ ] **Tag 1.0.0 & Release** *(Brandon-gated per AUDIT_THREE Stage 5 and the §5.10/§5.12 tag policy; the manifest's `type: git` + `tag:` swap rides the tag.)*
+  *(DECIDED 2026-09-12 (Brandon): cut v1.0.0 now; forward-only anchor with an exemption note for the ~20 untagged releases (0.6.0-0.83.1); the manifest's git+tag swap rides the tag. The cut plus the maintenance pass is the next Framework lane.)*
 
 ## Phase 18: Hyprland-Leaning Design
 *Brandon moved his desktop from GNOME Shell to Hyprland (a Wayland tiling compositor). This phase is purely additive, filling gaps that were already latent under a floating window manager and only now visible under tiling. Nothing here removes a GNOME affordance or regresses floating-window behavior. Grounded in a source audit of `src/fw-window.c`, `src/fw-view.c`, `src/fw-application.c`, and `data/`.*
@@ -397,12 +398,14 @@ recorded open at the end.*
       and the symbolic-icon TODO were caught in the same pass — both long
       shipped. (v0.82.1)
 - [ ] **Parked branch backup (§5.10; Brandon's call).** The
+  *(DECIDED 2026-09-12 (Brandon): push the branch to origin as backup; pushed the same evening.)*
       `parking/phase-16-hyphenation` branch (Phase 16 Pillar 1,
       commit `88d2e72`) exists only on this machine; `origin` carries
       `main` only. Push the branch to origin, or accept the single-disk
       risk explicitly. Losing the clone loses the only copy of the
       hyphenation work.
 - [ ] **Tag backlog (§5.10/§5.12; Brandon's call).** Framework has zero
+  *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill.)*
       tags across ~20 shipped releases; the Flathub path hard-requires a
       tag, so at minimum 1.0.0 gets one. Whether to backfill the history
       or tag forward-only from 1.0.0 is the same workspace-wide policy
