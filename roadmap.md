@@ -407,3 +407,41 @@ recorded open at the end.*
       or tag forward-only from 1.0.0 is the same workspace-wide policy
       question the audit raises; not decided here.
   *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill.)*
+
+## New findings 2026-09-12 (six-lens full audit; detail: audit/FULL-AUDIT-2026-09-12.md, Wave 4)
+
+- [ ] **HIGH: DjVu search/text/links/TOC use the shared ddjvu context
+      without render_lock**, racing the render workers (UB; search runs on
+      a worker thread, get_links on mouse motion). Take render_lock around
+      every ddjvu_document_get_* call in the four functions.
+- [ ] **HIGH: MOBI INDX parser infinite loop + unbounded memory on
+      crafted input** (fw-mobi-parser.c:602: read_var_len returning length
+      0 never advances the loop). Break on zero length; same guard in the
+      fixed-count loop.
+- [ ] **Thread/lifetime fixes:** FwCache parsed-handle UAF window around
+      zoom (replace the rendering bool with an in-flight job count); CBR
+      non-volatile fz_try locals (mirror the PDF backend's volatile
+      pattern); DjVu miniexp expressions never released (leak per call;
+      ddjvu_miniexp_release on all paths); ExtractCtx holds a raw FwWindow
+      across the folder-dialog async (ref it); MOBI get_resources over-
+      refs against the documented transfer-none contract (leak per open).
+- [ ] **Dead surface:** the reading-two-column toggle has zero consumers
+      (the FwReflowView it drove was deleted in v0.76) - remove key +
+      switch + F10 branch or reimplement as CSS columns.
+- [ ] **Docs sweep before the tag (spec 6.2 GSettings table is fiction;
+      roadmap's kinetic default claim is backwards; menu/shortcut tables
+      stale; README "planned" labels on shipped parsers; format lists
+      disagree across four docs).** The full list is in the audit ledger.
+- [ ] **Blitz candidates:** the 1.0.0 maintenance pass (meson/spec/CLAUDE/
+      metainfo 1.0.0 entry/README sweep - agent-ready); the announcement
+      retrospective (becomes the tag message verbatim); vir-gtk-capi
+      adoption in the same stage as the tag (dependency-ordered with
+      vir-gtk's capi lane; if that slips, this is 1.0.1 work). Post-1.0
+      ranks: reflow auto-reload parity; thumbnail sidebar; presentation
+      mode; single-page view; the S-bundle (pinch zoom, stext pre-warm,
+      MD images, recolor keys); fw-window.c split on go.
+- [ ] **GitHub presentation (workspace batch):** description rewrite
+      (265 chars, leads with C17+GTK4); topics drop cpp (zero C++ files),
+      add pdf/xps/mobi/cbz/flatpak/wayland; the v1.0.0 GitHub Release body
+      is drafted in the audit ledger, ready when the tag lands; wiki off /
+      discussions on at the 1.0 push. Awaiting Brandon's go.
