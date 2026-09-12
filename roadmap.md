@@ -397,16 +397,13 @@ recorded open at the end.*
       renumbered to Phase 20. Spec §8.1's "tests/ not present yet" note
       and the symbolic-icon TODO were caught in the same pass — both long
       shipped. (v0.82.1)
-- [ ] **Parked branch backup (§5.10; Brandon's call).** The
-  *(DECIDED 2026-09-12 (Brandon): push the branch to origin as backup; pushed the same evening.)*
+- [x] **Parked branch backup (§5.10; Brandon's call).** The
       `parking/phase-16-hyphenation` branch (Phase 16 Pillar 1,
-      commit `88d2e72`) exists only on this machine; `origin` carries
-      `main` only. Push the branch to origin, or accept the single-disk
-      risk explicitly. Losing the clone loses the only copy of the
-      hyphenation work.
+      commit `88d2e72`) used to exist only on this machine.
+  *(DECIDED 2026-09-12 (Brandon): push the branch to origin as backup; pushed the same evening, so the single-disk risk is closed.)*
 - [ ] **Tag backlog (§5.10/§5.12; Brandon's call).** Framework has zero
-  *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill.)*
       tags across ~20 shipped releases; the Flathub path hard-requires a
       tag, so at minimum 1.0.0 gets one. Whether to backfill the history
       or tag forward-only from 1.0.0 is the same workspace-wide policy
       question the audit raises; not decided here.
+  *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill.)*
