@@ -97,6 +97,7 @@ open_action (GSimpleAction *action, GVariant *parameter, gpointer user_data)
   gtk_file_filter_add_pattern (filter, "*.oxps");
   gtk_file_filter_add_pattern (filter, "*.epub");
   gtk_file_filter_add_pattern (filter, "*.fb2");
+  gtk_file_filter_add_pattern (filter, "*.fb2.zip");
   gtk_file_filter_add_pattern (filter, "*.mobi");
   gtk_file_filter_add_pattern (filter, "*.azw");
   gtk_file_filter_add_pattern (filter, "*.azw3");

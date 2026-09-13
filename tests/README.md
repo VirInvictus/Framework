@@ -44,7 +44,10 @@ meson test -C builddir
 
 Registered tests: `stress-scrub`, `stress-zoom-storm`,
 `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`,
-`stress-reflow`. The benchmarks (`bench-render`, `bench-startup`,
+`stress-reflow`, `regress-phase20` (pins the Phase 20 fixes: CBR
+cancel-generation semantics, the search-indicator clear, and the
+ComicInfo paths, against synthetic in-memory comic archives). The
+benchmarks (`bench-render`, `bench-startup`,
 `bench-cache-hit-rate`) are built but not registered; invoke them
 directly.
 

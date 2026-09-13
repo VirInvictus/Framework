@@ -1250,15 +1250,6 @@ static void act_reading_settings (GSimpleAction *a, GVariant *p, gpointer d)
                    lh_spin, "value", G_SETTINGS_BIND_DEFAULT);
   gtk_list_box_append (g_size, fw_value_row ("Line height", NULL, lh_spin));
 
-  /* Layout group — two-column toggle. */
-  GtkListBox *g_layout = fw_pref_group (page, "Layout", NULL);
-  GtkWidget *two_col_sw = gtk_switch_new ();
-  g_settings_bind (self->settings, "reading-two-column",
-                   two_col_sw, "active", G_SETTINGS_BIND_DEFAULT);
-  gtk_list_box_append (g_layout, fw_value_row ("Two-column spread",
-    "Pages render side-by-side; navigation advances by two pages "
-    "per step. Toggleable in-flow with F10.", two_col_sw));
-
   /* Presets */
   GtkBox *g_pre = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 6));
   GtkWidget *pre_title = gtk_label_new ("Presets");
@@ -1530,13 +1521,6 @@ on_key_pressed (GtkEventControllerKey *controller,
       return TRUE;
     case GDK_KEY_Right:
       if (self->webview) fw_webview_scroll_by_page (self->webview, +1);
-      return TRUE;
-    case GDK_KEY_F10:
-      if (self->settings) {
-        gboolean cur = g_settings_get_boolean (self->settings,
-                                                "reading-two-column");
-        g_settings_set_boolean (self->settings, "reading-two-column", !cur);
-      }
       return TRUE;
     /* Up / Down / Page* / Home / End — let GTK's default focus walk
      * dispatch to the listview, which already handles them. */

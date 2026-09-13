@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 7 (2026-09-04, tracks v0.83.1)
+**Spec revision:** 8 (2026-09-13, tracks 1.0.0)
 **Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson
@@ -15,7 +15,7 @@ Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performa
 
 ## 1. Mission Statement
 
-Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, FB2, XPS, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
+Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, FB2, XPS, TXT, Markdown, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
 
 Reflowable formats (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown) do not go through MuPDF's fixed-layout engine by default: they are converted to HTML and rendered in a `WebKitWebView` with real reflow, typography, and themes (§2.4, Phase 17). MuPDF's fixed-layout rasterization remains the automatic fallback when the reflow parser refuses a file (toggleable via the "Render as Fixed Pages" setting).
 
@@ -28,7 +28,7 @@ Framework dropped libadwaita at v0.80.0 while keeping GTK4, to belong on a tilin
 - **Owned stylesheet.** A single `data/style.css` is the styling authority, loaded via a `GtkCssProvider` at `GTK_STYLE_PROVIDER_PRIORITY_USER + 1` (above a user's `~/.config/gtk-4.0/gtk.css`). Flat, square, 1px hard borders, no shadows, denser spacing than adwaita. Kanagawa Dragon (dark) / Kanagawa Lotus (light) palette as `@define-color` named colours.
 - **Dark/light** follows the system via the `org.freedesktop.portal.Settings` `color-scheme` preference read over GDBus (no GNOME dependency), with live updates on `SettingChanged` and a **dark default** when no portal backend answers. Fixed reading themes (Light / Sepia / Kanagawa Dark) still force their own polarity; only the "system" reading theme tracks the portal.
 - **Titlebar.** A slim flat `GtkHeaderBar` promoted to the real window titlebar, with `show-title-buttons` off (the compositor and a `Ctrl+Q` quit accel handle window control). Consequence: GTK auto-hides the titlebar in fullscreen (F11), which suits a reader; the header's page/zoom entries are unreachable there, same as any GTK app in fullscreen.
-- **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page — deliberate for narrow tiles. Width persists in the `sidebar-width` GSetting.
+- **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page — deliberate for narrow tiles.
 - **Dialogs** (Reading Settings, Keyboard Shortcuts, Document Properties) are transient modal `GtkWindow`s built from owned `GtkListBox` "boxed-list" row composites, Escape-to-close.
 
 ---
@@ -97,8 +97,7 @@ A dynamic, strictly managed hash table of `cairo_surface_t` + cached `GdkTexture
     * Action: Render visible pages plus a small lookahead.
     * Pacing: Yield the thread pool. Let the CPU drop to idle.
 2.  **Cruising (Moderate Velocity):** The user is reading at pace or scanning.
-    * Action (current): visible + 7 forward + 3 backward, drip-feed renders.
-    * Action (planned, see roadmap Phase 11 Tier 1): symmetric ±10 with sustained-velocity scroll damping so thumbnails are reserved for explicit jumps.
+    * Action (current): visible + a symmetric ±10-page priority window (interleaved forward/back, v0.14), dispatched through the pool's sort-function priority so the most recently viewed page renders first.
     * Pacing: Drip-feed background renders one at a time. The worker checks velocity between each render to prevent CPU spikes.
 3.  **Scrubbing (High Velocity):** The user has grabbed the scrollbar or flicked the wheel hard.
     * Action: **ABORT.** Bump `cancel_gen`. In-flight workers see the bumped counter and bail. Paint thumbnails (Tier 0) while scrubbing.
@@ -222,11 +221,11 @@ Custom `GtkWidget` subclass responsible for laying out and painting rendered pag
 
 **View modes:**
 
-| Mode | Behavior |
-|------|----------|
-| Continuous scroll (default) | All pages stacked vertically with gaps, free scroll. This is the primary mode |
-| Single page | One page at a time, page up/down to navigate |
-| Facing pages | Two pages side-by-side, first page alone (like a book). Continuous scroll variant preferred |
+| Mode | Status | Behavior |
+|------|--------|----------|
+| Continuous scroll | Shipped (default) | All pages stacked vertically with gaps, free scroll. The primary mode |
+| Facing pages | Shipped (v0.27, comic layouts) | Two pages side-by-side with the cover standalone; manga and webtoon variants compose with it. Fixed-layout formats only |
+| Single page | Deferred (post-1.0, §14) | One page at a time, page up/down to navigate. Not implemented |
 
 **Zoom modes:**
 
@@ -247,7 +246,7 @@ Custom `GtkWidget` subclass responsible for laying out and painting rendered pag
 
 **Scroll behavior:**
 
-- Smooth scrolling via `GtkScrolledWindow` kinetic scroll
+- Kinetic momentum scrolling via `GtkScrolledWindow`, on by default (`kinetic-scrolling` GSettings key, standard GTK behavior since v0.25.0)
 - Scroll position saved/restored per document
 - Page gap: 8px (scaled) between pages in continuous mode
 
@@ -266,31 +265,33 @@ Custom `GtkWidget` subclass responsible for laying out and painting rendered pag
 
 ### 3.4 Primary Menu
 
+The shipped menu (reading-view toggles are checkmark items backed by GSettings actions):
+
 ```text
-├── Open...                    (Ctrl+O)
-├── ─────────────
+├── Open...                      (Ctrl+O)
 ├── Zoom
-│   ├── Fit Width              (Ctrl+1)
-│   ├── Fit Page               (Ctrl+2)
-│   ├── Actual Size (100%)     (Ctrl+0)
-│   └── ─────────────
-│       Custom (shows current %)
-├── View Mode
-│   ├── Continuous             (radio)
-│   ├── Single Page            (radio)
-│   └── Facing Pages           (radio)
-├── Rotate
-│   ├── Rotate Clockwise       (Ctrl+Shift+Plus)
-│   └── Rotate Counter-CW     (Ctrl+Shift+Minus)
-├── ─────────────
-├── Invert Colors              (Ctrl+I)
-├── ─────────────
-├── Print...                   (Ctrl+P)
-├── Document Properties        (shows metadata dialog)
-├── ─────────────
-├── Keyboard Shortcuts         (Ctrl+?)
-├── About Framework
+│   ├── Fit Width                (Ctrl+1)
+│   ├── Fit Page                 (Ctrl+2)
+│   └── Actual Size (100%)       (Ctrl+0)
+├── Invert Colors                (Ctrl+I)
+├── Kinetic Scrolling            (toggle)
+├── Reading Ruler                (F8, toggle)
+├── Magnifying Loupe             (F7, toggle)
+├── Crop Margins                 (F6, toggle)
+├── Comic Layout
+│   ├── Manga Mode (RTL)         (F4, toggle)
+│   ├── Webtoon Mode             (F5, toggle)
+│   └── Facing Pages             (F10, toggle)
+├── Render as Fixed Pages        (toggle; reflow formats only)
+├── Print...                     (Ctrl+P)
+├── Save Embedded Files...       (PDF attachments)
+├── Reading Settings...
+├── Document Properties...
+├── Keyboard Shortcuts           (Ctrl+? / F1)
+└── About Framework
 ```
+
+Rotation has no menu entry; it is keyboard-only (Ctrl+Shift+Plus / Ctrl+Shift+Minus). There is no View Mode radio group: continuous scroll is the only shipped view mode for general documents (facing pages lives under Comic Layout; single-page mode is deferred, §14).
 
 ### 3.5 Search Bar
 
@@ -333,15 +334,16 @@ Sumatra defaults adapted to GTK conventions. All shortcuts visible in the Keyboa
 
 | Action | Shortcut(s) |
 |--------|-------------|
-| Next page | Page Down, Down (single page mode) |
-| Previous page | Page Up, Up (single page mode) |
+| Next page | Page Down |
+| Previous page | Page Up |
 | First page | Home, Ctrl+Home |
 | Last page | End, Ctrl+End |
 | Go to page | Ctrl+G (opens page entry focused) |
-| Scroll down | Down, j (continuous mode) |
-| Scroll up | Up, k (continuous mode) |
+| Scroll | Arrow keys (continuous mode) |
 | Back (history) | Alt+Left |
 | Forward (history) | Alt+Right |
+
+Vim-style `j`/`k` bindings were considered (Phase 18) and rejected: they cut against the stated non-goals (no vim bindings), and the arrow keys already cover the same surface.
 
 ### Zoom
 
@@ -368,9 +370,21 @@ Sumatra defaults adapted to GTK conventions. All shortcuts visible in the Keyboa
 |--------|-------------|
 | Toggle sidebar | F9 |
 | Fullscreen | F11 |
+| Hide chrome (titlebar + TOC) | F12 |
 | Rotate clockwise | Ctrl+Shift+Plus |
 | Rotate counter-clockwise | Ctrl+Shift+Minus |
 | Invert colors | Ctrl+I |
+| Reading ruler | F8 |
+| Magnifying loupe | F7 |
+| Crop margins | F6 |
+
+### Comic Layout
+
+| Action | Shortcut(s) |
+|--------|-------------|
+| Manga mode (RTL) | F4 |
+| Webtoon mode | F5 |
+| Facing pages | F10 |
 
 ### General
 
@@ -379,9 +393,8 @@ Sumatra defaults adapted to GTK conventions. All shortcuts visible in the Keyboa
 | Open file | Ctrl+O |
 | Print | Ctrl+P |
 | Copy (selected text) | Ctrl+C |
-| Select all (current page text) | Ctrl+A |
 | Quit / Close window | Ctrl+Q, Ctrl+W |
-| Keyboard shortcuts | Ctrl+? |
+| Keyboard shortcuts | Ctrl+?, F1 |
 
 ---
 
@@ -445,20 +458,24 @@ Stored in `$XDG_DATA_HOME/framework/state.json` (typically `~/.local/share/frame
 
 ### 6.2 Application Preferences
 
-Stored via GSettings. Schema: `io.github.virinvictus.framework` (adjust namespace as appropriate).
+Stored via GSettings. Schema: `io.github.virinvictus.framework`. The table below mirrors the shipped schema (`data/io.github.virinvictus.framework.gschema.xml`); defaults live there.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `default-zoom-mode` | enum | `fit-width` | fit-width, fit-page, custom |
-| `default-zoom-level` | double | 1.0 | Used when zoom-mode is custom |
-| `continuous-scroll` | bool | true | Default view mode |
-| `default-view-mode` | enum | `single` | single, facing |
-| `invert-colors` | bool | false | Color inversion |
-| `window-width` | int | 900 | Last window width |
-| `window-height` | int | 700 | Last window height |
-| `window-maximized` | bool | false | Last window state |
-| `sidebar-visible` | bool | false | Last sidebar state |
-| `sidebar-width` | int | 280 | Last sidebar width |
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `kinetic-scrolling` | bool | true | GTK kinetic momentum scrolling on the document scrolled window |
+| `reading-ruler` | bool | false | Reading ruler overlay (F8) |
+| `loupe` | bool | false | Magnifying loupe at the cursor (F7) |
+| `crop-margins` | bool | false | Auto-crop whitespace margins (F6) |
+| `manga-mode` | bool | false | Right-to-left page navigation (F4) |
+| `webtoon-mode` | bool | false | Zero-gap continuous strip (F5) |
+| `facing-pages` | bool | false | Two-up page pairs (F10) |
+| `reading-font-family` | string | "" | Reflow body font family; empty = bundled serif default |
+| `reading-font-size` | double | 13.0 | Reflow body font size in points (8.0–32.0) |
+| `reading-line-height` | double | 1.5 | Reflow line-height multiplier (1.0–2.5) |
+| `reading-monospace-family` | string | "" | Reflow code-block font; empty = system monospace |
+| `reading-theme` | enum | `system` | `system` / `light` / `sepia` / `dark` (WebKit reflow path) |
+| `publisher-styles` | bool | true | Honour publisher stylesheets and embedded fonts in reflow documents |
+| `prefer-fixed-layout` | bool | false | Open reflow-eligible formats through the MuPDF fixed-layout backend ("Render as Fixed Pages") |
 
 ---
 
@@ -618,7 +635,7 @@ Explicitly out of scope for v1.0 and likely forever:
 - **Not a converter.** No export, no save-as, no format conversion.
 - **Not a browser.** No tabs, no multi-document management within a single window. Multiple files = multiple windows.
 - **Not an image viewer.** No standalone JPEG, PNG, TIFF, SVG support. (Comic-book archives are framed images-as-pages — that's a different use case.)
-- **Not a full ebook reader.** As of Phase 17, EPUB / MOBI / AZW3 / FB2 / TXT / Markdown render through WebKitGTK with real reflow, a serif reading font, light/sepia/dark themes, font-size and line-height control, TOC navigation, and in-text search: a genuine reading experience, not just "it opens." What Framework still doesn't do: a library, annotations, dictionary/lookup, sync, or per-publisher CSS. For a dedicated ebook workflow [Foliate](https://johnfactotum.github.io/foliate/) remains more complete; Framework is the right tool when you want one viewer for fixed-layout PDFs, comics, and ebooks without switching apps.
+- **Not a full ebook reader.** As of Phase 17, EPUB / MOBI / AZW3 / FB2 / TXT / Markdown render through WebKitGTK with real reflow, a serif reading font, light/sepia/dark themes, font-size and line-height control, TOC navigation, and in-text search: a genuine reading experience, not just "it opens." Publisher stylesheets and embedded fonts ship too (v0.79, EPUB + KF8; with a toggle and dark-theme color transformation). What Framework still doesn't do: a library, annotations, dictionary/lookup, or sync. For a dedicated ebook workflow [Foliate](https://johnfactotum.github.io/foliate/) remains more complete; Framework is the right tool when you want one viewer for fixed-layout PDFs, comics, and ebooks without switching apps.
 
 ---
 
@@ -661,5 +678,5 @@ Framework v1.0 is done when all of the following hold. As of v0.21.0, only the r
 | ✅ | Smart text selection (v0.19): double-click word, triple-click line; v0.20 per-line drag highlights. |
 | ✅ | Auto-reload via `GFileMonitor` (v0.21) — recompile and the document refreshes with state restored. |
 | ✅ | A `<screenshots>` block exists in the AppStream metainfo before any Flathub submission. |
-| ☐ | Tagged `1.0.0`, signed if applicable. |
+| ✅ | Tagged `1.0.0` (2026-09-13; annotated, unsigned, at the release commit). |
 | ✅ | A grandma can open a PDF and read it without asking for help. |

@@ -127,6 +127,7 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **GThreadPool sort-function priority** — `RenderJob` carries `last_view_time`; the pool runs `g_thread_pool_set_sort_function (render_job_compare)`; `submit_next_jobs` pushes all unrendered in-window pages at once and lets the pool reorder by recency. The asymmetric "near vs far" priority tiers and the `active_jobs < job_limit` throttle are gone. Pattern from zathura's `zathura/render.c:94`. (v0.14)
 
 - [x] **Symmetric ±10-page parsed window with toggleable kinetic scrolling** — Priority window is now visible + 10 forward + 10 backward, interleaved, in all non-SCRUBBING states. A capture-phase `GtkEventControllerScroll` on `FwView` caps each scroll event at 90 px (wheel ticks scaled via `SCROLL_WHEEL_STEP = 60` first), applied directly to the vadjustment; this replaces GTK's default kinetic momentum scrolling. The cap is gated by a new GSettings key `kinetic-scrolling` (bool, default false) wired to a primary-menu toggle "Kinetic Scrolling" via `g_settings_create_action` — flipping the menu item switches behavior live. Default off = cache-friendly (the new project default); on = momentum flick for "gliding through research/school." (v0.14)
+  - **Correction (2026-09-13):** this box's default-false framing is historical. v0.25.0 removed the per-event scroll cap entirely and repurposed `kinetic-scrolling` as the standard `gtk_scrolled_window_set_kinetic_scrolling()` knob, flipping the shipped default to **true**; the schema description records why the old rationale is obsolete. The symmetric ±10 window itself shipped as described and is current.
 
 - [x] **Startup blur on saved-state open (regression)** — Real fix, not the predicted "obviated for free." Root cause was `update_cache_priority` in `fw-view.c` bailing on `gtk_widget_get_height <= 0` during state-restore (the adjustment value-changed fires before allocation settles). Fix adds a fallback path: when widget height is unallocated, derive the visible page from `page_y_offsets[]` and push that single page as priority. Combined with the sort-function dispatch above, the saved-page job lands ahead of the initial pages 0–13 queue and renders before the window first paints. (v0.14)
 
@@ -249,8 +250,8 @@ What's done, what's next, what's deferred. Sequenced for maximum performance and
 - [x] **Screenshots** — Wired 2026-09-04: the `<screenshots>` block is uncommented with all four real captures (`reading.png` featured/default, `contents.png`, `search.png`, `reflow.png`) pointed at stable raw GitHub URLs on `main` with honest captions, and `appstreamcli validate --no-net` passes. The URLs resolve on GitHub's side as soon as the branch pushes (the captures themselves are already tracked); if a future recrop is wanted, Flathub prefers 16:9 and these are 1500x980 — the note in the metainfo records the 1500x844 target. (v0.83.1)
 - [x] **Flatpak Manifest** — Built, installed, and run end-to-end for the first time on 2026-09-04 (all modules from source under `org.gnome.Platform//50`, launched via `systemd-run --user --scope` per the memory note — no OOM events, no re-open-trigger trip; the 901-page Effective Java PDF rendered with state restore, verified by screenshot). Three manifest-level fixes came out of the first real build: (1) the skip-list staled in v0.39 was replaced (Stage 0) and a 128x128 PNG icon was added with the scalable/symbolic SVGs gated behind `-Dflatpak=false`, because both the appstream-compose step and flatpak's export icon-validator read icons via GdkPixbuf, and neither the Sdk nor a current Fedora host ships an SVG pixbuf loader — one unreadable icon failed the whole build ("file-read-error" at compose, "Format not recognized" at export); (2) a `glib-compile-schemas` post-install step, without which the app aborted at startup (schema present as XML, cache never compiled — `gnome.compile_schemas()` only serves in-tree dev runs); (3) `appstreamcli compose` in the Sdk validated cleanly once the icon was readable. Local install: `flatpak run io.github.virinvictus.framework`. The Flathub `type: git` + `tag:` swap still rides the 1.0.0 tag. (v0.83.1)
 - [x] **Permissions Audit** — Verdict (2026-09-04): the manifest's `finish-args` are tight and complete; no changes. No network share (matching the offline-only reflow content filter), display via `--socket=wayland` + `--fallback-x11`, GPU via `--device=dri`, `--share=ipc` for the WebKit/GTK shared-memory path, and three read-only xdg shortcuts for CLI invocations; everything else reaches the app through portals (FileChooser/OpenURI/Print are auto-wired, and the theme reader goes through `org.freedesktop.portal.Settings`, which sandboxes can always reach — no `--talk-name=` flags). Per-app GSettings and `XDG_DATA_HOME` state land in the sandbox's own dirs; auto-reload's `GFileMonitor` rides the document-portal grant. The spec §9.1 prose and the manifest agree (both say the xdg shortcuts are read-only). (v0.83.1)
-- [ ] **Tag 1.0.0 & Release** *(Brandon-gated per AUDIT_THREE Stage 5 and the §5.10/§5.12 tag policy; the manifest's `type: git` + `tag:` swap rides the tag.)*
-  *(DECIDED 2026-09-12 (Brandon): cut v1.0.0 now; forward-only anchor with an exemption note for the ~20 untagged releases (0.6.0-0.83.1); the manifest's git+tag swap rides the tag. The cut plus the maintenance pass is the next Framework lane.)*
+- [x] **Tag 1.0.0 & Release** *(Brandon-gated per AUDIT_THREE Stage 5 and the §5.10/§5.12 tag policy; the manifest's `type: git` + `tag:` swap rides the tag.)*
+  *(DECIDED 2026-09-12 (Brandon): cut v1.0.0 now; forward-only anchor with an exemption note for the ~20 untagged releases (0.6.0-0.83.1); the manifest's git+tag swap rides the tag. SHIPPED 2026-09-13: v1.0.0 cut on the release commit it annotates (annotated tag, message = the 1.0.0 patchnotes entry verbatim), the manifest now sources that tag, and the stress suite ran 7/7 green on the release tree.)*
 
 ## Phase 18: Hyprland-Leaning Design
 *Brandon moved his desktop from GNOME Shell to Hyprland (a Wayland tiling compositor). This phase is purely additive, filling gaps that were already latent under a floating window manager and only now visible under tiling. Nothing here removes a GNOME affordance or regresses floating-window behavior. Grounded in a source audit of `src/fw-window.c`, `src/fw-view.c`, `src/fw-application.c`, and `data/`.*
@@ -401,12 +402,12 @@ recorded open at the end.*
       `parking/phase-16-hyphenation` branch (Phase 16 Pillar 1,
       commit `88d2e72`) used to exist only on this machine.
   *(DECIDED 2026-09-12 (Brandon): push the branch to origin as backup; pushed the same evening, so the single-disk risk is closed.)*
-- [ ] **Tag backlog (§5.10/§5.12; Brandon's call).** Framework has zero
+- [x] **Tag backlog (§5.10/§5.12; Brandon's call).** Framework has zero
       tags across ~20 shipped releases; the Flathub path hard-requires a
       tag, so at minimum 1.0.0 gets one. Whether to backfill the history
       or tag forward-only from 1.0.0 is the same workspace-wide policy
       question the audit raises; not decided here.
-  *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill.)*
+  *(DECIDED 2026-09-12 (Brandon): forward-only from v1.0.0; one exemption note covers the ~20 prior releases, no backfill. EXECUTED 2026-09-13: v1.0.0 is the first tag; the exemption lives in the 1.0.0 patchnotes intro, which is the tag message.)*
 
 ## New findings 2026-09-12 (six-lens full audit; detail: audit/FULL-AUDIT-2026-09-12.md, Wave 4)
 
@@ -425,13 +426,31 @@ recorded open at the end.*
       ddjvu_miniexp_release on all paths); ExtractCtx holds a raw FwWindow
       across the folder-dialog async (ref it); MOBI get_resources over-
       refs against the documented transfer-none contract (leak per open).
-- [ ] **Dead surface:** the reading-two-column toggle has zero consumers
+- [x] **Dead surface:** the reading-two-column toggle has zero consumers
       (the FwReflowView it drove was deleted in v0.76) - remove key +
       switch + F10 branch or reimplement as CSS columns.
-- [ ] **Docs sweep before the tag (spec 6.2 GSettings table is fiction;
+      *(Removed 2026-09-13, the recorded lean: the `reading-two-column`
+      schema key (whose description still named the deleted widget), the
+      Reading Settings "Layout" switch, and the reflow F10 branch are
+      gone. F10 stays on Facing Pages, which is what the shortcuts dialog
+      already documented.)*
+- [x] **Docs sweep before the tag (spec 6.2 GSettings table is fiction;
       roadmap's kinetic default claim is backwards; menu/shortcut tables
       stale; README "planned" labels on shipped parsers; format lists
       disagree across four docs).** The full list is in the audit ledger.
+      *(Done 2026-09-13: spec 6.2 rewritten from the shipped schema (the
+      ten fictional keys are gone); spec 3.4 menu rebuilt from the real
+      one; spec 3.3 marks single-page as deferred; spec 4 rebuilt from the
+      accel table + shortcuts dialog (j/k and Ctrl+A removed, F4-F12 added);
+      the nonexistent `sidebar-width` claim and the stale "planned"
+      symmetric-±10 line removed; spec 13 no longer claims publisher CSS is
+      missing; kinetic-default correction note added to the v0.14 box;
+      README lede/metadata format lists gain CB7/CBT/TXT, both "(planned)"
+      labels replaced with the shipped versions, F12 + shortcuts-dialog rows
+      added, publisher styles/progress/ComicInfo/F12 features documented;
+      tests/README gains regress-phase20; CLAUDE.md gains TXT, fw-comicinfo
+      and fw-dialog-widgets; metainfo gains TXT; *.fb2.zip added to the
+      file-dialog filter to match the shipped support.)*
 - [ ] **Blitz candidates:** the 1.0.0 maintenance pass (meson/spec/CLAUDE/
       metainfo 1.0.0 entry/README sweep - agent-ready); the announcement
       retrospective (becomes the tag message verbatim); vir-gtk-capi
@@ -440,6 +459,10 @@ recorded open at the end.*
       ranks: reflow auto-reload parity; thumbnail sidebar; presentation
       mode; single-page view; the S-bundle (pinch zoom, stext pre-warm,
       MD images, recolor keys); fw-window.c split on go.
+      *(2026-09-13: the maintenance pass and the retrospective are DONE in
+      the v1.0.0 release commits; vir-gtk-capi stays dependency-ordered on
+      vir-gtk's capi lane, 1.0.1 fallback per the recorded decision; the
+      post-1.0 ranks are untouched. Box stays open on the capi rider.)*
 - [ ] **GitHub presentation (workspace batch):** description rewrite
       (265 chars, leads with C17+GTK4); topics drop cpp (zero C++ files),
       add pdf/xps/mobi/cbz/flatpak/wayland; the v1.0.0 GitHub Release body

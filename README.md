@@ -13,7 +13,7 @@
 
 # Framework
 
-A fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, **AZW3**, and **Markdown** documents, and is engineered for performance — utilizing aggressive pre-caching and a tiling-first plain-GTK4 UI (an owned Kanagawa Dragon stylesheet, portal-driven dark/light) to provide a "SumatraPDF-like" experience for Linux.
+A fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. Framework opens **PDF**, **DjVu**, **CBZ**, **CB7**, **CBT**, **CBR**, **XPS**, **EPUB**, **FB2**, **MOBI**, **AZW3**, **TXT**, and **Markdown** documents, and is engineered for performance — utilizing aggressive pre-caching and a tiling-first plain-GTK4 UI (an owned Kanagawa Dragon stylesheet, portal-driven dark/light) to provide a "SumatraPDF-like" experience for Linux.
 
 ## Why this exists
 
@@ -37,6 +37,10 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
 | **Reflowable formats via WebKitGTK** | EPUB, MOBI/AZW3, FB2, TXT, and Markdown render through WebKitGTK (Phase 17): real text reflow with a serif reading font, light/sepia/dark themes, and live typography. The foliate-js-derived parsers (EPUB/MOBI/AZW3/FB2) and md4c (Markdown) feed stitched HTML to the WebView. Falls back to MuPDF fixed layout if an ebook won't parse. |
+| **Publisher styles, kept in their place** | EPUB and KF8/AZW3 books render with their own stylesheets and de-obfuscated embedded fonts (v0.79/0.82), toggleable live; when a dark theme is active, author-set light backgrounds and dark text get a lightness transform so publisher CSS never glares. Your reading theme and typography always win. |
+| **Reading progress for ebooks** | The header shows a live percentage while you read any reflow format, in the slot where fixed-layout documents show the page number (v0.83.0). |
+| **Comic metadata (ComicInfo.xml)** | Comics carrying a `ComicInfo.xml` sidecar fill Document Properties: series, number, volume, writer, penciller, publisher, genre (v0.83.0). |
+| **Distraction-free mode** | F12 hides the titlebar (and the TOC if open) without leaving the window; F11 fullscreen remains separate (v0.81.0). |
 
 ## Screenshots
 
@@ -94,6 +98,7 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 |--------|----------|
 | Toggle sidebar | F9 |
 | Fullscreen | F11 |
+| Hide chrome | F12 |
 | Invert colors | Ctrl+I |
 | Reading ruler | F8 |
 | Magnifying loupe | F7 |
@@ -124,6 +129,7 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | Print | Ctrl+P |
 | Copy selected text | Ctrl+C |
 | Quit | Ctrl+Q, Ctrl+W |
+| Keyboard shortcuts dialog | Ctrl+?, F1 |
 
 You can also drop a file directly onto the window to open it.
 
@@ -245,7 +251,7 @@ Copyright © John Factotum. Foliate licensed [GPL-3.0-or-later](https://github.c
 Foliate is the serious GNOME ebook reader; foliate-js is its parser library. The Phase 13.1 reflow rewrite is built on Foliate's architecture and ports format parsers from foliate-js into C. (Earlier patchnotes from v0.40.0 onward call this work "Fractal-style" — that was a slip; the actual reference Brandon meant was always Foliate. The architectural pattern is correct; the name was wrong.)
 
 - **`GListModel`-of-blocks + `GtkSignalListItemFactory` + per-row widget pattern** (v0.40.0–v0.75.0, `src/fw-reflow-view.c`; **removed in v0.76.0**) &mdash; structurally-typed items (paragraph, heading, image, blockquote, list, code) rendered into native widgets that wrap text natively, instead of pre-rendered to pixmaps. Pattern equivalent to Foliate's reader.js row-rendering chain. Superseded by the WebKitGTK renderer (see below) once every reflow format moved to it; the block-model widget was deleted in Phase 17.5.
-- **MOBI / KF7 / KF8 / AZW3 parser** (planned, Phase 13.1 Phase 4–5) &mdash; PalmDB envelope walk, PalmDOC LZ77 decompressor, EXTH metadata extraction, KF7 HTML stream / KF8 part-table dispatch. C port of `.foliate-js/mobi.js`.
+- **MOBI / KF7 / KF8 / AZW3 parser** (v0.52.0 KF7, v0.55.0 KF8/AZW3; `src/fw-mobi-parser.c` + `src/fw-reflow-document-mobi.c`) &mdash; PalmDB envelope walk, PalmDOC LZ77 decompressor, EXTH metadata extraction, KF7 HTML stream / KF8 part-table dispatch. C port of `.foliate-js/mobi.js`.
 - **EPUB OPF spine walker** (v0.42.0; `src/fw-reflow-document-epub.c`) &mdash; container.xml → OPF → manifest + spine + metadata; per-chapter XHTML through GMarkupParser. C port of `.foliate-js/epub.js`'s structural walk.
 - **FB2 walker** (v0.41.0; `src/fw-reflow-document-fb2.c`) &mdash; FictionBook XML through GMarkupParser; section nesting + inline styles + `<binary>` base64 → GdkTexture. C port of `.foliate-js/fb2.js`.
 - **Pagination math** (v0.48.0–v0.75.0, `src/fw-reflow-view.c::recompute_pagination`; **removed in v0.76.0**) &mdash; viewport-driven block-level pagination. Pattern conceptually from `.foliate-js/paginator.js`. Removed with the block-model renderer in Phase 17.5; the WebKitGTK path delegates pagination to the web engine (CSS).
@@ -288,7 +294,7 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 
 - **Webtoon mode (zero-gap continuous strip)** (v0.27; `src/fw-view.c::recompute_layout`) &mdash; F5 toggle drops `PAGE_GAP` to zero so vertically-laid-out long-strip comics stitch into a seamless single canvas. Conceptual pattern from Komikku's reader pager.
 - **Facing pages with cover-standalone** (v0.27; `src/fw-view.c::view_page_is_paired`) &mdash; F10 toggle pairs pages 1+2, 3+4, etc., with page 0 as the standalone cover. Mirrors how a physical book opens.
-- **Phase 13.1 reader-pager pattern reference** (planned) &mdash; secondary reference for the Foliate-style EPUB reflow rewrite, alongside foliate-js itself. See `.komikku/komikku/reader/pager/`.
+- **Phase 13.1 reader-pager pattern reference** &mdash; secondary reference for the Foliate-style reflow rewrite (v0.40+), alongside foliate-js itself. See `.komikku/komikku/reader/pager/`.
 
 ### Bundled libraries (vendored source)
 
