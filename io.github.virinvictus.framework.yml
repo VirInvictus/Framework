@@ -12,8 +12,11 @@
 #       build-flatpak io.github.virinvictus.framework.yml
 #   flatpak run io.github.virinvictus.framework
 #
-# Flathub submission requires switching the framework module's `type: dir`
-# source to `type: git` with a tag — see the comment near that block.
+# Flathub-style tagged-source build: since v1.0.0 the framework module
+# sources from the release tag on GitHub (forward-only tag anchor, decided
+# 2026-09-12) rather than the working directory. A git clone naturally
+# excludes the gitignored build output, reference clones, and test corpus
+# that the old `type: dir` skip-list named.
 
 app-id: io.github.virinvictus.framework
 runtime: org.gnome.Platform
@@ -82,12 +85,8 @@ modules:
         sha256: 5a1fce7373048a3e8985d6616ee37caaa1885ab90c1b0b3956bdb53d6ecd22af
 
   # ── Framework ──────────────────────────────────────────────────────
-  # For Flathub submission, swap this dir source for a git source pointing
-  # at a tagged release, e.g.:
-  #   sources:
-  #     - type: git
-  #       url: https://github.com/VirInvictus/Framework.git
-  #       tag: v1.0.0
+  # Sources from the v1.0.0 release tag (the tag this manifest itself
+  # ships in). Bump the tag on each release.
   - name: framework
     buildsystem: meson
     config-opts:
@@ -104,16 +103,6 @@ modules:
     post-install:
       - glib-compile-schemas /app/share/glib-2.0/schemas
     sources:
-      - type: dir
-        path: .
-        skip:
-          - builddir
-          - build-flatpak
-          - .git
-          # Read-only reference clones (gitignored, not part of the build).
-          - .foliate
-          - .foliate-js
-          - .komikku
-          # Local stress-test corpus: copyrighted documents, never commit
-          # or ship them.
-          - .testfiles
+      - type: git
+        url: https://github.com/VirInvictus/Framework.git
+        tag: v1.0.0
