@@ -1,5 +1,24 @@
 /* fw-document-djvu.c — DjVuLibre backend implementation
  *
+ * Threading model: DjVuLibre is not thread-safe. Every entry into the
+ * library — page creation, decode waiting, message pumping, and the
+ * outline/pagetext/pageanno/pageinfo queries — runs under the single
+ * per-document render_lock, mirroring the PDF backend's per-instance
+ * serialization. djvu_wait_for_job and djvu_drain_messages pump the
+ * shared context queue and must never run concurrently with each other
+ * or with a render, so no ddjvu call may be made outside the lock. The
+ * text/TOC/link queries can block internally on a decode job, which is
+ * the same trade the render path already makes (scrubbing bumps
+ * cancel_gen and the search checks it between pages).
+ *
+ * miniexp ownership: the s-expressions returned by
+ * ddjvu_document_get_outline/get_pagetext/get_pageanno live in
+ * DjVuLibre's expression pool and stay valid until ddjvu_miniexp_release
+ * (or the document is destroyed). Each one is walked under the lock and
+ * handed back with ddjvu_miniexp_release before the lock drops;
+ * callers copy what they need out during the walk, and nothing reads an
+ * expression after its release.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
@@ -406,18 +425,20 @@ djvu_get_toc (FwDocument *doc)
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
 
+  g_mutex_lock (&self->render_lock);
   miniexp_t outline = ddjvu_document_get_outline (self->djvu_doc);
-  if (outline == miniexp_dummy)
-    return NULL;
 
   FwTocNode *result = NULL;
 
-  if (miniexp_consp (outline)) {
+  if (outline != miniexp_dummy && miniexp_consp (outline)) {
     /* Top-level is (bookmarks entry...) — skip the 'bookmarks' symbol */
     miniexp_t entries = miniexp_cdr (outline);
     result = miniexp_to_toc (self->djvu_doc, entries);
   }
 
+  if (outline != miniexp_dummy)
+    ddjvu_miniexp_release (self->djvu_doc, outline);
+  g_mutex_unlock (&self->render_lock);
   return result;
 }
 
@@ -493,12 +514,22 @@ djvu_search (FwDocument *doc, const char *text, int page)
    * page's decode short-circuits before doing the work. */
   gint start_gen = g_atomic_int_get (&self->cancel_gen);
 
+  /* The lock covers the pagetext fetch, the walk into `buf`, the
+   * pageinfo probes in the hit loop, and the miniexp release; see the
+   * threading note in the file header. */
+  g_mutex_lock (&self->render_lock);
+
   miniexp_t page_text = ddjvu_document_get_pagetext (self->djvu_doc,
                                                       page, "word");
-  if (page_text == miniexp_dummy)
+  if (page_text == miniexp_dummy) {
+    g_mutex_unlock (&self->render_lock);
     return hits;
-  if (g_atomic_int_get (&self->cancel_gen) != start_gen)
+  }
+  if (g_atomic_int_get (&self->cancel_gen) != start_gen) {
+    ddjvu_miniexp_release (self->djvu_doc, page_text);
+    g_mutex_unlock (&self->render_lock);
     return hits;
+  }
 
   /* Walk the s-expression tree to find words matching the search text.
    * This is a simple substring search at the word level. */
@@ -506,6 +537,7 @@ djvu_search (FwDocument *doc, const char *text, int page)
    * rectangle-based hit reporting requires walking the tree with coords. */
   GString *buf = g_string_new (NULL);
   collect_text_from_sexpr (page_text, buf);
+  ddjvu_miniexp_release (self->djvu_doc, page_text);
 
   /* Simple case-insensitive search for hit count */
   const char *haystack = buf->str;
@@ -532,6 +564,8 @@ djvu_search (FwDocument *doc, const char *text, int page)
     p += needle_len;
   }
 
+  g_mutex_unlock (&self->render_lock);
+
   g_free (haystack_lower);
   g_free (needle_lower);
   g_string_free (buf, TRUE);
@@ -546,10 +580,13 @@ djvu_get_text (FwDocument *doc, int page,
 {
   FwDocumentDjvu *self = FW_DOCUMENT_DJVU (doc);
 
+  g_mutex_lock (&self->render_lock);
   miniexp_t page_text = ddjvu_document_get_pagetext (self->djvu_doc,
                                                       page, "word");
-  if (page_text == miniexp_dummy)
+  if (page_text == miniexp_dummy) {
+    g_mutex_unlock (&self->render_lock);
     return NULL;
+  }
 
   /* Map the doc-space query rect (points, top-left origin) into DjVu
    * hidden-text pixel space (image pixels, bottom-left origin), then
@@ -576,6 +613,8 @@ djvu_get_text (FwDocument *doc, int page,
 
   GString *buf = g_string_new (NULL);
   collect_text_in_rect (page_text, buf, qx0, qy0, qx1, qy1, all);
+  ddjvu_miniexp_release (self->djvu_doc, page_text);
+  g_mutex_unlock (&self->render_lock);
 
   if (buf->len == 0) {
     g_string_free (buf, TRUE);
@@ -594,9 +633,13 @@ djvu_get_links (FwDocument *doc, int page)
   GArray *links = g_array_new (FALSE, FALSE, sizeof (FwLink *));
   g_array_set_clear_func (links, (GDestroyNotify) fw_link_free_indirect);
 
-  miniexp_t annotations = ddjvu_document_get_pageanno (self->djvu_doc, page);
-  if (annotations == miniexp_dummy)
+  miniexp_t annotations;
+  g_mutex_lock (&self->render_lock);
+  annotations = ddjvu_document_get_pageanno (self->djvu_doc, page);
+  if (annotations == miniexp_dummy) {
+    g_mutex_unlock (&self->render_lock);
     return links;
+  }
 
   /* DjVu page annotations can contain maparea entries with links.
    * Walk the s-expression for (maparea url comment area) entries. */
@@ -656,6 +699,9 @@ djvu_get_links (FwDocument *doc, int page)
     }
     g_array_append_val (links, link);
   }
+
+  ddjvu_miniexp_release (self->djvu_doc, annotations);
+  g_mutex_unlock (&self->render_lock);
 
   return links;
 }

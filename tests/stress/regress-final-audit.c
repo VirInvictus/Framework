@@ -8,11 +8,16 @@
  *      clamp it before trimming or a crafted PDF with a Title/Author/
  *      Keywords longer than 1023 bytes walks past the 1024-byte stack
  *      buffer via Document Properties.
+ *   2. DjVu lock discipline (HIGH): the toc/text/links/search queries
+ *      run against the shared ddjvu context under render_lock, racing
+ *      render workers on the corpus DjVu (skipped when the corpus file
+ *      is absent).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "fw-document.h"
+#include "corpus-root.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -133,6 +138,75 @@ test_pdf_metadata_short_values (const char *dir)
   g_free (path);
 }
 
+/* ── 2. DjVu queries under the render lock ─────────────────────────── */
+
+typedef struct {
+  FwDocument *doc;
+  int pages_done;
+} DjvuRenderSpy;
+
+static void *
+djvu_render_thread (gpointer data)
+{
+  DjvuRenderSpy *spy = data;
+  for (int i = 0; i < 8; i++) {
+    cairo_surface_t *s = fw_document_render_page (spy->doc, i % 3, 1.0, 0);
+    if (s)
+      cairo_surface_destroy (s);
+    spy->pages_done++;
+  }
+  return NULL;
+}
+
+/* The old code called the outline/pagetext/pageanno/pageinfo queries
+ * with no render_lock, racing the render workers on the shared (and
+ * non-thread-safe) ddjvu context; the text queries also pump the
+ * context message queue concurrently with renders. Drive every query
+ * path while a render worker spins. */
+static void
+test_djvu_locked_queries (const char *path)
+{
+  g_test_message ("djvu: toc/text/links/search hold render_lock");
+
+  FwDocument *doc = open_doc (path);
+  g_assert_cmpint (fw_document_get_page_count (doc), >, 0);
+
+  FwTocNode *toc = fw_document_get_toc (doc);
+  fw_toc_node_free (toc);
+
+  DjvuRenderSpy spy = { .doc = doc, .pages_done = 0 };
+  GThread *worker = g_thread_new ("djvu-render", djvu_render_thread, &spy);
+  for (int page = 0; page < 3; page++) {
+    char *text = fw_document_get_text (doc, page, 0, 0, 0, 0);
+    g_free (text);
+
+    GArray *links = fw_document_get_links (doc, page);
+    if (links)
+      g_array_unref (links);
+
+    GArray *hits = fw_document_search (doc, "e", page);
+    if (hits)
+      g_array_unref (hits);
+  }
+  g_thread_join (worker);
+  g_assert_cmpint (spy.pages_done, ==, 8);
+
+  g_object_unref (doc);
+}
+
+static void
+test_djvu_wrap (void)
+{
+  g_autofree char *root = fw_test_corpus_root ();
+  g_autofree char *path = g_build_filename (root, "on-growth-and-form.djvu",
+                                            NULL);
+  if (!g_file_test (path, G_FILE_TEST_EXISTS)) {
+    g_test_skip ("corpus .testfiles/on-growth-and-form.djvu not populated");
+    return;
+  }
+  test_djvu_locked_queries (path);
+}
+
 /* ── Harness ───────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -173,6 +247,7 @@ main (int argc, char **argv)
   setup ();
   g_test_add_func ("/final-audit/pdf-metadata-clamp", test_pdf_long_wrap);
   g_test_add_func ("/final-audit/pdf-metadata-roundtrip", test_pdf_short_wrap);
+  g_test_add_func ("/final-audit/djvu-locked-queries", test_djvu_wrap);
   int status = g_test_run ();
   teardown ();
   return status;
