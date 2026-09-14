@@ -172,7 +172,9 @@ test('regress-final-audit',
   regress_final_audit,
   env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
         'G_TEST_BUILDDIR=' + meson.project_build_root()],
-  timeout: 60,
+  # 30 s is generous for a test that runs in well under a second; it
+  # bounds the damage if the INDX loop ever regresses (it hangs hot).
+  timeout: 30,
   protocol: 'exitcode',
   is_parallel: false,
 )

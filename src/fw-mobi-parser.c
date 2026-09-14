@@ -603,6 +603,7 @@ parse_indx_record_body (const guchar *rec, gsize rec_len,
         gsize count = 0;
         while (count < lt->value_bytes) {
           FwMobiVarLen vl = read_var_len (rec, rec_len, pos);
+          if (vl.length == 0) break;
           guint32 v = vl.value;
           g_array_append_val (vals, v);
           pos += vl.length;
