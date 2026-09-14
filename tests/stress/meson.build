@@ -157,3 +157,22 @@ test('regress-phase20',
   protocol: 'exitcode',
   is_parallel: false,
 )
+
+# Final-audit regression net (2026-09-13): the HIGH fixes and the
+# memory-safety family, each pinned against a synthetic document. No
+# corpus needed; runs anywhere.
+regress_final_audit = executable(
+  'regress-final-audit',
+  'regress-final-audit.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
+test('regress-final-audit',
+  regress_final_audit,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 60,
+  protocol: 'exitcode',
+  is_parallel: false,
+)

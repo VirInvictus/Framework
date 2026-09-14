@@ -1258,6 +1258,12 @@ metadata_lookup (fz_context *ctx, fz_document *doc,
   char buf[1024];
   int n = fz_lookup_metadata (ctx, doc, mupdf_key, buf, sizeof buf);
   if (n <= 0) return;
+  /* fz_lookup_metadata returns the UNTRUNCATED size per the MuPDF
+   * header, so an over-long value yields n > sizeof buf while buf
+   * itself only holds the truncated copy. Clamp before the trim loop
+   * or it walks (and zero-writes) past the stack buffer. */
+  if (n > (int) sizeof buf - 1)
+    n = (int) sizeof buf - 1;
   /* Trim trailing whitespace and reject empty values. */
   while (n > 0 && g_ascii_isspace (buf[n - 1])) buf[--n] = '\0';
   if (n == 0) return;
