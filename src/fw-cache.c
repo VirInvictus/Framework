@@ -933,38 +933,6 @@ fw_cache_set_velocity (FwCache *self, double velocity)
   return state_changed;
 }
 
-cairo_surface_t *
-fw_cache_get_page (FwCache *self, int page)
-{
-  g_return_val_if_fail (FW_IS_CACHE (self), NULL);
-
-  g_mutex_lock (&self->lock);
-  CacheEntry *entry = g_hash_table_lookup (self->pages,
-                                            GINT_TO_POINTER (page));
-  cairo_surface_t *surface = NULL;
-  if (entry && entry->surface) {
-    surface = cairo_surface_reference (entry->surface);
-    entry->last_access_us = g_get_monotonic_time ();
-  }
-  g_mutex_unlock (&self->lock);
-
-  return surface;
-}
-
-gboolean
-fw_cache_page_ready (FwCache *self, int page)
-{
-  g_return_val_if_fail (FW_IS_CACHE (self), FALSE);
-
-  g_mutex_lock (&self->lock);
-  CacheEntry *entry = g_hash_table_lookup (self->pages,
-                                            GINT_TO_POINTER (page));
-  gboolean ready = (entry && entry->surface != NULL);
-  g_mutex_unlock (&self->lock);
-
-  return ready;
-}
-
 GdkTexture *
 fw_cache_get_texture (FwCache *self, int page)
 {

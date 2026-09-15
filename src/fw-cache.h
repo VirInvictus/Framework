@@ -28,12 +28,6 @@ void             fw_cache_set_priority  (FwCache         *self,
 gboolean         fw_cache_set_velocity  (FwCache         *self,
                                          double           velocity);
 
-cairo_surface_t *fw_cache_get_page      (FwCache         *self,
-                                         int              page);
-
-gboolean         fw_cache_page_ready    (FwCache         *self,
-                                         int              page);
-
 /* Get cached GdkTexture for a page — reused across frames so we don't
  * allocate a new texture wrapper every snapshot(). Returns a borrowed
  * reference (do not unref). Falls back to the closest-zoom previous
