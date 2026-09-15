@@ -16,18 +16,14 @@ subprojects/
 
 # LSP / clangd (per-developer)
 /.clangd
+/.cache/
 /compile_commands.json
+/.claude/
 
 # Compiled objects
 *.o
 *.so
 *.a
-
-# Spec (internal planning doc)
-framework-spec.md
-
-# Claude Code
-claude.run
 
 # Vendored reference repos for Phase 13.1 reflow rewrite
 # (see CLAUDE.md "Reference repos" and docs/foliate-rewrite.md). The
