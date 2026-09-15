@@ -1042,7 +1042,6 @@ static void
 fw_document_cbr_iface_init (FwDocumentInterface *iface)
 {
   iface->open                    = cbr_open;
-  iface->close                   = cbr_close;
   iface->get_page_count          = cbr_get_page_count;
   iface->get_page_size           = cbr_get_page_size;
   iface->render_page             = cbr_render_page;

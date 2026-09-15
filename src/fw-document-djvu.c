@@ -842,7 +842,6 @@ static void
 fw_document_djvu_iface_init (FwDocumentInterface *iface)
 {
   iface->open           = djvu_open;
-  iface->close          = djvu_close;
   iface->get_page_count = djvu_get_page_count;
   iface->get_page_size  = djvu_get_page_size;
   iface->render_page    = djvu_render_page;

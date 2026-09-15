@@ -1361,7 +1361,6 @@ static void
 fw_document_pdf_iface_init (FwDocumentInterface *iface)
 {
   iface->open            = pdf_open;
-  iface->close           = pdf_close;
   iface->get_page_count  = pdf_get_page_count;
   iface->get_page_size   = pdf_get_page_size;
   iface->render_page     = pdf_render_page;

@@ -141,13 +141,6 @@ fw_document_open (FwDocument *self, const char *path, GError **error)
   return FW_DOCUMENT_GET_IFACE (self)->open (self, path, error);
 }
 
-void
-fw_document_close (FwDocument *self)
-{
-  g_return_if_fail (FW_IS_DOCUMENT (self));
-  FW_DOCUMENT_GET_IFACE (self)->close (self);
-}
-
 int
 fw_document_get_page_count (FwDocument *self)
 {

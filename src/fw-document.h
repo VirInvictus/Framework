@@ -89,7 +89,6 @@ struct _FwDocumentInterface {
   gboolean         (*open)           (FwDocument   *self,
                                       const char   *path,
                                       GError      **error);
-  void             (*close)          (FwDocument   *self);
 
   int              (*get_page_count) (FwDocument   *self);
   void             (*get_page_size)  (FwDocument   *self,
@@ -217,7 +216,6 @@ struct _FwDocumentInterface {
 gboolean         fw_document_open           (FwDocument   *self,
                                              const char   *path,
                                              GError      **error);
-void             fw_document_close          (FwDocument   *self);
 int              fw_document_get_page_count (FwDocument   *self);
 void             fw_document_get_page_size  (FwDocument   *self,
                                              int           page,
