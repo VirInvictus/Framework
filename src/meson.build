@@ -29,6 +29,9 @@ m_dep          = cc.find_library('m', required: false)
 # Source list, partitioned so tests can link against the engine without
 # pulling in main(). Everything except main.c is compiled into a static
 # library; the framework executable links it together with main.c.
+# No source globs, by policy: every new file is added to this list
+# explicitly, so an untracked or half-finished file can never silently
+# join the build.
 framework_lib_sources = files(
   'fw-application.c',
   'fw-window.c',

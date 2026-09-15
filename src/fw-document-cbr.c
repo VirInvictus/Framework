@@ -15,10 +15,12 @@
  *
  * Threading: libarchive readers can't be shared across threads on the same
  * archive — every render call opens a fresh `archive *`, walks to the
- * target entry, extracts bytes, and closes. Multiple render threads can
- * each open their own reader, so the only serialization is access to the
- * shared `fz_context` for image decoding (one cairo surface gets created
- * per render; cheap on the cache miss path, never touched on cache hit).
+ * target entry, extracts bytes, and closes. Three locks divide the work:
+ * `archive_lock` serializes the extracted-bytes cache and any direct
+ * archive walks, `ctx_lock` serializes the shared `fz_context` for image
+ * decoding, and the per-page dimension arrays are written under
+ * `ctx_lock` but read unlocked (see cbr_get_page_size for why that
+ * tolerance is deliberate).
  *
  * RAR sequential-stream cost: random page access requires walking entries
  * from the start. For a 200-page archive the worst case is ~5s of pure

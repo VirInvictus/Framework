@@ -1,20 +1,21 @@
 /* tests/stress/stress-zoom-storm.c — zoom-transition stress test
  *
- * Hammers the v1.4 prev_surface stash path and the v1.5 texture cache
- * lifecycle by alternating Ctrl+Plus / Ctrl+Minus across the full zoom
- * range (10%–1000%) on a single page. Each zoom change calls
- * fw_cache_start() which bumps render_gen, moves the current surface to
- * prev_surface, and queues a re-render at the new zoom.
+ * Hammers the zoom-transition path (the v0.28 multi-slot prev_slots[]
+ * retention) and the v1.5 texture cache lifecycle by alternating
+ * Ctrl+Plus / Ctrl+Minus across the full zoom range (10%-1000%) on a
+ * single page. Each zoom change calls fw_cache_start() which bumps
+ * render_gen, demotes the current surface into the entry's prev_slots
+ * ring, and queues a re-render at the new zoom.
  *
  * Asserts:
  *   - no crashes
  *   - peak RSS under FW_STRESS_RSS_CAP_MB
  *   - the cache's surfaces converge to a stable count after settle
  *
- * If any of the surface/texture lifecycle code (cache_entry_free,
- * fw_cache_start's prev_surface move, the v1.5 texture-before-surface
- * unref ordering) is wrong, this test runs a leak per cycle and ASan
- * catches it.
+ * If any of the surface/texture lifecycle code (cache_entry_free, the
+ * fw_cache_start slot demotion, the v1.5 texture-before-surface unref
+ * ordering) is wrong, this test runs a leak per cycle and ASan catches
+ * it.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

@@ -5,8 +5,9 @@
  * file-type creation, so write-to-file (state.json, attachment
  * extraction, print-to-spool) keeps working. Zathura's full
  * `landlock_restrict_write` (path-beneath-only writes) is a stronger
- * lockdown but breaks save-attachments — left as a Phase 15 item if
- * the threat model justifies the loss.
+ * lockdown but breaks save-attachments, so it stays deliberately
+ * unadopted (Phase 15 closed without it; revisit only if the threat
+ * model ever justifies losing attachment extraction).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

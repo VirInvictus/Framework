@@ -1,4 +1,14 @@
-/* fw-window.c
+/* fw-window.c — FwWindow: the per-document GtkApplicationWindow
+ *
+ * Owns everything above the render layer: the header bar and primary
+ * menu, the fixed-layout vs WebView open dispatch, the floating TOC,
+ * search wiring for both pipelines, zoom/rotation/fit actions, the
+ * navigation history stacks, auto-reload monitoring, printing,
+ * embedded-file extraction (with its owned-ref ExtractCtx), state
+ * save/restore, and the three owned dialogs. Rendering itself lives in
+ * fw-view.c (fixed layout) and fw-webview.c (reflow); the cache engine
+ * is fw-cache.c. At ~2,900 lines this is the tree's largest file —
+ * extraction candidates are tracked in roadmap.md's Remaining box.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -74,10 +84,10 @@ struct _FwWindow {
   GtkButton            *search_prev_button;
   GtkButton            *search_next_button;
 
-  /* Reflow search runs synchronously (the block model is in RAM), so
-   * there's no worker/signal machinery like FwSearch — the window holds
-   * the flat hit list and the active index directly. Used only when
-   * reflow_doc is set; the FwSearch path above drives fixed-layout. */
+  /* Reflow search lives inside FwWebView (WebKitFindController since
+   * Phase 17.5); the window only drives it via fw_webview_set_search and
+   * the find-next/previous calls. The FwSearch fields above drive
+   * fixed-layout documents only. */
 
   /* State */
   double                zoom;
@@ -2050,7 +2060,9 @@ fw_window_constructed (GObject *object)
   /* ── Stateful settings-backed action: Kinetic Scrolling toggle ──
    * g_settings_create_action returns a GAction whose state is bound
    * to the GSettings key — the menu checkmark stays in sync, and
-   * activating the action flips the setting (which fw-view listens to). */
+   * activating the action flips the setting; the scrolled window reads
+   * the key (gtk_scrolled_window_set_kinetic_scrolling is driven by the
+   * window since v0.25.0). */
   {
     /* Long-lived settings handle on the window — used both for the
      * stateful actions wired into the menu *and* for the
@@ -2613,10 +2625,9 @@ fw_window_open_reflow (FwWindow *self, const char *path)
   fw_reflow_sidebar_set_toc (self->reflow_sidebar,
                              fw_reflow_document_get_toc (self->reflow_doc));
 
-  /* Restore reading position.  Both restore calls queue internally if
-   * their view hasn't finished laying out / loading, so this is safe to
-   * call before allocation (FwReflowView) or before load-finished
-   * (FwWebView). */
+  /* Restore reading position. The WebView restore queues internally if
+   * the page hasn't finished loading, so this is safe to call before
+   * load-finished (FwWebView). */
   FwDocumentState *saved = fw_state_load (path);
   if (saved) {
     if (saved->webview_pos)
@@ -2624,8 +2635,9 @@ fw_window_open_reflow (FwWindow *self, const char *path)
     fw_document_state_free (saved);
   }
 
-  /* No file-monitor / state-restore in Phase 1. Both can land in a
-   * later phase once the reflow path proves stable. */
+  /* No file-monitor on the reflow path (fixed-layout has had one since
+   * v0.21; reflow parity is tracked as Phase 21 rank 1). State restore
+   * above IS wired. */
 
   FW_TRACE_WINDOW ("open_file (reflow) done: '%s'", path);
   return TRUE;

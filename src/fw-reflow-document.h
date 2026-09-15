@@ -50,7 +50,7 @@ struct _FwReflowDocumentInterface {
   /* Render the document as a single self-contained HTML string for the
    * WebKitGTK reader.  Backends that implement this method opt in to
    * the WebView render path; the window dispatches them there instead
-   * of through the FwReflowView GtkListView pipeline.
+   * of through the WebView (produce_html) pipeline.
    *
    * `doc_id` is the per-FwWebView identifier (host portion of
    * `framework-img://<doc-id>/<image-id>` URIs); embed it directly in

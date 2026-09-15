@@ -3,7 +3,7 @@
  * Uses fw-mobi-parser to extract a concatenated UTF-8 HTML body
  * (KF7: raw decompressed text; KF8: SKEL+FRAG-spliced sections),
  * then walks it with libxml2's htmlReadMemory + tree walker to
- * produce FwBlocks. libxml2's HTML mode is tolerant of malformed
+ * emit stitched HTML for the WebView. libxml2's HTML mode is tolerant of malformed
  * markup the same way Foliate's DOMParser is — orphan close tags,
  * unclosed elements, unquoted attributes, embedded XML decls all
  * survive parsing. This matches `.foliate-js/mobi.js`'s behavior.
@@ -48,10 +48,6 @@ G_DEFINE_FINAL_TYPE_WITH_CODE (FwReflowDocumentMobi,
                                G_TYPE_OBJECT,
                                G_IMPLEMENT_INTERFACE (FW_TYPE_REFLOW_DOCUMENT,
                                                       fw_reflow_document_mobi_iface_init))
-
-/* (Tag-balancer removed — libxml2's HTML mode handles malformed
- * markup natively. Kept here as a stub so the pre-libxml2 string
- * is gone. The MOBI body goes straight into htmlReadMemory now.) */
 
 /* ── libxml2 HTML walker ─────────────────────────────────────────
  *
@@ -423,9 +419,6 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
     }
   }
 
-  /* If a cover image was identified via EXTH-201, push it as the
-   * first block — flagged FW_BLOCK_FLAG_COVER so FwReflowView
-   * gives it a full-viewport page. */
   self->cover_recindex = m->cover_recindex;
 
   if (m->body_len == 0) {
@@ -440,7 +433,8 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
    * parser into m->toc with byte offsets into the spliced body); KF7
    * uses in-body filepos byte offsets. Either way we inject synthetic
    * id-bearing markers at those offsets so libxml2's tree carries them
-   * and find_block_by_anchor can resolve TOC targets. */
+   * and the WebView's anchor jumps (fw_webview_scroll_to_anchor) can
+   * resolve TOC targets. */
   gboolean kf8_toc = (m->is_kf8 && m->toc && m->toc->len > 0);
   g_autoptr (GArray) positions = NULL;
   const char *marker_prefix;

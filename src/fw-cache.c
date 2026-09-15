@@ -2,7 +2,8 @@
  *
  * Renders document pages asynchronously using a thread pool.
  * Pages are stored as cairo_surface_t* in a hash table keyed by page number.
- * Priority rendering: visible pages first, then forward, then backward.
+ * Priority is a symmetric window: the visible band plus NEAR_RANGE pages
+ * on each side, dispatched through the pool's sort function by recency.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -77,7 +78,7 @@ typedef struct {
 #define THUMB_WIDTH 150.0
 
 /* Tier 1: parsed page handles — lightweight backend objects (fz_page, ddjvu_page).
- * Wide window (~50 pages), negligible RAM cost, eliminates disk I/O on render. */
+ * Populated lazily by render workers and evicted with the priority window; negligible RAM cost, eliminates disk I/O on render. */
 typedef struct {
   gpointer handle;   /* backend page object from fw_document_open_page() */
   guint    render_gen;
@@ -400,7 +401,9 @@ thumb_worker (gpointer data, gpointer user_data)
   g_mutex_lock (&self->lock);
   ThumbEntry *te = g_hash_table_lookup (self->thumbs, GINT_TO_POINTER (job->page));
   if (!te) {
-    /* thumbs table was cleared while we rendered */
+    /* Defensive: no ThumbEntry exists for this page (dispose ordering
+     * does not actually produce this), so there is nothing to attach
+     * the surface to. */
     if (surface) cairo_surface_destroy (surface);
     g_mutex_unlock (&self->lock);
     g_free (job);
@@ -452,8 +455,9 @@ render_worker (gpointer data, gpointer user_data)
   g_mutex_unlock (&self->lock);
 
   /* Try to find or create a cached page handle (display list / parsed page).
-   * Display lists are created lazily here in the worker thread, NOT on the
-   * main thread — this prevents complex pages from blocking the UI. */
+   * Parsed page handles (fz_page / ddjvu_page) are created lazily here in
+   * the worker thread, NOT on the main thread — this prevents complex
+   * pages from blocking the UI. */
   gpointer parsed_handle = NULL;
   g_mutex_lock (&self->lock);
   ParsedEntry *parsed = g_hash_table_lookup (self->parsed,

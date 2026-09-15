@@ -988,7 +988,7 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
    * mean DRM: it also marks EPUB OCF font obfuscation, which is common
    * in DRM-free retail EPUBs and leaves the text fully readable. Only
    * treat the book as DRM when a non-obfuscation algorithm is present
-   * (see epub_encryption_is_drm). Font-obfuscation-only books fall
+   * (the drm flag, detected while reading encryption.xml). Font-obfuscation-only books fall
    * through and open normally. */
   GBytes *enc = g_hash_table_lookup (self->zip, "META-INF/encryption.xml");
   if (enc && epub_parse_encryption (self, enc)) {

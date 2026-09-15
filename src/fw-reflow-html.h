@@ -3,7 +3,7 @@
  * The reading stylesheet and the libxml2 subtree pass (strip active
  * content / stylesheet links, rewrite <img> to the framework-img:
  * scheme) are shared by every reflow backend that stitches HTML for the WebView
- * (EPUB, MOBI/AZW3, and FB2/TXT to come). The per-backend difference is
+ * (EPUB, MOBI/AZW3, FB2, TXT, Markdown). The per-backend difference is
  * only how an <img> maps to an image id, supplied as a resolver callback.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

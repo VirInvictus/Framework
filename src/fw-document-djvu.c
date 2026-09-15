@@ -540,10 +540,9 @@ djvu_search (FwDocument *doc, const char *text, int page)
     return hits;
   }
 
-  /* Walk the s-expression tree to find words matching the search text.
-   * This is a simple substring search at the word level. */
-  /* For now, extract full page text and do simple search — proper
-   * rectangle-based hit reporting requires walking the tree with coords. */
+  /* Extract the page's full text and do a plain substring search:
+   * proper rectangle-based hit reporting would require walking the
+   * tree with coordinates. */
   GString *buf = g_string_new (NULL);
   collect_text_from_sexpr (page_text, buf, 0);
   ddjvu_miniexp_release (self->djvu_doc, page_text);

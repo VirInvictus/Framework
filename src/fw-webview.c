@@ -726,7 +726,7 @@ fw_webview_scroll_by_page (FwWebView *self, int dir)
     self->web, script, -1, NULL, NULL, NULL, NULL, NULL);
 }
 
-/* ── Position get/restore (filled in at Step 5) ────────────────────── */
+/* ── Position restore ─────────────────────────────────────────────── */
 
 void
 fw_webview_restore_position (FwWebView *self, const char *json)
