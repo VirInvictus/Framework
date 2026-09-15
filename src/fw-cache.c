@@ -49,7 +49,14 @@ typedef struct {
   int              prev_slot_count;
   gsize            prev_slots_bytes; /* sum of prev_slots[*].size_bytes */
 
-  gboolean         rendering;      /* TRUE if a job is in the pool for this page */
+  /* In-flight render jobs for this page, any generation, plus the
+   * render_gen of the most recent one. A plain "is rendering" bool
+   * could be blanket-reset by fw_cache_start while an old-generation
+   * worker was still holding this page's parsed handle, which let
+   * Tier-1 eviction free a handle mid-use; a count can only reach
+   * zero when every pushed job has actually finished. */
+  guint            in_flight;
+  guint            in_flight_gen;
   guint            render_gen;     /* render params generation when this surface was created */
   gint64           last_access_us; /* monotonic µs of last fw_cache_get_*: drives LRU eviction */
 } CacheEntry;
@@ -252,6 +259,15 @@ get_or_create_entry (FwCache *self, int page)
   return entry;
 }
 
+/* One pushed job reached its terminal point (skip, cancel, store, or
+ * stale discard). All callers hold self->lock. */
+static void
+cache_entry_job_done (CacheEntry *entry)
+{
+  if (entry->in_flight > 0)
+    entry->in_flight--;
+}
+
 /* Tier 2 byte cap. Total surface + prev_surface bytes across all cached
  * pages. When exceeded, eviction drops outside-priority pages by oldest
  * cache-table-iteration order until under cap. Sized for a typical
@@ -427,7 +443,7 @@ render_worker (gpointer data, gpointer user_data)
     FW_TRACE_CACHE ("worker skip (cancel=%d params=%d scrub=%d): page=%d",
                     cancelled, wrong_params, scrubbing, job->page);
     CacheEntry *entry = g_hash_table_lookup (self->pages, GINT_TO_POINTER (job->page));
-    if (entry) entry->rendering = FALSE;
+    if (entry) cache_entry_job_done (entry);
     submit_next_jobs (self);
     g_mutex_unlock (&self->lock);
     g_free (job);
@@ -521,7 +537,7 @@ render_worker (gpointer data, gpointer user_data)
 
   /* If the render returned NULL because cancel_gen was bumped during
    * the render (PDF fz_cookie abort, CBR/DjVu cancel_gen bump), treat it
-   * as a transient cancellation — clear `rendering` but DON'T mark
+   * as a transient cancellation — mark the job done but DON'T mark
    * `render_gen=current`. Otherwise the v0.24.0 sticky-fail check in
    * `submit_next_jobs` would skip this page until the next zoom or
    * rotation change, leaving it stuck on the thumbnail tier (the
@@ -537,7 +553,7 @@ render_worker (gpointer data, gpointer user_data)
                     job->page);
     CacheEntry *entry = g_hash_table_lookup (self->pages,
                                               GINT_TO_POINTER (job->page));
-    if (entry) entry->rendering = FALSE;
+    if (entry) cache_entry_job_done (entry);
     submit_next_jobs (self);
     g_mutex_unlock (&self->lock);
     g_free (job);
@@ -570,7 +586,7 @@ render_worker (gpointer data, gpointer user_data)
     entry->rotation      = job->rotation;
     entry->scale_factor  = job->scale_factor;
     self->total_cached_bytes += entry->size_bytes;
-    entry->rendering  = FALSE;
+    cache_entry_job_done (entry);
     entry->render_gen = job->render_gen;
     entry->last_access_us = g_get_monotonic_time ();
 
@@ -585,7 +601,7 @@ render_worker (gpointer data, gpointer user_data)
       cairo_surface_destroy (surface);
     CacheEntry *entry = g_hash_table_lookup (self->pages,
                                               GINT_TO_POINTER (job->page));
-    if (entry) entry->rendering = FALSE;
+    if (entry) cache_entry_job_done (entry);
   }
 
   submit_next_jobs (self);
@@ -609,7 +625,8 @@ submit_next_jobs (FwCache *self)
   for (int i = 0; i < self->priority_len; i++) {
     int pg = self->priority_order[i];
     CacheEntry *entry = get_or_create_entry (self, pg);
-    if (entry->rendering)
+    /* One current-generation job per page: queued or running counts. */
+    if (entry->in_flight > 0 && entry->in_flight_gen == self->render_gen)
       continue;
     /* Skip if this entry has already been rendered at the current
      * generation — even if the render returned NULL. The previous
@@ -620,7 +637,8 @@ submit_next_jobs (FwCache *self)
     if (entry->render_gen == self->render_gen)
       continue;
 
-    entry->rendering = TRUE;
+    entry->in_flight++;
+    entry->in_flight_gen = self->render_gen;
 
     RenderJob *job = g_new0 (RenderJob, 1);
     job->cache          = self;
@@ -678,7 +696,11 @@ fw_cache_start (FwCache *self, double zoom, int rotation)
   g_hash_table_iter_init (&iter, self->pages);
   while (g_hash_table_iter_next (&iter, &key, &value)) {
     CacheEntry *entry = value;
-    entry->rendering = FALSE;  /* allow re-submission */
+    /* No blanket in-flight reset here: an old-generation worker may
+     * still hold this page's parsed handle, and Tier-1 eviction trusts
+     * the count. submit_next_jobs re-submits because in_flight_gen no
+     * longer matches the freshly bumped render_gen; the stale job bails
+     * at its first checkpoint (or stale-discards at store). */
     if (!entry->surface || entry->render_gen == self->render_gen)
       continue;
 
@@ -787,12 +809,15 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
 
   /* ── Tier 1: Evict parsed page handles outside the priority window ──
    * Handles are created lazily by render workers — we only evict here.
-   * IMPORTANT: skip pages with rendering=TRUE — a worker thread may be
-   * holding the handle pointer between releasing self->lock and calling
-   * render_page_from_handle. Evicting now would free it mid-use.
-   * Free-then-steal during iteration: the parsed table has no
-   * GDestroyNotify (handles need the document to close), so we free
-   * manually then steal the current entry — safe inside the iter. */
+   * A page with in-flight jobs is skipped: a worker may have read the
+   * handle out of the table and be rendering with it right now (the
+   * render itself runs without self->lock), and freeing it mid-use is
+   * a use-after-free. The count only reaches zero once every pushed
+   * job has hit a terminal point, and nothing but the job path touches
+   * it, so the guard is airtight. Free-then-steal during iteration:
+   * the parsed table has no GDestroyNotify (handles need the document
+   * to close), so we free manually then steal the current entry — safe
+   * inside the iter. */
   {
     GHashTableIter iter;
     gpointer key, value;
@@ -801,8 +826,8 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
       if (page_in_priority (self, GPOINTER_TO_INT (key)))
         continue;
       CacheEntry *ce = g_hash_table_lookup (self->pages, key);
-      if (ce && ce->rendering)
-        continue;  /* worker may be using this handle — skip */
+      if (ce && ce->in_flight > 0)
+        continue;  /* a worker holds this handle — skip */
       parsed_entry_free_with_doc (value, self->document);
       g_hash_table_iter_steal (&iter);
     }
@@ -830,7 +855,7 @@ fw_cache_set_priority (FwCache *self, const int *visible_pages, int n_visible)
     while (g_hash_table_iter_next (&iter, &key, &value)) {
       if (page_in_priority (self, GPOINTER_TO_INT (key))) continue;
       CacheEntry *entry = value;
-      if (entry->rendering) continue;
+      if (entry->in_flight > 0) continue;
       LruVictim v = { .page = GPOINTER_TO_INT (key),
                       .access_us = entry->last_access_us };
       g_array_append_val (victims, v);

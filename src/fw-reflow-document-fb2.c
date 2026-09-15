@@ -280,6 +280,10 @@ fb2_read_source (const char *path, char **out, gsize *out_len, GError **error)
     const char *name = archive_entry_pathname (entry);
     la_int64_t size = archive_entry_size (entry);
     if (size <= 0) { archive_read_data_skip (a); continue; }
+    /* Per-entry cap (256 MB, the CBR backend's bound): claimed sizes
+     * come straight from the file and a crafted huge claim used to go
+     * straight to g_malloc. */
+    if (size > (la_int64_t) 256 * 1024 * 1024) { archive_read_data_skip (a); continue; }
     gboolean is_fb2 = name && fb2_has_suffix_ci (name, ".fb2");
     /* Keep the first .fb2; otherwise the first regular file as fallback. */
     if (best_is_fb2 || (best && !is_fb2)) { archive_read_data_skip (a); continue; }

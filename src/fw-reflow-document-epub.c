@@ -94,6 +94,15 @@ read_zip_entries (FwReflowDocumentEpub *self,
       archive_read_data_skip (a);
       continue;
     }
+    /* Per-entry cap (256 MB, the CBR backend's bound): claimed sizes
+     * come straight from the file and a crafted huge claim used to go
+     * straight to g_malloc. */
+    if (size > (la_int64_t) 256 * 1024 * 1024) {
+      g_warning ("epub: entry '%s' claims %lld bytes; skipping", name,
+                 (long long) size);
+      archive_read_data_skip (a);
+      continue;
+    }
 
     g_autofree gchar *buf = g_malloc (size);
     la_ssize_t got = archive_read_data (a, buf, size);

@@ -6,6 +6,13 @@
  * code path also handles ZIP-based comics if dispatched here, but the
  * factory routes those through the MuPDF backend's own CBZ handler.
  *
+ * MuPDF uses setjmp/longjmp for exception handling via fz_try/fz_catch.
+ * CRITICAL RULES (same as the PDF backend):
+ *   - NEVER return/goto/longjmp from inside fz_try or fz_catch blocks
+ *   - Variables modified in fz_try and read in fz_catch or fz_always
+ *     must be volatile
+ *   - Use fz_always for cleanup of resources allocated inside fz_try
+ *
  * Threading: libarchive readers can't be shared across threads on the same
  * archive — every render call opens a fresh `archive *`, walks to the
  * target entry, extracts bytes, and closes. Multiple render threads can
@@ -308,7 +315,7 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
     return NULL;
   }
 
-  cairo_surface_t *surface = NULL;
+  cairo_surface_t *volatile surface = NULL;
   /* Set when the zero-size sub-pixel case fires below — benign
    * (zoom × image dims rounds to <1 px) so the catch handler
    * suppresses the warning. Genuine MuPDF errors still warn. */
@@ -316,10 +323,12 @@ cbr_render (FwDocumentCbr *self, int page, double zoom, int rotation)
 
   g_mutex_lock (&self->ctx_lock);
 
-  fz_buffer  *buf       = NULL;
-  fz_image   *img       = NULL;
-  fz_pixmap  *cairo_pix = NULL;
-  fz_device  *draw_dev  = NULL;
+  /* volatile: assigned inside fz_try, read in fz_always/fz_catch —
+   * setjmp may clobber non-volatile locals. */
+  fz_buffer *volatile buf       = NULL;
+  fz_image  *volatile img       = NULL;
+  fz_pixmap *volatile cairo_pix = NULL;
+  fz_device *volatile draw_dev  = NULL;
 
   size_t       sz    = 0;
   const guint8 *bytes = g_bytes_get_data (gbytes, &sz);
@@ -496,8 +505,8 @@ cbr_probe_dims_thread (GTask        *task,
       }
       if (ok) {
         g_mutex_lock (&self->ctx_lock);
-        fz_buffer *buf = NULL;
-        fz_image  *img = NULL;
+        fz_buffer *volatile buf = NULL;
+        fz_image  *volatile img = NULL;
         fz_try (self->ctx) {
           buf = fz_new_buffer_from_copied_data (self->ctx, bytes, (size_t) sz);
           img = fz_new_image_from_buffer (self->ctx, buf);
@@ -676,14 +685,14 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
    * it first renders. For 99% of comics every page is the same size, so
    * the default is correct from the start. The bytes-cache populated
    * here means the first real render of page 0 is also instant. */
-  double default_w = 1280, default_h = 1920;
+  double volatile default_w = 1280, default_h = 1920;
   GBytes *first_gbytes = cbr_extract_entry (self, 0);
   if (first_gbytes) {
     size_t first_sz = 0;
     const guint8 *first_bytes = g_bytes_get_data (first_gbytes, &first_sz);
     g_mutex_lock (&self->ctx_lock);
-    fz_buffer *buf = NULL;
-    fz_image  *img = NULL;
+    fz_buffer *volatile buf = NULL;
+    fz_image  *volatile img = NULL;
     fz_try (self->ctx) {
       buf = fz_new_buffer_from_copied_data (self->ctx, first_bytes, first_sz);
       img = fz_new_image_from_buffer (self->ctx, buf);

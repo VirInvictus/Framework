@@ -639,7 +639,10 @@ parse_indx (const guchar *data, gsize raw_len,
   guint32 num_records = read_be32 (data + off + 24);
   /* num_cncx at 0x34 — not used here (TOC-only). */
 
-  if (hdr_length + 12 > len) return NULL;
+  /* gsize arithmetic: hdr_length is file-controlled and the 32-bit sum
+   * wraps for values ≥ 0xFFFFFFF4, passing this check and feeding the
+   * TAGX probe a wild pointer. */
+  if ((gsize) hdr_length + 12 > len) return NULL;
 
   /* TAGX section starts at indx.length, has its own header
    * (magic 'TAGX', length at 4, num_control_bytes at 8). */

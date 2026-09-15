@@ -540,7 +540,10 @@ static GHashTable *mobi_get_metadata (FwReflowDocument *doc) {
 }
 static GHashTable *mobi_get_resources (FwReflowDocument *doc) {
   FwReflowDocumentMobi *self = FW_REFLOW_DOCUMENT_MOBI (doc);
-  return self->resources ? g_hash_table_ref (self->resources) : NULL;
+  /* Transfer none (fw-reflow-document.h): the table stays owned by the
+   * document; the WebView takes its own ref. Refing here leaked the
+   * table per MOBI/AZW3 open. */
+  return self->resources;
 }
 
 /* Resolve a MOBI <img> to its image-bytes key. Two reference forms,
@@ -664,7 +667,12 @@ mobi_collect_head_css (xmlNodePtr node, const char *doc_id,
       if (href) xmlFree (href);
     } else if (xmlStrcasecmp (n->name, BAD_CAST "style") == 0) {
       xmlChar *txt = xmlNodeGetContent (n);
-      if (txt && *txt) {
+      /* "</style" inside the text would break out of the emitted block;
+       * such content can only be hostile or broken — skip it (same rule
+       * as the EPUB collector; body-level script-stripping never sees
+       * the head). */
+      if (txt && *txt &&
+          !g_strstr_len ((const char *) txt, -1, "</style")) {
         g_string_append (head_out, "<style class=\"fw-pub\">");
         g_string_append (head_out, (const char *) txt);
         g_string_append (head_out, "</style>");

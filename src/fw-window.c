@@ -884,13 +884,18 @@ static void act_rotate_ccw (GSimpleAction *a, GVariant *p, gpointer d)
 /* ── Embedded files extraction ──────────────────────────────────── */
 
 typedef struct {
-  FwWindow *window;        /* weak: not refed; we live inside the window */
-  GArray   *attachments;   /* owned */
+  FwWindow    *window;      /* owned ref: the async op outlives the click */
+  FwDocument  *document;    /* owned ref: the attachments belong to this doc,
+                             * and the window may open a different file while
+                             * the folder dialog is up */
+  GArray      *attachments; /* owned */
 } ExtractCtx;
 
 static void
 extract_ctx_free (ExtractCtx *ctx)
 {
+  g_clear_object (&ctx->window);
+  g_clear_object (&ctx->document);
   if (ctx->attachments)
     g_array_unref (ctx->attachments);
   g_free (ctx);
@@ -910,7 +915,15 @@ extract_folder_chosen (GObject *source, GAsyncResult *result,
   }
 
   g_autofree char *folder_path = g_file_get_path (folder);
-  if (!folder_path || !ctx->window->document) {
+  if (!folder_path) {
+    extract_ctx_free (ctx);
+    return;
+  }
+
+  /* The window can close while the portal dialog is up; we survive that
+   * (owned refs) but there is no window left to report the summary to,
+   * so extraction is quietly dropped. */
+  if (!gtk_widget_get_visible (GTK_WIDGET (ctx->window))) {
     extract_ctx_free (ctx);
     return;
   }
@@ -923,8 +936,8 @@ extract_folder_chosen (GObject *source, GAsyncResult *result,
     g_autofree char *out_path = g_build_filename (folder_path, a->name, NULL);
 
     g_autoptr (GError) err = NULL;
-    if (fw_document_save_attachment (ctx->window->document, a,
-                                      out_path, &err)) {
+    if (fw_document_save_attachment (ctx->document, a,
+                                     out_path, &err)) {
       saved++;
     } else {
       failed++;
@@ -970,7 +983,8 @@ static void act_save_attachments (GSimpleAction *a, GVariant *p, gpointer d)
   }
 
   ExtractCtx *ctx = g_new0 (ExtractCtx, 1);
-  ctx->window      = self;
+  ctx->window      = g_object_ref (self);
+  ctx->document    = g_object_ref (self->document);
   ctx->attachments = list;
 
   GtkFileDialog *dialog = gtk_file_dialog_new ();
