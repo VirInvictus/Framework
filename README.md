@@ -30,10 +30,10 @@ I'm not pretending I came up with the architecture. Framework is a deliberate sy
 | **Sort-Function Priority Dispatch** | `g_thread_pool_set_sort_function` reorders the render queue by `last_view_time` so the most recently prioritized page runs next. The viewport always wins. |
 | **Parallel Rendering** | Eight independent MuPDF instances render pages across multiple CPU cores with zero shared state. |
 | **Zero-Copy Render** | MuPDF and DjVuLibre both write rendered pixels straight into the cairo surface buffer — no intermediate pixmap, no channel shuffle. |
-| **HiDPI Scaling** | Native device pixel ratio rendering for sharp text on Wayland fractional scaling. |
-| **Async Search with Cached Stext** | Page-by-page scan on a worker thread, surface hits as found. The 5-figure-page-textbook case warms once (~330 ms) and serves every subsequent search from cached structured text in tens of ms. |
+| **HiDPI Scaling** | Renders at the native device pixel ratio (fractional-scale sharpness is wired end to end; a final eyeball at 1.25x/1.5x on a real scaled display is still on the checklist). |
+| **Async Search with Cached Stext** | Page-by-page scan on a worker thread, surface hits as found. A 900-page textbook warms once (~330 ms) and serves every subsequent search from cached structured text in tens of ms. |
 | **Smart Text Selection** | Double-click selects a word, triple-click selects a line. Drag selection follows reading order across line wraps with per-line highlight rectangles. |
-| **Auto-Reload** | `GFileMonitor` watches the open document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. |
+| **Auto-Reload** | `GFileMonitor` watches the open fixed-layout document — recompile your LaTeX or Typst doc and Framework refreshes automatically, restoring exact scroll position. (Fixed-layout formats only; the reflow/WebKit path does not re-watch yet.) |
 | **Document Properties** | Per-document metadata dialog (title, author, dates, format, page count, file size) backed by a `get_metadata` interface method. |
 | **Comic Layouts** | Manga mode (RTL nav), Webtoon mode (zero-gap continuous strip), and Facing Pages (two-up with cover standalone) — composable, layout-anchor-preserving, and live-toggleable from the menu or F4/F5/F10. |
 | **Reflowable formats via WebKitGTK** | EPUB, MOBI/AZW3, FB2, TXT, and Markdown render through WebKitGTK (Phase 17): real text reflow with a serif reading font, light/sepia/dark themes, and live typography. The foliate-js-derived parsers (EPUB/MOBI/AZW3/FB2) and md4c (Markdown) feed stitched HTML to the WebView. Falls back to MuPDF fixed layout if an ebook won't parse. |
@@ -313,7 +313,7 @@ Top-tier native GNOME manga / webtoon reader. Reference for the comic-mode UX wo
 - **[Cairo](https://www.cairographics.org/)** (1.18+) — image surface management, the buffer MuPDF and DjVuLibre render directly into. LGPL-2.1-or-later / MPL-1.1.
 - **[GLib](https://docs.gtk.org/glib/)** (2.82+) — data structures, threading (`GThreadPool`), GObject, async I/O via GIO (file monitoring, archives, portals). LGPL-2.1-or-later.
 - **[JSON-GLib](https://gnome.pages.gitlab.gnome.org/json-glib/)** (1.10+) — per-document state persistence at `$XDG_DATA_HOME/framework/state.json`. LGPL-2.1-or-later.
-- **[Pango](https://docs.gtk.org/Pango/)** (via GTK) — text layout for the search bar and dialogs (and the planned Phase 13.1 reflow mode). LGPL-2.1-or-later.
+- **[Pango](https://docs.gtk.org/Pango/)** (via GTK) — text layout for the search bar and dialogs. LGPL-2.1-or-later.
 - **[Linux kernel Landlock LSM](https://landlock.io/)** (kernel 5.13+, ABI 1+) — process-scoped filesystem sandboxing applied at startup. Optional at runtime; the binary degrades to a no-op on older kernels.
 
 ### Tooling

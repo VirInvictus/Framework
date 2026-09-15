@@ -10,7 +10,7 @@
 > format now emits stitched HTML via `produce_html` and renders in a
 > `WebKitWebView` (`fw-webview.c`). `FwReflowView` itself was **deleted
 > in v0.76 (Phase 17.5a)**, and the block-model machinery it drove is
-> slated for removal in 17.5b. The *parser* halves of each backend
+> removed in 17.5b (v0.76). The *parser* halves of each backend
 > (the foliate-js-derived format walks) are unchanged and still
 > canonical. Read this doc for the format-parsing references and the
 > original rationale; for the current render path see Phase 17 in

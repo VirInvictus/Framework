@@ -29,8 +29,9 @@ a partial corpus still runs (you'll see `skip (missing)` lines).
 
 To use a corpus elsewhere on disk (for example your full library, for a
 heavier memory-pressure soak), set `FW_TEST_CORPUS_ROOT` to a directory
-containing files with these names. It overrides the `.testfiles/`
-default at meson configure time.
+containing files with these names. The variable is read per invocation
+at runtime (`g_getenv`), so no reconfigure is needed; the build-time
+default is the repo's `.testfiles/`.
 
 ## Building and running
 
@@ -46,7 +47,11 @@ Registered tests: `stress-scrub`, `stress-zoom-storm`,
 `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`,
 `stress-reflow`, `regress-phase20` (pins the Phase 20 fixes: CBR
 cancel-generation semantics, the search-indicator clear, and the
-ComicInfo paths, against synthetic in-memory comic archives). The
+ComicInfo paths, against synthetic in-memory comic archives), and
+`regress-final-audit` (pins the 2026-09-13 final-audit fixes: the PDF
+metadata clamp, the DjVu lock discipline, the MOBI INDX zero-length
+guard; builds synthetic documents, and skips the DjVu case when the
+corpus file is absent). The
 benchmarks (`bench-render`, `bench-startup`,
 `bench-cache-hit-rate`) are built but not registered; invoke them
 directly.

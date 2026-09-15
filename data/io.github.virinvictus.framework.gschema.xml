@@ -112,11 +112,12 @@
       <default>''</default>
       <summary>Font family used for the body text of reflow documents</summary>
       <description>
-        Pango font family name for paragraph text in EPUB / FB2 / TXT /
+        CSS font-family list for body text in EPUB / FB2 / TXT /
         MOBI / AZW3 reading. Empty string (the default) lets the
-        system serif fallback take over. Set to "OpenDyslexic" or
-        another locally-installed family to override. Picked from the
-        Reading Settings dialog in the primary menu.
+        bundled serif chain (Crimson Pro, then generic serif) take
+        over. Set to "OpenDyslexic" or another locally-installed family
+        to override. Picked from the Reading Settings dialog in the
+        primary menu.
       </description>
     </key>
 
@@ -125,10 +126,10 @@
       <range min="8.0" max="32.0"/>
       <summary>Font size in points for body text in reflow documents</summary>
       <description>
-        Body-text font size, in points, applied to PARAGRAPH /
-        BLOCKQUOTE / LIST_ITEM blocks in reflow documents. Headings
-        scale relative to this value. Default of 13pt matches a
-        comfortable laptop reading distance.
+        Body-text font size, in points, for the reflow reading view
+        (paragraphs, quotes, list items). Headings scale relative to
+        this value. Default of 13pt matches a comfortable laptop
+        reading distance.
       </description>
     </key>
 
@@ -147,10 +148,10 @@
       <default>''</default>
       <summary>Monospace font family used for code blocks in reflow</summary>
       <description>
-        Pango font family for CODE blocks and inline monospace spans
-        in reflow documents. Empty string falls back to the system
-        monospace alias. Set to a locally-installed monospace family
-        (Iosevka, JetBrains Mono, etc.) to override.
+        CSS font-family list for code blocks and inline monospace
+        spans in reflow documents. Empty string falls back to the
+        system monospace stack. Set to a locally-installed monospace
+        family (Iosevka, JetBrains Mono, etc.) to override.
       </description>
     </key>
 
