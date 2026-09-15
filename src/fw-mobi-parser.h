@@ -48,15 +48,11 @@ typedef struct {
   char         *language;
   char         *publisher;
 
-  /* Image records — decoded textures keyed by their 1-based MOBI
-   * recindex. `<img recindex="N">` resolves to images[N-1]. Cover
-   * image (when present) is at the EXTH-coverOffset position;
+  /* Image records — raw bytes keyed by their 1-based MOBI recindex.
+   * `<img recindex="N">` resolves to image_bytes[N-1]. Cover image
+   * (when present) is at the EXTH-coverOffset position;
    * `cover_recindex` is its 1-based index into this hash, or 0 if
    * none. Caller takes ownership: g_hash_table_unref. */
-  GHashTable   *images;          /* gchar* "1", "2", ... → GdkTexture* */
-  /* Same keys as `images`, but the raw record bytes (JPEG/PNG/GIF/WebP)
-   * rather than decoded textures. Feeds the WebView produce_html path's
-   * framework-img: scheme, which hands the bytes to WebKit to decode. */
   GHashTable   *image_bytes;     /* gchar* "1", "2", ... → GBytes* */
   guint         cover_recindex;  /* 1-based; 0 = no cover */
 

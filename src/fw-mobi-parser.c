@@ -1296,12 +1296,12 @@ fw_mobi_parse (const char *path, GError **error)
   }
 
   /* Image-record extraction. Walk records [resourceStart..end] —
-   * records that look like JPEG/PNG/GIF/WebP get decoded into a
-   * recindex → GdkTexture map. recindex is 1-based, so MOBI's
-   * `<img recindex="3">` points at images[3-1]. */
-  GHashTable *images_ht =
-    g_hash_table_new_full (g_str_hash, g_str_equal,
-                           g_free, g_object_unref);
+   * records that look like JPEG/PNG/GIF/WebP are collected into a
+   * recindex → raw-bytes map. recindex is 1-based, so MOBI's
+   * `<img recindex="3">` points at image_bytes["3"]. (An earlier
+   * revision additionally decoded every image into a GdkTexture table
+   * here; nothing ever read it — the WebView decodes the raw bytes
+   * itself — so it is gone.) */
   GHashTable *image_bytes_ht =
     g_hash_table_new_full (g_str_hash, g_str_equal,
                            g_free, (GDestroyNotify) g_bytes_unref);
@@ -1338,17 +1338,9 @@ fw_mobi_parse (const char *path, GError **error)
 
       /* recindex is 1-based: idx 0 → "1". */
       g_autofree char *key = g_strdup_printf ("%u", idx + 1);
-      g_autoptr (GBytes) bytes = g_bytes_new (p, len);
-
-      /* Keep the raw bytes for the WebView path regardless of whether
-       * GdkTexture can decode them (WebKit has its own decoders). */
-      g_hash_table_insert (image_bytes_ht, g_strdup (key),
-                           g_bytes_ref (bytes));
-
-      g_autoptr (GError) e = NULL;
-      GdkTexture *tex = gdk_texture_new_from_bytes (bytes, &e);
-      if (tex)
-        g_hash_table_insert (images_ht, g_strdup (key), tex);
+      GBytes *bytes = g_bytes_new (p, len);
+      g_hash_table_insert (image_bytes_ht, g_steal_pointer (&key),
+                           g_steal_pointer (&bytes));
 
       /* coverOffset (EXTH 201) is also a 0-based offset into the
        * resource-record range. If it matches the current idx, this
@@ -1365,7 +1357,6 @@ fw_mobi_parse (const char *path, GError **error)
   p->author         = meta_author;
   p->language       = meta_language;
   p->publisher      = meta_publisher;
-  p->images         = images_ht;
   p->image_bytes    = image_bytes_ht;
   p->cover_recindex = cover_recindex;
   p->is_kf8         = is_kf8;
@@ -1384,7 +1375,6 @@ fw_mobi_parsed_free (FwMobiParsed *p)
   g_free (p->author);
   g_free (p->language);
   g_free (p->publisher);
-  g_clear_pointer (&p->images, g_hash_table_unref);
   g_clear_pointer (&p->image_bytes, g_hash_table_unref);
   if (p->toc) {
     for (guint i = 0; i < p->toc->len; i++)
