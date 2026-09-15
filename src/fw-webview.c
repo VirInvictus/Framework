@@ -333,8 +333,8 @@ on_load_changed (WebKitWebView *web G_GNUC_UNUSED,
 
 /* A debounced scroll/load listener (injected as a user script) posts the
  * current {anchor, scroll_y} here as a JSON string.  We cache the latest
- * so the save-on-teardown path can read it synchronously — the async
- * fw_webview_get_position round-trip can't finish during dispose. */
+ * so the save-on-teardown path can read it synchronously — a JS
+ * round-trip can't finish during dispose. */
 static void
 on_position_message (WebKitUserContentManager *ucm G_GNUC_UNUSED,
                      JSCValue                 *value,
@@ -368,7 +368,7 @@ on_position_message (WebKitUserContentManager *ucm G_GNUC_UNUSED,
 
 /* User script: a passive, 200ms-debounced scroll listener (plus one shot
  * on load) that reports the topmost element with an id and the scroll
- * offset.  Mirrors the query fw_webview_get_position runs on demand. */
+ * offset.  The saved JSON is the reading position. */
 static const char FW_POS_USER_SCRIPT[] =
   "(function () {"
   "  function snap() {"
@@ -727,59 +727,6 @@ fw_webview_scroll_by_page (FwWebView *self, int dir)
 }
 
 /* ── Position get/restore (filled in at Step 5) ────────────────────── */
-
-typedef struct {
-  FwWebViewPositionCb cb;
-  gpointer            user_data;
-} PositionRequest;
-
-static void
-on_position_js_done (GObject *src, GAsyncResult *res, gpointer user_data)
-{
-  PositionRequest *pr = user_data;
-  WebKitWebView *web = WEBKIT_WEB_VIEW (src);
-  g_autoptr (GError) err = NULL;
-  g_autoptr (JSCValue) v =
-    webkit_web_view_evaluate_javascript_finish (web, res, &err);
-  if (!v || err) {
-    pr->cb (NULL, pr->user_data);
-  } else {
-    g_autofree char *json = jsc_value_to_json (v, 0);
-    pr->cb (json, pr->user_data);
-  }
-  g_free (pr);
-}
-
-void
-fw_webview_get_position (FwWebView           *self,
-                         FwWebViewPositionCb  cb,
-                         gpointer             user_data)
-{
-  g_return_if_fail (FW_IS_WEBVIEW (self));
-  g_return_if_fail (cb != NULL);
-  if (!self->load_done) { cb (NULL, user_data); return; }
-
-  const char *script =
-    "(function () {"
-    "  var se = document.scrollingElement || document.documentElement;"
-    "  var y = se ? se.scrollTop : window.scrollY;"
-    "  var max = se ? (se.scrollHeight - window.innerHeight) : 0;"
-    "  var f = max > 0 ? y / max : 0;"
-    "  f = f < 0 ? 0 : (f > 1 ? 1 : f);"
-    "  var a = null;"
-    "  var nodes = document.querySelectorAll('[id]');"
-    "  for (var i = 0; i < nodes.length; i++) {"
-    "    var r = nodes[i].getBoundingClientRect();"
-    "    if (r.top >= 0) { a = nodes[i].id; break; }"
-    "  }"
-    "  return { anchor: a, scroll_y: y, frac: f };"
-    "})()";
-  PositionRequest *pr = g_new0 (PositionRequest, 1);
-  pr->cb        = cb;
-  pr->user_data = user_data;
-  webkit_web_view_evaluate_javascript (
-    self->web, script, -1, NULL, NULL, NULL, on_position_js_done, pr);
-}
 
 void
 fw_webview_restore_position (FwWebView *self, const char *json)

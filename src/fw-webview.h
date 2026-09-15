@@ -49,14 +49,6 @@ void       fw_webview_scroll_to_anchor   (FwWebView    *self,
 void       fw_webview_scroll_by_page     (FwWebView    *self,
                                           int           dir);
 
-/* Asynchronously fetch the current reading position as JSON.  Callback
- * receives a g_strdup'd JSON string `{"anchor":"...", "scroll_y":N}` the
- * caller must free, or NULL on failure. */
-typedef void (*FwWebViewPositionCb) (const char *json, gpointer user_data);
-void       fw_webview_get_position       (FwWebView           *self,
-                                          FwWebViewPositionCb  cb,
-                                          gpointer             user_data);
-
 /* Restore a previously-saved position JSON.  Queues until after the next
  * page load completes if necessary. */
 void       fw_webview_restore_position   (FwWebView    *self,
@@ -98,8 +90,8 @@ void       fw_webview_set_dark_transform   (FwWebView *self,
  * kept current by a debounced in-page scroll listener that posts back to a
  * script-message handler.  Borrowed; valid until the next load or
  * dispose.  Returns NULL before the first scroll/load of the current
- * document.  Synchronous — meant for the save-on-teardown path where the
- * async fw_webview_get_position round-trip can't complete in time. */
+ * document.  Synchronous — the save-on-teardown path cannot wait for a
+ * JS round-trip during dispose. */
 const char *fw_webview_get_cached_position (FwWebView  *self);
 
 /* Latest scroll progress, 0..1, from the same position messages. Updates
