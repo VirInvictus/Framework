@@ -81,8 +81,12 @@ modules:
         USE_SYSTEM_LIBS=no build=release prefix=/app install
     sources:
       - type: archive
-        url: https://mupdf.com/downloads/archive/mupdf-1.27.1-source.tar.gz
-        sha256: 5a1fce7373048a3e8985d6616ee37caaa1885ab90c1b0b3956bdb53d6ecd22af
+        url: https://mupdf.com/downloads/archive/mupdf-1.28.2-source.tar.gz
+        sha256: 44075a84e329db55b9bef5f342a70fd26d69e48ad1d33cb89d9664581c641156
+        x-checker-data:
+          type: html
+          url: https://mupdf.com/downloads/archive/
+          pattern: mupdf-([\d.]+)-source.tar.gz
 
   # ── Framework ──────────────────────────────────────────────────────
   # Sources from the v1.0.0 release tag (the tag this manifest itself
@@ -106,3 +110,6 @@ modules:
       - type: git
         url: https://github.com/VirInvictus/Framework.git
         tag: v1.0.0
+        x-checker-data:
+          type: git
+          tag-pattern: '^v[\d.]+$'
