@@ -636,7 +636,7 @@ Dark-mode display for reading in low-light environments:
 
 Explicitly out of scope for v1.0 and likely forever:
 
-- **Not a file manager.** No recent files, no library, no collections, no thumbnails grid.
+- **Not a file manager.** No library, no collections, no thumbnails grid. (Ruled 2026-09-15: two narrow viewer-state carve-outs exist. Recent files may surface as a short continue-reading list sourced from the existing state.json, with no library UI; navigation bookmarks are named page marks stored only in state.json. Both live entirely in Framework's own viewer state; anything that manages files or writes into documents remains out of scope.)
 - **Not an editor.** No annotations, no form filling, no signatures, no markup.
 - **Not a converter.** No export, no save-as, no format conversion.
 - **Not a browser.** No tabs, no multi-document management within a single window. Multiple files = multiple windows.
@@ -647,7 +647,7 @@ Explicitly out of scope for v1.0 and likely forever:
 
 ## 14. Future Considerations (post-1.0 / v1.x)
 
-These are explicitly deferred. Do not implement before 1.0. Listed here only to ensure the architecture doesn't preclude them. Phase status in `roadmap.md` is the source of truth; phases 11-14 detail the borrows, layout shifts, and UX polish targeted post-1.0.
+These are explicitly deferred. 1.0 has shipped, so deferral is now ranking, not timing: the ranked post-1.0 lane is Phase 21 in `roadmap.md`, and Phase status there is the source of truth. phases 11–14 detail the borrows, layout shifts, and UX polish targeted post-1.0.
 
 - **Thumbnail sidebar** (alternative sidebar mode alongside TOC).
 - **Annotations** (highlight, underline; stored externally, not modifying the document).
