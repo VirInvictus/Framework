@@ -1,0 +1,51 @@
+Framework — project.done
+
+Completion date: 2026-09-15 (THE FINAL BLITZ)
+Commit range: 1babcce..95931a1 (21 commits, main == origin/main, CI green)
+Release: v1.0.1 tagged 2026-09-15 (annotated, message = the patchnotes
+entry verbatim, --cleanup=verbatim, cat-file verified); the GitHub
+Release was published by the new release.yml from the tag annotation,
+byte-identical. v1.0.0 (2026-09-13) predates the blitz.
+
+What shipped (the final audit's ranked list, executed top-down):
+- HIGH: PDF metadata_lookup clamp (fz_lookup_metadata returns the
+  untruncated size; ASan-verified crafted-PDF proof), DjVu render_lock
+  discipline across all four ddjvu query paths + miniexp release +
+  the lock-discipline header paragraph, MOBI INDX zero-length guard
+  (hang-hot regression proof). Each pinned in the new
+  regress-final-audit suite target (8 registered targets now).
+- MED: the seven-item memory-safety family (cache in-flight count,
+  ExtractCtx owned refs, MOBI transfer-none, EPUB/FB2 entry caps,
+  MOBI </style guard, hdr_length gsize, CBR volatile + CRITICAL
+  RULES header); the six-item dead-code sweep (each removal
+  Brandon-approved); the docs-residue sweep (desktop text/plain, DnD
+  decision, spec section renumber + real state keys, fallback claim
+  qualification, CLAUDE/README/tests-README/gschema truth); the
+  em-dash sweep (348 rendered, entities included) + slop kills; the
+  GitHub cluster (MuPDF 1.28.2 manifest bump + x-checker-data, CI
+  SHA-pin/concurrency/schedule/stress-compile, release.yml reading
+  the tag annotation, actions-only dependabot + bug template, active
+  no-force-push rulesets on main and v* tags).
+- LOW: robustness batch (coords init, fz_try-wrapped registration,
+  recursion caps, guint32 record index, documented cross-thread
+  tolerance), the 19-item comment-truth pass (O1 fw-window module
+  header, O2 CBR setjmp block, O3 no-source-globs note), housekeeping
+  (.claude deleted + repo ignores, tombstones pruned, relative
+  compile_commands symlink documented).
+- Features: slotted as roadmap Phase 21 (21 ranked boxes). Spec 13
+  amended by Brandon's ruling: continue-reading recents and state.json
+  navigation bookmarks are viewer state. Markdown highlighting pinned
+  to a hand-rolled tokenizer (no new dependency). fw-window split
+  stays tracked on explicit go.
+
+Reopen conditions (the recorded gated future work):
+- Flathub submission: prep done (docs/flathub-submission.md), per
+  decision the submission points at this v1.0.1 tag; the actual
+  submission (flathub repo + review) awaits Brandon's timing.
+- The Phase 21 feature lane (rank order in roadmap.md); Open Recent
+  and bookmarks are unblocked by the 13 amendment, unbuilt.
+- The fw-window.c split (on explicit go).
+- Dependabot's two open PRs (checkout v7, github-script v9 major
+  bumps) await review/merge.
+- Release binary assets: deliberately none (Flathub-first); revisit
+  only on real demand.
