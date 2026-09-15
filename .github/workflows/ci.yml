@@ -49,14 +49,16 @@ jobs:
 
       # Configure + compile the full C17 app, and build the stress/bench
       # harness so harness breakage shows up here instead of at release
-      # time. The document corpus is gitignored and absent on the runner,
-      # so corpus-driven tests skip (by design); the two regress targets
-      # build synthetic documents and run for real.
+      # time. The document corpus is gitignored and absent on the runner;
+      # the corpus-driven stress targets hard-fail without it (their
+      # skip-if-missing semantics cover a partial corpus, not an absent
+      # one), so CI runs only the two regress targets, which build
+      # synthetic documents and need no corpus.
       - name: meson setup
         run: meson setup builddir -Dstress=true
 
       - name: meson compile
         run: meson compile -C builddir
 
-      - name: meson test (corpus tests skip; regress targets run)
-        run: meson test -C builddir
+      - name: meson test (regress targets; corpus stays gitignored)
+        run: meson test -C builddir regress-phase20 regress-final-audit

@@ -24,8 +24,12 @@ Copy one file per format into `.testfiles/`, using these exact names
 | `vagabond-v01.cbr` | CBR | RAR comic via libarchive. |
 
 Any name can stand in for a different document of the same format; the
-filenames just have to match. Missing files are skipped, not failed, so
-a partial corpus still runs (you'll see `skip (missing)` lines).
+filenames just have to match. The corpus-walking targets (`stress-multidoc`,
+`stress-corpus-soak`) skip individual missing files with `skip (missing)`
+lines; the argv-targeted tests (the scrub/zoom/search registrations against
+`effective-java.pdf`) fail if their named sample is absent, and every
+corpus-driven target fails when the whole corpus is missing (as on a CI
+runner, which therefore runs only the two regress targets).
 
 To use a corpus elsewhere on disk (for example your full library, for a
 heavier memory-pressure soak), set `FW_TEST_CORPUS_ROOT` to a directory
