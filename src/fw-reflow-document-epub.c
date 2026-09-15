@@ -1152,11 +1152,6 @@ epub_open (FwReflowDocument *doc, const char *path, GError **error)
   return TRUE;
 }
 
-static void epub_close (FwReflowDocument *doc) {
-  FwReflowDocumentEpub *self = FW_REFLOW_DOCUMENT_EPUB (doc);
-  if (self->toc) g_list_store_remove_all (self->toc);
-}
-
 static GListModel *epub_get_toc (FwReflowDocument *doc) {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_EPUB (doc)->toc);
 }
@@ -1535,7 +1530,6 @@ static void
 fw_reflow_document_epub_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = epub_open;
-  iface->close                 = epub_close;
   iface->get_toc               = epub_get_toc;
   iface->get_metadata          = epub_get_metadata;
   iface->produce_html          = epub_produce_html;

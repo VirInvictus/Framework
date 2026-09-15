@@ -163,12 +163,6 @@ txt_open (FwReflowDocument *doc, const char *path, GError **error)
   return TRUE;
 }
 
-static void
-txt_close (FwReflowDocument *doc)
-{
-  (void) doc;
-}
-
 static GListModel *
 txt_get_toc (FwReflowDocument *doc)
 {
@@ -216,7 +210,6 @@ static void
 fw_reflow_document_txt_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = txt_open;
-  iface->close                 = txt_close;
   iface->get_toc               = txt_get_toc;
   iface->get_metadata          = txt_get_metadata;
   iface->produce_html          = txt_produce_html;

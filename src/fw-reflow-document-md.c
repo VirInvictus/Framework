@@ -72,12 +72,6 @@ md_open (FwReflowDocument *doc, const char *path, GError **error)
   return TRUE;
 }
 
-static void
-md_close (FwReflowDocument *doc)
-{
-  (void) doc;
-}
-
 static GListModel *
 md_get_toc (FwReflowDocument *doc)
 {
@@ -138,7 +132,6 @@ static void
 fw_reflow_document_md_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = md_open;
-  iface->close                 = md_close;
   iface->get_toc               = md_get_toc;
   iface->get_metadata          = md_get_metadata;
   iface->produce_html          = md_produce_html;

@@ -161,13 +161,6 @@ mobi_inject_markers (const char *body, gsize body_len,
   return g_string_free (out, FALSE);
 }
 
-static gint
-cmp_guint32 (gconstpointer a, gconstpointer b)
-{
-  guint32 x = *(const guint32 *) a, y = *(const guint32 *) b;
-  return (x > y) - (x < y);
-}
-
 /* ── KF8 kindle:pos links ────────────────────────────────────────
  *
  * KF8 internal links are `<a href="kindle:pos:fid:XXXX:off:YYYYYYYYYY">`
@@ -235,10 +228,10 @@ static void
 positions_sort_unique (GArray *positions)
 {
   if (positions->len < 2) {
-    g_array_sort (positions, cmp_guint32);
+    g_array_sort (positions, cmp_uint);
     return;
   }
-  g_array_sort (positions, cmp_guint32);
+  g_array_sort (positions, cmp_uint);
   guint w = 1;
   for (guint i = 1; i < positions->len; i++) {
     guint32 v = g_array_index (positions, guint32, i);
@@ -528,9 +521,6 @@ mobi_open (FwReflowDocument *doc, const char *path, GError **error)
   return TRUE;
 }
 
-static void mobi_close (FwReflowDocument *doc) {
-  (void) doc;
-}
 static GListModel *mobi_get_toc (FwReflowDocument *doc) {
   return G_LIST_MODEL (FW_REFLOW_DOCUMENT_MOBI (doc)->toc);
 }
@@ -783,7 +773,6 @@ static void
 fw_reflow_document_mobi_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = mobi_open;
-  iface->close                 = mobi_close;
   iface->get_toc               = mobi_get_toc;
   iface->get_metadata          = mobi_get_metadata;
   iface->get_resources         = mobi_get_resources;

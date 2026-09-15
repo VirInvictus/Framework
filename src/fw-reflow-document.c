@@ -82,14 +82,6 @@ fw_reflow_document_open (FwReflowDocument *self, const char *path, GError **erro
   return iface->open ? iface->open (self, path, error) : FALSE;
 }
 
-void
-fw_reflow_document_close (FwReflowDocument *self)
-{
-  g_return_if_fail (FW_IS_REFLOW_DOCUMENT (self));
-  FwReflowDocumentInterface *iface = FW_REFLOW_DOCUMENT_GET_IFACE (self);
-  if (iface->close)
-    iface->close (self);
-}
 
 
 

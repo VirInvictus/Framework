@@ -365,13 +365,6 @@ fb2_open (FwReflowDocument *doc, const char *path, GError **error)
 
 /* ── Interface accessors ──────────────────────────────────────── */
 
-static void
-fb2_close (FwReflowDocument *doc)
-{
-  FwReflowDocumentFb2 *self = FW_REFLOW_DOCUMENT_FB2 (doc);
-  if (self->toc) g_list_store_remove_all (self->toc);
-}
-
 static GListModel *
 fb2_get_toc (FwReflowDocument *doc)
 {
@@ -599,7 +592,6 @@ static void
 fw_reflow_document_fb2_iface_init (FwReflowDocumentInterface *iface)
 {
   iface->open                  = fb2_open;
-  iface->close                 = fb2_close;
   iface->get_toc               = fb2_get_toc;
   iface->get_metadata          = fb2_get_metadata;
   iface->produce_html          = fb2_produce_html;

@@ -40,7 +40,6 @@ struct _FwReflowDocumentInterface {
   gboolean     (*open)             (FwReflowDocument *self,
                                     const char       *path,
                                     GError          **error);
-  void         (*close)            (FwReflowDocument *self);
 
   /* Hot path — bound directly to GtkListView. */
 
@@ -85,7 +84,6 @@ struct _FwReflowDocumentInterface {
 gboolean     fw_reflow_document_open                (FwReflowDocument *self,
                                                      const char       *path,
                                                      GError          **error);
-void         fw_reflow_document_close               (FwReflowDocument *self);
 GListModel  *fw_reflow_document_get_toc             (FwReflowDocument *self);
 
 GHashTable  *fw_reflow_document_get_metadata        (FwReflowDocument *self);
