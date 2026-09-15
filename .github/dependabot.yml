@@ -1,0 +1,9 @@
+# Keep the pinned GitHub Actions (checkout, github-script) current.
+# Code dependencies are system packages resolved by meson; nothing for
+# dependabot to do there.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

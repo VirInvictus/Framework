@@ -4,10 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly probe: the container floats on fedora:latest, so drift in the
+  # distribution lands here first instead of at release time.
+  schedule:
+    - cron: '0 6 * * 1'
+
+# One run per ref; a new push cancels the superseded one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: configure + compile
+    name: configure + compile + stress harness
     runs-on: ubuntu-latest
     # Framework requires gtk4 >= 4.16 and webkitgtk-6.0 >= 2.46 (no
     # libadwaita since v0.80.0); Ubuntu runners ship gtk4 4.14, so a GTK4
@@ -36,13 +45,18 @@ jobs:
             libxml2-devel \
             webkitgtk6.0-devel
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # No unit-test suite: the tests/ tree is a stress/bench harness gated by
-      # -Dstress=true and needs a document corpus, so it is not run in CI. A
-      # clean configure + compile of the full C17 app is the meaningful check.
+      # Configure + compile the full C17 app, and build the stress/bench
+      # harness so harness breakage shows up here instead of at release
+      # time. The document corpus is gitignored and absent on the runner,
+      # so corpus-driven tests skip (by design); the two regress targets
+      # build synthetic documents and run for real.
       - name: meson setup
-        run: meson setup builddir
+        run: meson setup builddir -Dstress=true
 
       - name: meson compile
         run: meson compile -C builddir
+
+      - name: meson test (corpus tests skip; regress targets run)
+        run: meson test -C builddir

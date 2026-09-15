@@ -1,0 +1,41 @@
+name: Release
+
+# The verbatim-tag rule is the house law: an annotated tag's message IS the
+# release's full patchnotes entry. This workflow makes that mechanical: a
+# pushed v-tag publishes a GitHub Release whose body is the tag annotation,
+# byte for byte. No paraphrase layer exists to drift.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish the tag annotation as a Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the Release from the tag annotation
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const tag = process.env.GITHUB_REF_NAME;
+            // The tag ref points at a tag object (annotated); read its message.
+            const ref = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${tag}`,
+            });
+            const tagObj = await github.rest.git.getTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_sha: ref.data.object.sha,
+            });
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              body: tagObj.data.message,
+            });
