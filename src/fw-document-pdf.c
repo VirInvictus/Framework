@@ -328,7 +328,16 @@ pdf_open (FwDocument *doc, const char *path, GError **error)
     if (self->render[i].ctx) {
       fz_set_warning_callback (self->render[i].ctx, pdf_warn_handler, NULL);
       fz_set_error_callback (self->render[i].ctx, pdf_error_handler, NULL);
-      fz_register_document_handlers (self->render[i].ctx);
+      /* A throw outside fz_try aborts the process (OOM-only in
+       * practice); registration gets its own try so the instance open
+       * below is what reports the failure. */
+      fz_try (self->render[i].ctx) {
+        fz_register_document_handlers (self->render[i].ctx);
+      }
+      fz_catch (self->render[i].ctx) {
+        g_warning ("MuPDF: render instance %d: handler registration failed: %s",
+                   i, fz_caught_message (self->render[i].ctx));
+      }
       fz_try (self->render[i].ctx) {
         self->render[i].doc = fz_open_document (self->render[i].ctx, path);
         /* Reflowable formats need an identical layout pass per instance,

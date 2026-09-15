@@ -594,7 +594,15 @@ cbr_open (FwDocument *doc, const char *path, GError **error)
                          "Failed to create MuPDF context for image decoding");
     return FALSE;
   }
-  fz_register_document_handlers (self->ctx);
+  /* A throw outside fz_try aborts the process (OOM-only in practice);
+   * wrap so open fails with an error instead. */
+  fz_try (self->ctx) {
+    fz_register_document_handlers (self->ctx);
+  }
+  fz_catch (self->ctx) {
+    g_warning ("CBR: handler registration failed: %s",
+               fz_caught_message (self->ctx));
+  }
 
   self->path = g_strdup (path);
 
@@ -805,6 +813,13 @@ cbr_get_page_size (FwDocument *doc, int page, double *width, double *height)
     if (height) *height = 0;
     return;
   }
+  /* Unlocked read of dims written under ctx_lock by render workers and
+   * the background probe. Formally a data race; tolerated deliberately:
+   * the arrays are page_count-stable, the doubles are aligned 8-byte
+   * stores (no tearing on x86-64), and a caller-visible value at most
+   * one probe-write stale is harmless — the geometry-changed relayout
+   * repaints with the final value. Taking ctx_lock here would serialize
+   * layout against in-flight renders. */
   if (width)  *width  = self->page_widths[page];
   if (height) *height = self->page_heights[page];
 }

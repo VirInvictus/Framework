@@ -454,13 +454,13 @@ walk_exth (const guchar *exth, gsize exth_len,
   }
 }
 
-/* ── Image decoding — port of MOBI.loadResource ───────────────
+/* ── Image filtering — port of MOBI.loadResource ──────────────
  *
  * Foliate's loadResource peels off FONT/VIDE/AUDI prefixes and
  * returns raw bytes. For images, the bytes are JPEG/PNG/GIF
- * directly — gdk_texture_new_from_bytes handles all three.
- * Magic-byte check filters obviously-non-image records (FLIS,
- * FCIS, BOUNDARY, etc.) before we hand bytes to GdkTexture. */
+ * directly — WebKit decodes all three. The magic-byte check
+ * filters obviously-non-image records (FLIS, FCIS, BOUNDARY,
+ * etc.) before they reach the framework-img: table. */
 static gboolean
 looks_like_image (const guchar *p, gsize n)
 {
@@ -1192,7 +1192,10 @@ fw_mobi_parse (const char *path, GError **error)
 
   GString *body = g_string_sized_new (text_records * 4096);
   for (guint16 i = 1; i <= text_records; i++) {
-    guint16 abs_i = (guint16) (kf8_start + i);
+    /* guint32: on a combo file with a high boundary record the sum can
+     * exceed 16 bits, and a truncated abs_i could alias an earlier
+     * record past the bound check. */
+    guint32 abs_i = (guint32) kf8_start + i;
     if (abs_i >= record_count) break;
     gsize off = roff[abs_i];
     gsize len = roff[abs_i + 1] - off;

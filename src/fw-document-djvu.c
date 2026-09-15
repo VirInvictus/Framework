@@ -373,10 +373,15 @@ djvu_render_page (FwDocument *doc, int page, double zoom, int rotation)
 
 /* ── TOC extraction ───────────────────────────────────────────────── */
 
+/* The s-expressions below are file-controlled: bound the recursion so a
+ * hostile nesting depth cannot exhaust the stack. Real DjVu outlines and
+ * text trees are far shallower than this. */
+#define FW_DJVU_MAX_SEXPR_DEPTH 64
+
 static FwTocNode *
-miniexp_to_toc (ddjvu_document_t *doc, miniexp_t exp)
+miniexp_to_toc (ddjvu_document_t *doc, miniexp_t exp, int depth)
 {
-  if (!miniexp_consp (exp))
+  if (depth > FW_DJVU_MAX_SEXPR_DEPTH || !miniexp_consp (exp))
     return NULL;
 
   FwTocNode *first = NULL;
@@ -408,7 +413,7 @@ miniexp_to_toc (ddjvu_document_t *doc, miniexp_t exp)
 
     /* Recurse into children (cddr of the entry) */
     miniexp_t children = miniexp_cddr (entry);
-    node->children = miniexp_to_toc (doc, children);
+    node->children = miniexp_to_toc (doc, children, depth + 1);
 
     if (prev)
       prev->next = node;
@@ -433,7 +438,7 @@ djvu_get_toc (FwDocument *doc)
   if (outline != miniexp_dummy && miniexp_consp (outline)) {
     /* Top-level is (bookmarks entry...) — skip the 'bookmarks' symbol */
     miniexp_t entries = miniexp_cdr (outline);
-    result = miniexp_to_toc (self->djvu_doc, entries);
+    result = miniexp_to_toc (self->djvu_doc, entries, 0);
   }
 
   if (outline != miniexp_dummy)
@@ -445,8 +450,11 @@ djvu_get_toc (FwDocument *doc)
 /* ── Search — DjVuLibre text layer search ─────────────────────────── */
 
 static void
-collect_text_from_sexpr (miniexp_t exp, GString *buf)
+collect_text_from_sexpr (miniexp_t exp, GString *buf, int depth)
 {
+  if (depth > FW_DJVU_MAX_SEXPR_DEPTH)
+    return;
+
   if (miniexp_stringp (exp)) {
     g_string_append (buf, miniexp_to_str (exp));
     return;
@@ -461,7 +469,7 @@ collect_text_from_sexpr (miniexp_t exp, GString *buf)
     rest = miniexp_cdr (rest);
 
   for (; miniexp_consp (rest); rest = miniexp_cdr (rest))
-    collect_text_from_sexpr (miniexp_car (rest), buf);
+    collect_text_from_sexpr (miniexp_car (rest), buf, depth + 1);
 }
 
 /* Collect word text whose bbox overlaps [qx0,qy0,qx1,qy1], expressed in
@@ -472,9 +480,10 @@ collect_text_from_sexpr (miniexp_t exp, GString *buf)
  * text. */
 static void
 collect_text_in_rect (miniexp_t exp, GString *buf,
-                      int qx0, int qy0, int qx1, int qy1, gboolean all)
+                      int qx0, int qy0, int qx1, int qy1, gboolean all,
+                      int depth)
 {
-  if (!miniexp_consp (exp))
+  if (depth > FW_DJVU_MAX_SEXPR_DEPTH || !miniexp_consp (exp))
     return;
 
   miniexp_t p = miniexp_cdr (exp);   /* skip the type symbol */
@@ -495,7 +504,7 @@ collect_text_in_rect (miniexp_t exp, GString *buf,
         g_string_append (buf, miniexp_to_str (child));
       }
     } else {
-      collect_text_in_rect (child, buf, qx0, qy0, qx1, qy1, all);
+      collect_text_in_rect (child, buf, qx0, qy0, qx1, qy1, all, depth + 1);
     }
   }
 }
@@ -536,7 +545,7 @@ djvu_search (FwDocument *doc, const char *text, int page)
   /* For now, extract full page text and do simple search — proper
    * rectangle-based hit reporting requires walking the tree with coords. */
   GString *buf = g_string_new (NULL);
-  collect_text_from_sexpr (page_text, buf);
+  collect_text_from_sexpr (page_text, buf, 0);
   ddjvu_miniexp_release (self->djvu_doc, page_text);
 
   /* Simple case-insensitive search for hit count */
@@ -612,7 +621,7 @@ djvu_get_text (FwDocument *doc, int page,
   }
 
   GString *buf = g_string_new (NULL);
-  collect_text_in_rect (page_text, buf, qx0, qy0, qx1, qy1, all);
+  collect_text_in_rect (page_text, buf, qx0, qy0, qx1, qy1, all, 0);
   ddjvu_miniexp_release (self->djvu_doc, page_text);
   g_mutex_unlock (&self->render_lock);
 
@@ -672,7 +681,7 @@ djvu_get_links (FwDocument *doc, int page)
         strcmp (miniexp_to_name (area_type), "rect") != 0)
       continue;
 
-    int coords[4];
+    int coords[4] = {0, 0, 0, 0};  /* a short (rect ...) leaves the tail at 0 */
     miniexp_t rest = miniexp_cdr (area_exp);
     for (int i = 0; i < 4 && miniexp_consp (rest); i++) {
       coords[i] = miniexp_to_int (miniexp_car (rest));
