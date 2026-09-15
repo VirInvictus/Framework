@@ -1,4 +1,4 @@
-# Foliate-Style Reflow Rewrite — Design Note
+# Foliate-Style Reflow Rewrite: Design Note
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
@@ -17,7 +17,7 @@
 > `roadmap.md`, `spec.md` §2.4, and the v0.68.0 patchnote.
 
 This document scopes the EPUB / MOBI / AZW3 / FB2 / TXT reflow
-rewrite tracked as **Phase 13.1 — Foliate-Style Reflow** in
+rewrite tracked as **Phase 13.1 (Foliate-Style Reflow)** in
 `roadmap.md`. The rewrite is the largest single architectural change
 planned for Framework post-1.0, so this note exists to lock down the
 scope, the boundary against the existing fixed-layout pipeline, and
@@ -29,28 +29,28 @@ widgets, dispatched at file-open time.
 
 > **Where to read along.** Foliate's source is checked out in this
 > repo at `.foliate/` (GJS GTK4 app) and `.foliate-js/` (the parser
-> library, MIT-licensed) — both gitignored, shallow clones. The
+> library, MIT-licensed; both gitignored, shallow clones. The
 > canonical format-parsing references for this rewrite live in
 > `.foliate-js/`:
-> * `.foliate-js/mobi.js` — PalmDB envelope, PalmDOC LZ77,
+> * `.foliate-js/mobi.js`: PalmDB envelope, PalmDOC LZ77,
 >   KF7/KF8 / MOBI / AZW3 unpacking
-> * `.foliate-js/epub.js` — OPF spine walk, NCX/nav TOC,
+> * `.foliate-js/epub.js`: OPF spine walk, NCX/nav TOC,
 >   manifest-driven asset resolution
-> * `.foliate-js/fb2.js` — FictionBook XML walker, inline-style
+> * `.foliate-js/fb2.js`: FictionBook XML walker, inline-style
 >   mapping, base64 binary extraction
-> * `.foliate-js/paginator.js` — pagination math
-> * `.foliate-js/text-walker.js` — search across blocks
+> * `.foliate-js/paginator.js`: pagination math
+> * `.foliate-js/text-walker.js`: search across blocks
 >
 > Komikku's reader-pager code at `.komikku/komikku/reader/pager/`
 > is the secondary reference for paginated UX cadence (manga + comic
 > formats already informed v0.27).
 >
 > **Historical note.** Patchnotes from v0.40.0 onward refer to this
-> work as "Fractal-style" — that's a slip; the actual reference
+> work as "Fractal-style" (that's a slip; the actual reference
 > Brandon meant was always Foliate. Patchnotes are kept as-is as
 > historical record; new docs say "Foliate-style". The
 > `FwReflowDocument` + `GListModel`-of-blocks + factory architecture
-> remains correct — Foliate's reader.js uses the equivalent
+> remains correct: Foliate's reader.js uses the equivalent
 > JavaScript shape.
 
 ---
@@ -61,11 +61,11 @@ widgets, dispatched at file-open time.
 
 | Format | Container | Content | Implementation cost |
 |---|---|---|---|
-| **EPUB** | ZIP (libarchive) | XHTML + CSS (subset) | High — XML parsing, OPF spine walk, image extraction |
-| **MOBI** | PalmDOC | KF7 HTML (legacy Kindle) | High — PalmDOC decompressor (LZ77 variant) |
+| **EPUB** | ZIP (libarchive) | XHTML + CSS (subset) | High (XML parsing, OPF spine walk, image extraction) |
+| **MOBI** | PalmDOC | KF7 HTML (legacy Kindle) | High (PalmDOC decompressor, an LZ77 variant) |
 | **AZW3** | PalmDOC + KF8 | Enhanced HTML5 + CSS | Shares MOBI's PalmDOC path; KF8 parser on top |
-| **FB2** | bare XML | FictionBook XML schema | Medium — straight XML walk |
-| **TXT** | bare bytes | UTF-8 plain text | Trivial — split on blank lines |
+| **FB2** | bare XML | FictionBook XML schema | Medium (straight XML walk) |
+| **TXT** | bare bytes | UTF-8 plain text | Trivial (split on blank lines) |
 
 The five formats above span the realistic ebook surface Framework
 needs to handle. EPUB, MOBI, and AZW3 are the high-volume targets;
@@ -90,7 +90,7 @@ real-world content to justify maintenance.
 
 ### What stays on the existing fixed-layout pipeline
 
-PDF, DjVu, XPS, CBZ, CB7, CBT, CBR — all stay on `FwView` + MuPDF /
+PDF, DjVu, XPS, CBZ, CB7, CBT, CBR all stay on `FwView` + MuPDF /
 DjVuLibre / libarchive backends. Nothing changes for those.
 
 ---
@@ -139,7 +139,7 @@ typedef enum {
   FW_BLOCK_CODE,       /* preformatted; preserve whitespace */
   FW_BLOCK_IMAGE,      /* href into the document's image table */
   FW_BLOCK_HR,
-  FW_BLOCK_CHAPTER,    /* logical break — table-of-contents anchor */
+  FW_BLOCK_CHAPTER,    /* logical break; table-of-contents anchor */
 } FwBlockType;
 
 typedef struct {
@@ -163,10 +163,10 @@ struct _FwReflowDocumentInterface {
                                     GError **error);
   void         (*close)            (FwReflowDocument *self);
 
-  /* Blocks — flat sequence accessible as a GListModel */
+  /* Blocks: flat sequence accessible as a GListModel */
   GListModel  *(*get_block_model)  (FwReflowDocument *self);
 
-  /* Images — opaque cookie used by image_id; backend resolves to
+  /* Images: opaque cookie used by image_id; backend resolves to
    * GdkTexture. Stays NULL for backends without images (TXT). */
   GdkTexture  *(*get_image)        (FwReflowDocument *self,
                                     const char *image_id);
@@ -176,11 +176,11 @@ struct _FwReflowDocumentInterface {
   guint        (*find_block_by_anchor) (FwReflowDocument *self,
                                         const char *anchor_id);
 
-  /* Search — return a GArray of (block_index, char_offset, length) */
+  /* Search: return a GArray of (block_index, char_offset, length) */
   GArray      *(*search)           (FwReflowDocument *self,
                                     const char *needle);
 
-  /* Metadata — GHashTable of free-form (key, value) — title, author,
+  /* Metadata: GHashTable of free-form (key, value): title, author,
    * creator, language, modified-date, etc. NULL when none. */
   GHashTable  *(*get_metadata)     (FwReflowDocument *self);
 };
@@ -188,7 +188,7 @@ struct _FwReflowDocumentInterface {
 
 The block model is the hot path: `FwReflowView` binds it to a
 `GtkListView` directly. No virtual file pointers, no per-frame
-parsing — the document is fully resolved into a flat block list at
+parsing: the document is fully resolved into a flat block list at
 open time.
 
 ### `FwReflowView`
@@ -205,28 +205,28 @@ Thin GTK widget. Internals:
   - `BLOCK_HR` / `BLOCK_CHAPTER` → `GtkSeparator`
   - `BLOCK_LIST` → recursive (factory recurses)
 - CSS is loaded once at view init; CSS classes drive typography.
-  No per-document CSS — the user's preferences (font size, line
+  No per-document CSS: the user's preferences (font size, line
   height, max width) win. This is a deliberate trade vs. respecting
-  publisher CSS — Foliate goes the other way.
+  publisher CSS; Foliate goes the other way.
 - Native text selection works because `GtkLabel` has `selectable`
   and Pango handles the cross-block selection. We bind Ctrl+C to
   the standard clipboard action.
 
 ### What goes away for reflowed docs
 
-- Zoom slider — replaced with a font-size adjustment.
-- Rotation, crop margins, loupe, reading ruler — all fixed-layout
+- Zoom slider: replaced with a font-size adjustment.
+- Rotation, crop margins, loupe, reading ruler: all fixed-layout
   features. Hidden in the reflow view.
-- Page navigation (Page Up/Down) — repurposed as half-page scroll
+- Page navigation (Page Up/Down): repurposed as half-page scroll
   rather than absolute page jump.
-- Print — Foliate doesn't print either; defer.
-- Page count — replaced with a "X% read" or chapter X/N indicator.
+- Print: Foliate doesn't print either; defer.
+- Page count: replaced with a "X% read" or chapter X/N indicator.
 
 ---
 
 ## 3. Format-specific implementation notes
 
-### TXT (easiest — start here)
+### TXT (easiest; start here)
 
 - Open the file as UTF-8, fall back to UTF-16 / Latin-1 if BOM /
   invalid sequences detected.
@@ -262,19 +262,19 @@ file, the GTK side is sound.
 - For each spine entry:
   1. Read the XHTML.
   2. Run a tolerant HTML parser (libxml2's HTML mode is the
-     practical pick — already in Fedora's GTK dep tree). Tag map:
+     practical pick, already in Fedora's GTK dep tree). Tag map:
      `<h1..h6>` → HEADING, `<p>` → PARAGRAPH, `<blockquote>` →
      BLOCKQUOTE, `<ul>`/`<ol>` → LIST, `<li>` → LIST_ITEM,
      `<pre>`/`<code>` → CODE, `<img>` → IMAGE, `<hr>` → HR.
      Inline tags (`<em>`, `<strong>`, `<a>`, `<span>`) become
      Pango markup inside the parent block.
-  3. Image hrefs are resolved against the manifest at this stage —
+  3. Image hrefs are resolved against the manifest at this stage;
      they get keys like `manifest_id:resource_path` so cross-file
      references resolve.
 - TOC from the navigation document (`nav.xhtml` for EPUB 3) or the
   legacy `toc.ncx` (EPUB 2). Both supported.
 - CSS is **not** applied. The author's intended typography is lost
-  by design — we render with our CSS for consistency and reflow
+  by design; we render with our CSS for consistency and reflow
   reliability. Same call Komikku and Plato make.
 - DRM (Adobe ADEPT, etc.) → fall through to a clear error
   message. No circumvention attempts; out of scope.
@@ -289,7 +289,7 @@ file, the GTK side is sound.
   of HTML chapters + a manifest (parallels EPUB structure).
 - Once decompressed and parsed, the block AST flow is the same as
   EPUB.
-- Hardest of the five — both because of the binary container and
+- Hardest of the five, both because of the binary container and
   because real-world MOBI files have edge cases (broken indexing,
   partial KF8 records, etc.). Plan to ship MOBI/AZW3 last.
 
@@ -305,7 +305,7 @@ without breaking the previous one.
 | **0** | (this doc) | Design lock-in; user sign-off |
 | **1** | v1.x.0 | `FwReflowDocument` interface; `FwReflowView` widget; `FwReflowDocumentTxt` backend. End-to-end on .txt files. Also wires the open-time dispatch (extension-based for now). |
 | **2** | v1.x.0 | `FwReflowDocumentFb2`. FB2 search, TOC, metadata work. |
-| **3** | v1.x.0 | `FwReflowDocumentEpub`. The marquee delivery — EPUB 3 (and EPUB 2). Parses navigation, manifest, spine. |
+| **3** | v1.x.0 | `FwReflowDocumentEpub`. The flagship delivery: EPUB 3 (and EPUB 2). Parses navigation, manifest, spine. |
 | **4** | v1.x.0 | `FwReflowDocumentMobi`. Includes the PalmDOC decompressor and KF7 path. |
 | **5** | v1.x.0 | `FwReflowDocumentAzw3` (KF8 on top of MOBI's PalmDOC). |
 | **6** | v1.x.0 | Polish: font-size adjustment, "X% read" indicator, search highlight in the GtkListView, chapter sidebar, fall-through-to-MuPDF toggle for difficult docs. |
@@ -331,7 +331,7 @@ gives users an out for any document the new path mangles.
   GtkListView extension or a custom layout. Worth the effort?
 - **EPUB CSS support, behind a toggle**: the "we render with our
   CSS" decision is opinionated and will draw complaints. A "respect
-  publisher CSS (best-effort)" toggle is feasible but expensive —
+  publisher CSS (best-effort)" toggle is feasible but expensive;
   needs a CSS subset parser. Park until users ask.
 - **Continuous vs. paginated**: Komikku-style infinite vertical
   scroll is the natural GtkListView behavior. Foliate-style
@@ -362,32 +362,32 @@ gives users an out for any document the new path mangles.
 
 All reference repos are checked out shallowly under the Framework
 repo root, gitignored. See `CLAUDE.md` "Reference repos" for the
-per-repo file map. **Read these alongside this doc** — the
+per-repo file map. **Read these alongside this doc**; the
 architecture is directly informed by them, and the implementation
 will lift idioms from each.
 
-- **Foliate** — `.foliate/`, GJS / GTK4. Native GNOME ebook reader;
+- **Foliate**: `.foliate/`, GJS / GTK4. Native GNOME ebook reader;
   the reference UX for paginated reading, font preferences,
   reading-position persistence. Read `.foliate/src/reader.js` and
   `.foliate/src/paginator.js` for the per-row idioms equivalent to
   our `GListModel` + factory pattern.
-- **foliate-js** — `.foliate-js/`, MIT-licensed JavaScript. The
+- **foliate-js**: `.foliate-js/`, MIT-licensed JavaScript. The
   canonical implementation reference for every reflow format
   Framework targets:
-  - `.foliate-js/mobi.js` — PalmDB envelope, PalmDOC LZ77 decoder,
+  - `.foliate-js/mobi.js`: PalmDB envelope, PalmDOC LZ77 decoder,
     KF7 / KF8 / MOBI / AZW3 unpacking, EXTH metadata.
-  - `.foliate-js/epub.js` — OPF spine walk, NCX / nav-doc TOC,
+  - `.foliate-js/epub.js`: OPF spine walk, NCX / nav-doc TOC,
     manifest-driven asset resolution.
-  - `.foliate-js/fb2.js` — FictionBook XML walker.
-  - `.foliate-js/paginator.js` — pagination math (column-based;
+  - `.foliate-js/fb2.js`: FictionBook XML walker.
+  - `.foliate-js/paginator.js`: pagination math (column-based;
     Framework's adaptation lives in `FwReflowView`'s block-level
     pagination).
-  - `.foliate-js/text-walker.js` — search across blocks.
-- **Komikku** — `.komikku/komikku/reader/pager/`, Python / GTK4.
-  Top-tier native GNOME manga reader; secondary reference for the
+  - `.foliate-js/text-walker.js`: search across blocks.
+- **Komikku**: `.komikku/komikku/reader/pager/`, Python / GTK4.
+  Native GNOME manga reader; secondary reference for the
   reflow / paginated dispatch logic and chapter handling.
-- **`kindle-unpack`** and **calibre's `mobiunpack`** (not vendored —
+- **`kindle-unpack`** and **calibre's `mobiunpack`** (not vendored;
   Python upstream). Secondary references for the PalmDOC LZ77
-  decompressor and KF7/KF8 layout — useful when foliate-js is
+  decompressor and KF7/KF8 layout, useful when foliate-js is
   ambiguous on edge cases (real-world MOBIs sometimes have malformed
   trailing-data byte counts that need defensive parsing).

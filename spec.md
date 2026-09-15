@@ -1,4 +1,4 @@
-# Framework — Application Specification
+# Framework: Application Specification
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
@@ -15,7 +15,7 @@ Framework is heavily influenced by **SumatraPDF**'s philosophy: extreme performa
 
 ## 1. Mission Statement
 
-Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, AZW3, FB2, XPS, TXT, Markdown, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer — not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
+Framework is a fast, native Linux document viewer built on MuPDF, DjVuLibre, and libarchive. It renders **PDF, DjVu, EPUB, MOBI, AZW3, FB2, XPS, TXT, Markdown, and comic-book archives (CBZ, CB7, CBT, CBR)** with aggressive pre-caching, a clean plain-GTK4 UI under an owned stylesheet, and zero bloat. It is a viewer: not an editor, not a library manager, not a file organizer. It opens documents, displays them beautifully, and stays out of the way.
 
 Reflowable formats (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown) do not go through MuPDF's fixed-layout engine by default: they are converted to HTML and rendered in a `WebKitWebView` with real reflow, typography, and themes (§2.2, Phase 17). MuPDF's fixed-layout rasterization remains the automatic fallback when the reflow parser refuses a file (toggleable via the "Render as Fixed Pages" setting). The fallback covers EPUB / MOBI / AZW3 / FB2, which the MuPDF backend can open natively; TXT and Markdown have no MuPDF branch, so with "Render as Fixed Pages" enabled they report unsupported rather than rasterizing.
 
@@ -28,7 +28,7 @@ Framework dropped libadwaita at v0.80.0 while keeping GTK4, to belong on a tilin
 - **Owned stylesheet.** A single `data/style.css` is the styling authority, loaded via a `GtkCssProvider` at `GTK_STYLE_PROVIDER_PRIORITY_USER + 1` (above a user's `~/.config/gtk-4.0/gtk.css`). Flat, square, 1px hard borders, no shadows, denser spacing than adwaita. Kanagawa Dragon (dark) / Kanagawa Lotus (light) palette as `@define-color` named colours.
 - **Dark/light** follows the system via the `org.freedesktop.portal.Settings` `color-scheme` preference read over GDBus (no GNOME dependency), with live updates on `SettingChanged` and a **dark default** when no portal backend answers. Fixed reading themes (Light / Sepia / Kanagawa Dark) still force their own polarity; only the "system" reading theme tracks the portal.
 - **Titlebar.** A slim flat `GtkHeaderBar` promoted to the real window titlebar, with `show-title-buttons` off (the compositor and a `Ctrl+Q` quit accel handle window control). Consequence: GTK auto-hides the titlebar in fullscreen (F11), which suits a reader; the header's page/zoom entries are unreachable there, same as any GTK app in fullscreen.
-- **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page — deliberate for narrow tiles.
+- **TOC sidebar** floats: a `GtkRevealer` inside a `GtkOverlay` over the document, toggled by F9, dismissed by clicking outside. It never squeezes the page (deliberate, for narrow tiles).
 - **Dialogs** (Reading Settings, Keyboard Shortcuts, Document Properties) are transient modal `GtkWindow`s built from owned `GtkListBox` "boxed-list" row composites, Escape-to-close.
 
 ---
@@ -64,11 +64,11 @@ Framework uses a backend abstraction layer to support multiple document formats 
 └─────────┘  └──────────┘  └───────────┘
 ```
 
-**MuPDF backend (`fw-document-pdf.c`).** Links against `libmupdf`. Despite the file name, this is the *MuPDF* backend, not specifically the PDF backend — `fz_register_document_handlers` + `fz_open_document` dispatch internally by content. It handles **PDF, CBZ, CB7, CBT, XPS** as the fixed-layout primary, and **EPUB / FB2 / MOBI** only as a *fallback* (those reach the WebKit reflow pipeline first; see §2.2). The render path is zero-copy into the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr` (v1.6 technique borrowed from zathura-pdf-mupdf). For comic formats it normalizes per-page sizes against inconsistent embedded DPI (v0.70).
+**MuPDF backend (`fw-document-pdf.c`).** Links against `libmupdf`. Despite the file name, this is the *MuPDF* backend, not specifically the PDF backend: `fz_register_document_handlers` + `fz_open_document` dispatch internally by content. It handles **PDF, CBZ, CB7, CBT, XPS** as the fixed-layout primary, and **EPUB / FB2 / MOBI** only as a *fallback* (those reach the WebKit reflow pipeline first; see §2.2). The render path is zero-copy into the cairo surface buffer via `fz_new_pixmap_with_bbox_and_data` + `fz_device_bgr` (v1.6 technique borrowed from zathura-pdf-mupdf). For comic formats it normalizes per-page sizes against inconsistent embedded DPI (v0.70).
 
 **DjVuLibre backend (`fw-document-djvu.c`).** Links against `libdjvu` (ddjvuapi). Handles DjVu files via DjVuLibre's own page rendering, with `DDJVU_FORMAT_RGBMASK32` matched to cairo ARGB32 layout for zero-copy writes. Single mutex for the API; abort queue keeps `ddjvuapi` from CPU-locking under high-velocity scrubbing.
 
-**libarchive backend (`fw-document-cbr.c`).** Links against `libarchive` (BSD-licensed; no `libunrar` licensing trap). Handles CBR archives (and any RAR/7z/tar of images by virtue of libarchive's format support). Render path: extract entry bytes → `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (the same v1.6 zero-copy pattern). Single mutex per archive — libarchive readers can't be safely shared across threads, and the streaming-RAR cost makes per-render archive opens dominate anyway.
+**libarchive backend (`fw-document-cbr.c`).** Links against `libarchive` (BSD-licensed; no `libunrar` licensing trap). Handles CBR archives (and any RAR/7z/tar of images by virtue of libarchive's format support). Render path: extract entry bytes → `fz_new_image_from_buffer` → `fz_fill_image` into a draw device wrapping the cairo surface buffer (the same v1.6 zero-copy pattern). Single mutex per archive: libarchive readers can't be safely shared across threads, and the streaming-RAR cost makes per-render archive opens dominate anyway.
 
 **Backend selection.** The window first checks `fw_reflow_path_is_supported` (EPUB / MOBI / AZW3 / FB2 / TXT / Markdown); those open through the WebKit **reflow** pipeline (§2.2) and only fall back to MuPDF if the reflow parser refuses the file (EPUB / MOBI / AZW3 / FB2 only: TXT and Markdown have no MuPDF fallback). Otherwise the fixed-layout factory picks by extension: `.pdf` / `.cbz` / `.cb7` / `.cbt` / `.xps` / `.oxps` → MuPDF; `.djvu` / `.djv` → DjVuLibre; `.cbr` → libarchive.
 
@@ -78,7 +78,7 @@ Reflowable formats are converted to a single stitched HTML document and rendered
 
 ### 2.3 The Velocity-Driven Cache Engine
 
-The pre-cache engine is the core performance differentiator. To balance rapid scrolling against memory boundaries and CPU thermal constraints, Framework uses a **Three-Tier, Velocity-Driven Architecture**, with two generation counters governing invalidation and abort separately.
+The pre-cache engine is the heart of Framework's performance. To balance rapid scrolling against memory boundaries and CPU thermal constraints, Framework uses a **Three-Tier, Velocity-Driven Architecture**, with two generation counters governing invalidation and abort separately.
 
 #### Tier 0: Persistent Thumbnails (v1.5)
 ~150-px-wide previews rendered on a dedicated low-priority `GThreadPool`, stored for the document's lifetime, **never evicted**. ~120 KB per page → a 1000-page document costs ~120 MB. Used as the placeholder layer when a visible page has no full-resolution surface ready (fast scroll, cold cache, mid-zoom transition). Users see actual content during fast scroll instead of grey rectangles.
@@ -89,7 +89,7 @@ The pre-cache engine is the core performance differentiator. To balance rapid sc
 #### Tier 2: Pixel Window (Surface Cache)
 A dynamic, strictly managed hash table of `cairo_surface_t` + cached `GdkTexture` pairs (the texture is reused across snapshot frames per v1.5). Eviction is dictated by the user's kinetic scroll velocity (`dy/dt`), calculated via `gtk_widget_add_tick_callback` on the scrollable view.
 
-**Generation counters.** `render_gen` (param-change scope: zoom, rotation, scale) and `cancel_gen` (abort scope: scrubbing, stop) are split so scrubbing can abort in-flight work without invalidating correctly-rendered surfaces (v1.3.3). Both are `guint` counters checked inside worker jobs — no pthread cancellation.
+**Generation counters.** `render_gen` (param-change scope: zoom, rotation, scale) and `cancel_gen` (abort scope: scrubbing, stop) are split so scrubbing can abort in-flight work without invalidating correctly-rendered surfaces (v1.3.3). Both are `guint` counters checked inside worker jobs; no pthread cancellation.
 
 **Velocity States & Strategies:**
 
@@ -102,7 +102,7 @@ A dynamic, strictly managed hash table of `cairo_surface_t` + cached `GdkTexture
 3.  **Scrubbing (High Velocity):** The user has grabbed the scrollbar or flicked the wheel hard.
     * Action: **ABORT.** Bump `cancel_gen`. In-flight workers see the bumped counter and bail. Paint thumbnails (Tier 0) while scrubbing.
     * DjVu / CBR constraint: strictly enforced for the single-mutex backends so they don't CPU-lock decoding skipped pages.
-4.  **View Changes:** On zoom or rotation, bump `render_gen`. Stale surfaces move to a `prev_surface` slot per cache entry and the view paints them scaled-to-fit until the sharp re-render arrives — no grey flashes during zoom transitions (v1.4).
+4.  **View Changes:** On zoom or rotation, bump `render_gen`. Stale surfaces move to a `prev_surface` slot per cache entry and the view paints them scaled-to-fit until the sharp re-render arrives; no grey flashes during zoom transitions (v1.4).
 
 ```text
 ┌──────────────────────────────────────┐
@@ -120,7 +120,7 @@ A dynamic, strictly managed hash table of `cairo_surface_t` + cached `GdkTexture
 └──────────────────────────────────────┘
 ```
 
-**Thread safety.** MuPDF is *not* thread-safe per-document. The PDF backend opens the file `MAX_RENDER_INSTANCES` (8) times, each with its own `fz_context` + `fz_document` + per-instance mutex; render threads round-robin across them. Cloned contexts share font/image stores but `fz_page` / `fz_image` lazy-read from streams owned by the document — concurrent reads on a shared document corrupt state even via display lists. DjVuLibre and libarchive both require serialized access via single-mutex workers.
+**Thread safety.** MuPDF is *not* thread-safe per-document. The PDF backend opens the file `MAX_RENDER_INSTANCES` (8) times, each with its own `fz_context` + `fz_document` + per-instance mutex; render threads round-robin across them. Cloned contexts share font/image stores but `fz_page` / `fz_image` lazy-read from streams owned by the document; concurrent reads on a shared document corrupt state even via display lists. DjVuLibre and libarchive both require serialized access via single-mutex workers.
 
 **MuPDF exception handling** uses `setjmp` / `longjmp` via `fz_try` / `fz_catch`. **Never** `return` / `goto` / `longjmp` from inside those blocks. Variables modified in `fz_try` and read in `fz_catch` must be `volatile`. Use `fz_always` for cleanup.
 
@@ -160,7 +160,7 @@ GtkApplicationWindow (FwWindow)
 FwApplication : GtkApplication
 ├── Handles file open via command line args and GtkFileDialog
 ├── Single-instance (activate brings existing window forward)
-├── No tabs, no multi-document — one document per window
+├── No tabs, no multi-document; one document per window
 │   Multiple files = multiple windows (via g_application_open)
 ├── Stores per-file state in XDG_DATA_HOME/framework/state.json:
 │   { "/path/to/file.pdf": { "page": 42, "scroll_position": 0.73,
@@ -181,7 +181,7 @@ FwApplication : GtkApplication
 
 Slim flat `GtkHeaderBar` promoted to the window titlebar (v0.80.0; was `AdwHeaderBar`), window-control buttons hidden, styled by the owned stylesheet. See "Design language" above.
 
-**Left cluster — Sidebar + Zoom:**
+**Left cluster (Sidebar + Zoom):**
 
 | Control | Type | Behavior |
 |---------|------|----------|
@@ -190,13 +190,13 @@ Slim flat `GtkHeaderBar` promoted to the window titlebar (v0.80.0; was `AdwHeade
 | Zoom level | GtkEntry | Shows current zoom as "125%". User can type a number and press Enter. Validates input (clamp 10%-1000%). Width: ~5em |
 | Zoom in | GtkButton | Increase zoom by 10%. Icon: `zoom-in-symbolic` |
 
-**Center — Title:**
+**Center (Title):**
 
 | Control | Type | Behavior |
 |---------|------|----------|
 | Document title | GtkLabel | Shows filename (not full path). Ellipsize end. Tooltip shows full path |
 
-**Right cluster — Navigation + Actions:**
+**Right cluster (Navigation + Actions):**
 
 | Control | Type | Behavior |
 |---------|------|----------|
@@ -234,7 +234,7 @@ Custom `GtkWidget` subclass responsible for laying out and painting rendered pag
 |------|----------|
 | Fit width | Page width matches viewport width. Default |
 | Fit page | Entire page visible in viewport |
-| Custom percentage | 10% — 1000%, typed into zoom entry |
+| Custom percentage | 10% to 1000%, typed into zoom entry |
 
 **Rendering pipeline:**
 
@@ -426,7 +426,7 @@ Framework registers as a handler for the above MIME types via its `.desktop` fil
 
 ### 5.3 File Open
 
-- Command line: `framework [FILE...]` — each file opens in its own window
+- Command line: `framework [FILE...]`: each file opens in its own window
 - GtkFileDialog with filter for supported formats
 - Drag-and-drop onto window opens the file through the same open path as Ctrl+O, replacing the current document in that window (decided in code, v0.10: the `GtkDropTarget` hands the file to `fw_window_open_file`; single-document-per-window means one document per window, so a new file replaces the old rather than opening a second window)
 
@@ -515,7 +515,7 @@ framework/
 ├── meson.build                 # top-level (project version lives here)
 ├── io.github.virinvictus.framework.yml   # Flatpak manifest (root, per Flathub convention)
 ├── src/
-│   ├── meson.build             # framework_sources list — no glob, add new files explicitly
+│   ├── meson.build             # framework_sources list; no glob, add new files explicitly
 │   ├── main.c                  # entry point, GtkApplication setup
 │   ├── fw-application.c/h      # FwApplication (single-instance GtkApplication)
 │   ├── fw-theme.c/h            # owned stylesheet + portal color-scheme reader
@@ -577,7 +577,7 @@ Primary distribution method. Framework is Flatpak-first. The manifest at the pro
 ### 9.1 Manifest Realized
 
 - **Runtime:** `org.gnome.Platform//50` + `org.gnome.Sdk//50`
-- **Modules:** `djvulibre` (autotools, `--disable-static --disable-desktopfiles`), `mupdf` (project Makefile, `HAVE_X11=no HAVE_GLUT=no HAVE_LIBCRYPTO=no shared=yes USE_SYSTEM_LIBS=no` — bundled third-party libs are simpler than runtime equivalents), `framework` (meson, release buildtype). `libarchive` comes from the freedesktop runtime under GNOME 50 — no module needed.
+- **Modules:** `djvulibre` (autotools, `--disable-static --disable-desktopfiles`), `mupdf` (project Makefile, `HAVE_X11=no HAVE_GLUT=no HAVE_LIBCRYPTO=no shared=yes USE_SYSTEM_LIBS=no` (bundled third-party libs are simpler than runtime equivalents), `framework` (meson, release buildtype). `libarchive` comes from the freedesktop runtime under GNOME 50; no module needed.
 - **Permissions (`finish-args`):** no network, no broad filesystem. `--device=dri` for GPU. `--socket=wayland` + `--socket=fallback-x11`. Read-only `--filesystem=xdg-documents` / `--filesystem=xdg-download` / `--filesystem=xdg-desktop` for command-line invocations. Anything else reaches Framework via the Document portal automatically (GtkFileDialog and drag-and-drop both go through it).
 - **Portals consumed:** `org.freedesktop.portal.FileChooser` (for file picks), `org.freedesktop.portal.Print` (for `Ctrl+P`), `org.freedesktop.portal.OpenURI` (for external link clicks via `GtkUriLauncher`). All are auto-included by the SDK's portal wiring; no explicit `--talk-name=` flags needed.
 
@@ -602,7 +602,7 @@ Use GTK's native print infrastructure:
 1. `GtkPrintOperation` handles the print dialog and platform integration
 2. In the `draw-page` signal handler, render the requested page via the document backend directly to the print context's cairo surface
 3. Set page count from document page count
-4. Support page range selection, copies, orientation — all handled by GtkPrintOperation natively
+4. Support page range selection, copies, orientation; all handled by GtkPrintOperation natively
 
 No export-to-PDF (the document already is a PDF). No "save as" anything.
 
@@ -612,9 +612,9 @@ No export-to-PDF (the document already is a PDF). No "save as" anything.
 
 Dark-mode display for reading in low-light environments:
 
-- **Luminance-aware affine transform** applied via `gtk_snapshot_push_color_matrix` — for each pixel compute BT.601 luma `Y = 0.299R + 0.587G + 0.114B`, then offset each channel by `(1 − 2Y)`. Equivalent to flipping the lightness axis while preserving the chromatic component (R−Y, G−Y, B−Y) of every pixel.
+- **Luminance-aware affine transform** applied via `gtk_snapshot_push_color_matrix`: for each pixel compute BT.601 luma `Y = 0.299R + 0.587G + 0.114B`, then offset each channel by `(1 − 2Y)`. Equivalent to flipping the lightness axis while preserving the chromatic component (R−Y, G−Y, B−Y) of every pixel.
 - White → near-black (background darkens), black → near-white (text lightens), red stays red on the new dark background, blue plots stay blue. Diagrams and syntax-highlighted code keep their meaning.
-- Applied GPU-side at snapshot time, not by re-rendering surfaces — toggling is instant with no cache invalidation.
+- Applied GPU-side at snapshot time, not by re-rendering surfaces, so toggling is instant with no cache invalidation.
 - Toggle via menu or `Ctrl+I`. State is per-window for the session; not persisted across launches in the current schema.
 - Future: configurable `recolor-light` / `recolor-dark` GSettings keys for full theme customization (v0.22 hardcodes the standard white↔black mapping).
 
@@ -640,19 +640,19 @@ Explicitly out of scope for v1.0 and likely forever:
 - **Not an editor.** No annotations, no form filling, no signatures, no markup.
 - **Not a converter.** No export, no save-as, no format conversion.
 - **Not a browser.** No tabs, no multi-document management within a single window. Multiple files = multiple windows.
-- **Not an image viewer.** No standalone JPEG, PNG, TIFF, SVG support. (Comic-book archives are framed images-as-pages — that's a different use case.)
+- **Not an image viewer.** No standalone JPEG, PNG, TIFF, SVG support. (Comic-book archives are framed images-as-pages; that's a different use case.)
 - **Not a full ebook reader.** As of Phase 17, EPUB / MOBI / AZW3 / FB2 / TXT / Markdown render through WebKitGTK with real reflow, a serif reading font, light/sepia/dark themes, font-size and line-height control, TOC navigation, and in-text search: a genuine reading experience, not just "it opens." Publisher stylesheets and embedded fonts ship too (v0.79, EPUB + KF8; with a toggle and dark-theme color transformation). What Framework still doesn't do: a library, annotations, dictionary/lookup, or sync. For a dedicated ebook workflow [Foliate](https://johnfactotum.github.io/foliate/) remains more complete; Framework is the right tool when you want one viewer for fixed-layout PDFs, comics, and ebooks without switching apps.
 
 ---
 
 ## 14. Future Considerations (post-1.0 / v1.x)
 
-These are explicitly deferred. Do not implement before 1.0. Listed here only to ensure the architecture doesn't preclude them. Phase status in `roadmap.md` is the source of truth — phases 11–14 detail the borrows, layout shifts, and UX polish targeted post-1.0.
+These are explicitly deferred. Do not implement before 1.0. Listed here only to ensure the architecture doesn't preclude them. Phase status in `roadmap.md` is the source of truth; phases 11-14 detail the borrows, layout shifts, and UX polish targeted post-1.0.
 
 - **Thumbnail sidebar** (alternative sidebar mode alongside TOC).
-- **Annotations** (highlight, underline — stored externally, not modifying the document).
+- **Annotations** (highlight, underline; stored externally, not modifying the document).
 - **Presentation mode** (page-at-a-time, no chrome, slide-show style).
-- **Single-page view mode** for general documents (the current default is continuous vertical scroll). Facing-pages, manga, and webtoon modes shipped in v0.27 — see Phase 13 in `roadmap.md`.
+- **Single-page view mode** for general documents (the current default is continuous vertical scroll). Facing-pages, manga, and webtoon modes shipped in v0.27; see Phase 13 in `roadmap.md`.
 - **Smooth pinch-to-zoom** on touchscreens.
 - **Configurable keybindings** via GSettings.
 - ~~**Fractal-style EPUB reflow.**~~ **Shipped, then superseded.** The native-GTK block-model reflow renderer shipped in Phase 13.1 (v0.40+), then the Phase 17 pivot (v0.68+) replaced it with WebKitGTK and the block-model path was removed in v0.76. See §2.2 and roadmap Phase 17.
@@ -662,7 +662,7 @@ These are explicitly deferred. Do not implement before 1.0. Listed here only to 
 
 ## 15. Success Criteria
 
-Framework v1.0 is done when all of the following hold. As of v0.21.0, only the release-mechanics items remain. The substantive work — cache architecture, all formats, polish — is shipped.
+Framework v1.0 is done when all of the following hold. As of v0.21.0, only the release-mechanics items remain. The substantive work (cache architecture, all formats, polish) is shipped.
 
 | Status | Criterion |
 |---|---|
@@ -680,9 +680,9 @@ Framework v1.0 is done when all of the following hold. As of v0.21.0, only the r
 | ✅ | Packages as a Flatpak (sandboxed, portal-based file access, no network) and installs cleanly. |
 | ✅ | Startup-blur regression on saved-state open is fixed (v0.14 + v0.17 sort-function + cookie work; verified). |
 | ✅ | Continuous scroll never paints thumbnail placeholders during normal reading (v0.14 symmetric ±10 + v0.17 mid-render `fz_cookie` abort). |
-| ✅ | Bytes-aware cache cap (v0.16) — per-surface byte tracking replaces the old fixed page-count window. |
+| ✅ | Bytes-aware cache cap (v0.16): per-surface byte tracking replaces the old fixed page-count window. |
 | ✅ | Smart text selection (v0.19): double-click word, triple-click line; v0.20 per-line drag highlights. |
-| ✅ | Auto-reload via `GFileMonitor` (v0.21) — recompile and the document refreshes with state restored. |
+| ✅ | Auto-reload via `GFileMonitor` (v0.21): recompile and the document refreshes with state restored. |
 | ✅ | A `<screenshots>` block exists in the AppStream metainfo before any Flathub submission. |
 | ✅ | Tagged `1.0.0` (2026-09-13; annotated, unsigned, at the release commit). |
 | ✅ | A grandma can open a PDF and read it without asking for help. |
