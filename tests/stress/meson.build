@@ -178,3 +178,25 @@ test('regress-final-audit',
   protocol: 'exitcode',
   is_parallel: false,
 )
+
+# Position-reporter anchor guard (2026-09-16): the injected <style
+# id=fw-reading-css> in head always matched `r.top >= 0`, poisoning the
+# saved anchor and sending every restore to the top of the document; the
+# user script now also requires r.height > 0. Pinned by source
+# inspection — the JS only executes inside WebKitWebView, which the
+# headless suite never instantiates.
+regress_webview_anchor = executable(
+  'regress-webview-anchor',
+  'regress-webview-anchor.c',
+  dependencies: framework_lib_dep,
+  install: false,
+)
+
+test('regress-webview-anchor',
+  regress_webview_anchor,
+  env: ['G_TEST_SRCDIR=' + meson.project_source_root(),
+        'G_TEST_BUILDDIR=' + meson.project_build_root()],
+  timeout: 30,
+  protocol: 'exitcode',
+  is_parallel: false,
+)

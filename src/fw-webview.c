@@ -381,7 +381,11 @@ static const char FW_POS_USER_SCRIPT[] =
   "    var nodes = document.querySelectorAll('[id]');"
   "    for (var i = 0; i < nodes.length; i++) {"
   "      var r = nodes[i].getBoundingClientRect();"
-  "      if (r.top >= 0) { a = nodes[i].id; break; }"
+  /* A rendered-box guard is required: our own injected reading
+   * stylesheet is <style id=fw-reading-css> in head — non-rendered,
+   * rect.top always 0 — and it would otherwise always win the anchor
+   * pick, sending every restore back to the top of the document. */
+  "      if (r.top >= 0 && r.height > 0) { a = nodes[i].id; break; }"
   "    }"
   "    try { window.webkit.messageHandlers." FW_POS_HANDLER
   "          .postMessage(JSON.stringify({ anchor: a, scroll_y: y, frac: f })); } catch (e) {}"

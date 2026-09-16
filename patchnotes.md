@@ -2,6 +2,14 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v1.0.2 (2026-09-16)
+
+*The post-blitz verification release: one real bug, found by launching the app against real books on verification day. Reflow reading-position restore has silently landed every EPUB reopen at the top of the book since the reading stylesheet gained its id. No new features.*
+
+### Fixed
+
+* **Reflow documents reopened at the top of the book regardless of saved position.** The position-reporter user script picks the first element with an `id` whose rect sits at or below the viewport top as the restore anchor, and restore prefers that anchor over the saved `scroll_y`. The app's own injected reading stylesheet is a `<style id="fw-reading-css">` element in head: non-rendered, so its rect reports top 0 with no height and it always won the pick. Every saved position therefore carried that anchor, and scrolling to a head element lands at the top of the document, leaving the `scroll_y` fallback unreachable. The reporter now also requires a rendered box (`r.height > 0`), so the anchor is a real element; verified live against a real EPUB (scroll into chapter one, close, reopen lands in the chapter, not on the cover). Pinned by `tests/stress/regress-webview-anchor.c` (source inspection; the script only executes inside WebKitWebView, which the headless suite never instantiates).
+
 ## v1.0.1 (2026-09-15)
 
 *The first post-1.0 maintenance release: every executable finding from THE FINAL AUDIT (2026-09-13) landed. Three HIGH memory-safety bugs are closed, a seven-item memory-safety family is fixed and sanitizer-verified, six dead code surfaces are removed, the docs and prose are swept clean, and the CI/Flathub groundwork is in. No new features; the post-1.0 feature lane is slotted as roadmap Phase 21.*
