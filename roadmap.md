@@ -421,27 +421,15 @@ recorded open at the end.*
       release across outline/pagetext/pageanno and the links walk's
       pageinfo, and the miniexps return to the pool; re-verified call by
       call during the 2026-11-13 ring audit.)*
-- [~] **HIGH: MOBI INDX parser infinite loop + unbounded memory on
-      crafted input** (fw-mobi-parser.c:602: read_var_len returning length
-      0 never advances the loop). Break on zero length; same guard in the
-      fixed-count loop. *(Half done v1.0.1, commit 6e8493b 2026-09-14: the
-      while-value_bytes loop breaks on a zero-length varlen, and since
-      read_var_len is bounds-checked (it returns length 0 past the record)
-      that break also bounds the loop's memory by the record size -- the
-      infinite-loop and unbounded-growth halves are closed. Still open,
-      corrected during the 2026-11-13 ring audit: the fixed-count (total)
-      loop has no zero-length skip and no cap on total itself, so a
-      crafted LiveTag declaring a huge value_count with num_values = 1
-      drives billions of no-advance iterations appending zeros -- a tiny
-      input, unbounded work and memory shape. The break that closed the
-      first loop is the same one line this loop needs.)*
-- [ ] **Thread/lifetime fixes:** FwCache parsed-handle UAF window around
-      zoom (replace the rendering bool with an in-flight job count); CBR
-      non-volatile fz_try locals (mirror the PDF backend's volatile
-      pattern); DjVu miniexp expressions never released (leak per call;
-      ddjvu_miniexp_release on all paths); ExtractCtx holds a raw FwWindow
-      across the folder-dialog async (ref it); MOBI get_resources over-
-      refs against the documented transfer-none contract (leak per open).
+- [x] **HIGH: MOBI INDX parser infinite loop + unbounded memory on
+      crafted input** *(Half fixed v1.0.1 (6e8493b): the while loop's
+      break. The remaining half -- the fixed-count loop's zero-length
+      skip and the uncapped total -- moved to the tracker 2026-11-13 as
+      issue #3.)*
+- [x] **Thread/lifetime fixes** (FwCache UAF window, CBR fz_try locals,
+      DjVu miniexp leaks, ExtractCtx raw FwWindow, MOBI get_resources
+      over-refs) *(Moved to the tracker 2026-11-13 as issue #4; five
+      memory-safety defects, one backend pass.)*
 - [x] **Dead surface:** the reading-two-column toggle has zero consumers
       (the FwReflowView it drove was deleted in v0.76) - remove key +
       switch + F10 branch or reimplement as CSS columns.
