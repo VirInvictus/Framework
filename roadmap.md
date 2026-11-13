@@ -425,13 +425,16 @@ recorded open at the end.*
       crafted input** (fw-mobi-parser.c:602: read_var_len returning length
       0 never advances the loop). Break on zero length; same guard in the
       fixed-count loop. *(Half done v1.0.1, commit 6e8493b 2026-09-14: the
-      while-value_bytes loop breaks on a zero-length varlen, closing the
-      infinite loop. Still open: the fixed-count loop has no zero-length
-      skip (bounded by the declared count, but it re-reads the same bytes
-      and fills vals with garbage on malformed input), and the
-      attacker-declared value_bytes drives the g_array's size with no
-      sanity cap -- the memory half of the HIGH. Progress note from the
-      2026-11-13 ring audit.)*
+      while-value_bytes loop breaks on a zero-length varlen, and since
+      read_var_len is bounds-checked (it returns length 0 past the record)
+      that break also bounds the loop's memory by the record size -- the
+      infinite-loop and unbounded-growth halves are closed. Still open,
+      corrected during the 2026-11-13 ring audit: the fixed-count (total)
+      loop has no zero-length skip and no cap on total itself, so a
+      crafted LiveTag declaring a huge value_count with num_values = 1
+      drives billions of no-advance iterations appending zeros -- a tiny
+      input, unbounded work and memory shape. The break that closed the
+      first loop is the same one line this loop needs.)*
 - [ ] **Thread/lifetime fixes:** FwCache parsed-handle UAF window around
       zoom (replace the rendering bool with an in-flight job count); CBR
       non-volatile fz_try locals (mirror the PDF backend's volatile
