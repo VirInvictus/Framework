@@ -413,14 +413,25 @@ recorded open at the end.*
 
 ## New findings 2026-09-12 (six-lens full audit; detail: audit/FULL-AUDIT-2026-09-12.md, Wave 4)
 
-- [ ] **HIGH: DjVu search/text/links/TOC use the shared ddjvu context
+- [x] **HIGH: DjVu search/text/links/TOC use the shared ddjvu context
       without render_lock**, racing the render workers (UB; search runs on
       a worker thread, get_links on mouse motion). Take render_lock around
-      every ddjvu_document_get_* call in the four functions.
-- [ ] **HIGH: MOBI INDX parser infinite loop + unbounded memory on
+      every ddjvu_document_get_* call in the four functions. *(Fixed
+      v1.0.1, commit e4ee1ab 2026-09-14: the lock covers fetch, walk, and
+      release across outline/pagetext/pageanno and the links walk's
+      pageinfo, and the miniexps return to the pool; re-verified call by
+      call during the 2026-11-13 ring audit.)*
+- [~] **HIGH: MOBI INDX parser infinite loop + unbounded memory on
       crafted input** (fw-mobi-parser.c:602: read_var_len returning length
       0 never advances the loop). Break on zero length; same guard in the
-      fixed-count loop.
+      fixed-count loop. *(Half done v1.0.1, commit 6e8493b 2026-09-14: the
+      while-value_bytes loop breaks on a zero-length varlen, closing the
+      infinite loop. Still open: the fixed-count loop has no zero-length
+      skip (bounded by the declared count, but it re-reads the same bytes
+      and fills vals with garbage on malformed input), and the
+      attacker-declared value_bytes drives the g_array's size with no
+      sanity cap -- the memory half of the HIGH. Progress note from the
+      2026-11-13 ring audit.)*
 - [ ] **Thread/lifetime fixes:** FwCache parsed-handle UAF window around
       zoom (replace the rendering bool with an in-flight job count); CBR
       non-volatile fz_try locals (mirror the PDF backend's volatile
