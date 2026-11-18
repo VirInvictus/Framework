@@ -29,8 +29,8 @@ filenames just have to match. The corpus-walking targets (`stress-multidoc`,
 lines; the argv-targeted tests (the scrub/zoom/search registrations against
 `effective-java.pdf`) fail if their named sample is absent, and every
 corpus-driven target fails when the whole corpus is missing (as on a
-CI runner, which therefore runs only the corpus-free regress targets
-the workflow names: `regress-phase20` and `regress-final-audit`).
+CI runner, which therefore runs the three corpus-free regress targets:
+`regress-phase20`, `regress-final-audit`, and `regress-webview-anchor`).
 
 To use a corpus elsewhere on disk (for example your full library, for a
 heavier memory-pressure soak), set `FW_TEST_CORPUS_ROOT` to a directory

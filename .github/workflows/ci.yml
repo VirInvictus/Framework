@@ -52,8 +52,8 @@ jobs:
       # time. The document corpus is gitignored and absent on the runner;
       # the corpus-driven stress targets hard-fail without it (their
       # skip-if-missing semantics cover a partial corpus, not an absent
-      # one), so CI runs only the two regress targets, which build
-      # synthetic documents and need no corpus.
+      # one), so CI runs the three corpus-free regress targets, which
+      # build synthetic documents and need no corpus.
       - name: meson setup
         run: meson setup builddir -Dstress=true
 
@@ -61,4 +61,4 @@ jobs:
         run: meson compile -C builddir
 
       - name: meson test (regress targets; corpus stays gitignored)
-        run: meson test -C builddir regress-phase20 regress-final-audit
+        run: meson test -C builddir regress-phase20 regress-final-audit regress-webview-anchor
