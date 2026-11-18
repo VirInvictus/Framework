@@ -2,7 +2,7 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-**Spec revision:** 10 (2026-09-16, tracks 1.0.2)
+**Spec revision:** 11 (2026-11-17, tracks 1.0.3)
 **Target:** Wayland Linux (Hyprland-first, GNOME-compatible), GTK4
 **Language:** C (C17)
 **Build System:** Meson

@@ -595,6 +595,11 @@ parse_indx_record_body (const guchar *rec, gsize rec_len,
         guint total = lt->value_count * lt->num_values;
         for (guint x = 0; x < total; x++) {
           FwMobiVarLen vl = read_var_len (rec, rec_len, pos);
+          /* Zero length means the record is exhausted: pos can never
+           * advance again, so continuing would only append
+           * total-minus-x zero values (the same guard the value_bytes
+           * loop below got in v1.0.1). */
+          if (vl.length == 0) break;
           guint32 v = vl.value;
           g_array_append_val (vals, v);
           pos += vl.length;

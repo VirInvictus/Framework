@@ -425,11 +425,31 @@ recorded open at the end.*
       crafted input** *(Half fixed v1.0.1 (6e8493b): the while loop's
       break. The remaining half -- the fixed-count loop's zero-length
       skip and the uncapped total -- moved to the tracker 2026-11-13 as
-      issue #3.)*
+      issue #3. SHIPPED v1.0.3 (2026-11-17): the fixed-count loop
+      breaks on a zero-length varlen (the sibling loop's guard), which
+      also bounds its work and memory to the record's readable bytes;
+      the issue's billion-iteration premise was corrected -- value_count
+      and num_values are both guint8, so the product caps at 65,025.
+      Pinned by regress-final-audit /mobi-indx-fixed-count, verified
+      failing against the unfixed parser and passing with the guard,
+      suite clean under ASan+UBSan.)*
 - [x] **Thread/lifetime fixes** (FwCache UAF window, CBR fz_try locals,
       DjVu miniexp leaks, ExtractCtx raw FwWindow, MOBI get_resources
       over-refs) *(Moved to the tracker 2026-11-13 as issue #4; five
-      memory-safety defects, one backend pass.)*
+      memory-safety defects, one backend pass. CLOSED 2026-11-17 as
+      already shipped: the migration carried the stale 2026-09-12
+      wave-4 text, but the final-audit pass had fixed all five the same
+      week -- cache in-flight count, CBR volatile locals, ExtractCtx
+      owned refs, and the MOBI get_resources fix in 1bf4a00; the DjVu
+      miniexp releases in e4ee1ab, the very commit whose
+      release-on-all-paths behavior the ring audit itself re-verified
+      call by call. The 2026-11-17 code read confirmed every fix
+      present at every site (fw-cache.c in_flight, fw-document-cbr.c
+      volatile fz_try locals, fw-document-djvu.c releases on all four
+      callers, fw-window.c ExtractCtx owned refs,
+      fw-reflow-document-mobi.c transfer-none get_resources), and all
+      fix commits are ancestors of v1.0.1. Issue #4 closed with that
+      evidence; no code change.)*
 - [x] **Dead surface:** the reading-two-column toggle has zero consumers
       (the FwReflowView it drove was deleted in v0.76) - remove key +
       switch + F10 branch or reimplement as CSS columns.
@@ -477,27 +497,27 @@ recorded open at the end.*
 ## Phase 21: Post-1.0 Feature Lane (final audit, ranked)
 *The audit's lens-4 proposals, slotted in recorded rank order (2026-09-15). Boxes are the lane, not a schedule: work starts top-down when the blitz closes. §13 was amended the same day (see spec): continue-reading recents and navigation bookmarks are ruled viewer state, unblocking ranks 12-13.*
 
-- [ ] **Reflow auto-reload parity (rank 1)** — the fixed-layout monitor/debounce/toast machinery shipped v0.21; the reflow branch skips it (`fw-window.c`). Completing a shipped feature: attach the monitor on the WebView path and re-open with position restore. The README auto-reload claim is already qualified until this lands.
-- [ ] **PDF page labels (rank 2)** — `fz_page_label` exists in the linked MuPDF; the header shows bare "%d / %d" (`fw-window.c`). Real books carry front-matter numbering; surface labels in the page entry, Go-to-page, and the sidebar where present.
-- [ ] **Window geometry persistence (rank 3)** — 900x700 hardcoded every launch (`fw-window.c`); store last geometry in state/GSettings and restore maximized/fullscreen state. The most frequent daily papercut a viewer can have.
-- [ ] **Recolor light/dark keys (rank 4)** — `recolor-light` / `recolor-dark` GSettings keys plumbed into the existing color-matrix constants (the recorded v0.22 follow-up; the full zathura-style customization).
-- [ ] **Reading measure control (rank 5)** — `--measure: 38em` hardcoded in the reading CSS (`fw-reflow-html.c`); one schema key + one Reading Settings row benefits every reflow format.
-- [ ] **Reflow print parity or honest disable (rank 6)** — Ctrl+P is a silent no-op on reflow formats (`act_print` early-returns; reflow never sets `self->document`). Either `WebKitPrintOperation` (already linked) or a visible "not printable" message; decide at implementation time.
-- [ ] **Thumbnail sidebar (rank 7)** — the expensive half (persistent thumbnail tier) shipped Phase 2; a GtkGridView rail alongside the TOC fixes comics and scanned PDFs. Rotation rendering stays at 0 per the polish note below.
-- [ ] **Single-page view mode (rank 8)** — the state schema already persists an unconsumed `view_mode` key; prerequisite for presentation mode. Lives in Deferred below until this box opens.
-- [ ] **stext render-time pre-warm (rank 9)** — the recorded Sumatra `RenderCache.cpp:790` follow-up (Phase 11 Tier 1 box): extract stext during render-worker success. Touches the render hot loop; stress suite after.
-- [ ] **Markdown local images + syntax highlighting (rank 10)** — local images ride the existing `framework-img://` scheme; highlighting is decided (2026-09-15, Brandon): hand-rolled fenced-code tokenizer, no new dependency and no second vendored surface.
-- [ ] **Pinch-to-zoom (rank 11)** — `GtkGestureZoom` into the existing fit machinery; gesture-arbitration risk noted at audit time.
-- [ ] **Continue-reading recents (rank 12)** — UNBLOCKED by the 2026-09-15 §13 amendment: a short continue-reading list on the empty window sourced from state.json's timestamped entries. No library UI.
-- [ ] **Navigation bookmarks (rank 13)** — UNBLOCKED by the same ruling: named page marks stored only in state.json. Anything writing into the document stays banned.
-- [ ] **DjVu margin-crop support (rank 14)** — F6 silently does nothing on DjVu (`get_content_bbox` returns FALSE), precisely the scanned-document format crop exists for.
-- [ ] **Configurable keybindings (rank 15)** — a centralized accel table makes it bounded; brushes the recorded Phase 18 vim-binding rejection (that rejection was about vim-style bindings, not user config).
-- [ ] **Presentation mode (rank 16)** — page-at-a-time, no chrome; sequenced behind single-page (rank 8).
-- [ ] **External annotations (rank 17)** — the §14-sanctioned formulation (stored externally, never modifying the document); three subprojects, and the storage decision (sidecar format/location) is Brandon's when this box opens.
-- [ ] **Idle cursor hide + auto-scroll (rank 18)** — small reader-comfort pair.
-- [x] **MuPDF manifest bump (rank 19)** — DONE 2026-09-15 (Brandon's go): the manifest bundles 1.28.2 matching dev/CI, with x-checker-data; see the build commit. The vir-gtk-capi adoption rider stays dependency-ordered on vir-gtk's capi lane (1.0.1 fallback per the recorded decision).
-- [ ] **Test-harness leftovers (rank 20)** — bench JSON output + regression diff, `tests/lsan.supp` for the leak-sanitizer pass, the FwCache pretty-printer placeholder.
-- [ ] **Split `fw-window.c` (rank 21; on explicit go)** — kept tracked (2026-09-15, Brandon): no reader value; the named candidates are the ~400-line `build_ui` constructor and the action handlers. See the Remaining box above.
+- [ ] **Reflow auto-reload parity (rank 1)**: the fixed-layout monitor/debounce/toast machinery shipped v0.21; the reflow branch skips it (`fw-window.c`). Completing a shipped feature: attach the monitor on the WebView path and re-open with position restore. The README auto-reload claim is already qualified until this lands.
+- [ ] **PDF page labels (rank 2)**: `fz_page_label` exists in the linked MuPDF; the header shows bare "%d / %d" (`fw-window.c`). Real books carry front-matter numbering; surface labels in the page entry, Go-to-page, and the sidebar where present.
+- [ ] **Window geometry persistence (rank 3)**: 900x700 hardcoded every launch (`fw-window.c`); store last geometry in state/GSettings and restore maximized/fullscreen state. The most frequent daily papercut a viewer can have.
+- [ ] **Recolor light/dark keys (rank 4)**: `recolor-light` / `recolor-dark` GSettings keys plumbed into the existing color-matrix constants (the recorded v0.22 follow-up; the full zathura-style customization).
+- [ ] **Reading measure control (rank 5)**: `--measure: 38em` hardcoded in the reading CSS (`fw-reflow-html.c`); one schema key + one Reading Settings row benefits every reflow format.
+- [ ] **Reflow print parity or honest disable (rank 6)**: Ctrl+P is a silent no-op on reflow formats (`act_print` early-returns; reflow never sets `self->document`). Either `WebKitPrintOperation` (already linked) or a visible "not printable" message; decide at implementation time.
+- [ ] **Thumbnail sidebar (rank 7)**: the expensive half (persistent thumbnail tier) shipped Phase 2; a GtkGridView rail alongside the TOC fixes comics and scanned PDFs. Rotation rendering stays at 0 per the polish note below.
+- [ ] **Single-page view mode (rank 8)**: the state schema already persists an unconsumed `view_mode` key; prerequisite for presentation mode. Lives in Deferred below until this box opens.
+- [ ] **stext render-time pre-warm (rank 9)**: the recorded Sumatra `RenderCache.cpp:790` follow-up (Phase 11 Tier 1 box): extract stext during render-worker success. Touches the render hot loop; stress suite after.
+- [ ] **Markdown local images + syntax highlighting (rank 10)**: local images ride the existing `framework-img://` scheme; highlighting is decided (2026-09-15, Brandon): hand-rolled fenced-code tokenizer, no new dependency and no second vendored surface.
+- [ ] **Pinch-to-zoom (rank 11)**: `GtkGestureZoom` into the existing fit machinery; gesture-arbitration risk noted at audit time.
+- [ ] **Continue-reading recents (rank 12)**: UNBLOCKED by the 2026-09-15 §13 amendment: a short continue-reading list on the empty window sourced from state.json's timestamped entries. No library UI.
+- [ ] **Navigation bookmarks (rank 13)**: UNBLOCKED by the same ruling: named page marks stored only in state.json. Anything writing into the document stays banned.
+- [ ] **DjVu margin-crop support (rank 14)**: F6 silently does nothing on DjVu (`get_content_bbox` returns FALSE), precisely the scanned-document format crop exists for.
+- [ ] **Configurable keybindings (rank 15)**: a centralized accel table makes it bounded; brushes the recorded Phase 18 vim-binding rejection (that rejection was about vim-style bindings, not user config).
+- [ ] **Presentation mode (rank 16)**: page-at-a-time, no chrome; sequenced behind single-page (rank 8).
+- [ ] **External annotations (rank 17)**: the §14-sanctioned formulation (stored externally, never modifying the document); three subprojects, and the storage decision (sidecar format/location) is Brandon's when this box opens.
+- [ ] **Idle cursor hide + auto-scroll (rank 18)**: small reader-comfort pair.
+- [x] **MuPDF manifest bump (rank 19)**: DONE 2026-09-15 (Brandon's go): the manifest bundles 1.28.2 matching dev/CI, with x-checker-data; see the build commit. The vir-gtk-capi adoption rider stays dependency-ordered on vir-gtk's capi lane (1.0.1 fallback per the recorded decision).
+- [ ] **Test-harness leftovers (rank 20)**: bench JSON output + regression diff, `tests/lsan.supp` for the leak-sanitizer pass, the FwCache pretty-printer placeholder.
+- [ ] **Split `fw-window.c` (rank 21; on explicit go)**: kept tracked (2026-09-15, Brandon): no reader value; the named candidates are the ~400-line `build_ui` constructor and the action handlers. See the Remaining box above.
 
 ### Final audit 2026-09-13 (THE FINAL AUDIT: NEW findings, one line each; full detail in audit-final/Framework/FINAL-REPORT.md)
 - [x] **HIGH (NEW): PDF metadata stack out-of-bounds
@@ -506,15 +526,15 @@ recorded open at the end.*
   *(DONE 2026-09-15: render_lock covers the fetch, the miniexp walk, and the pageinfo probes in all four queries; ddjvu_miniexp_release added on every path (the leak fixed in the same commit); the lock-discipline/miniexp-ownership header paragraph written. Pinned by regress-final-audit /djvu-locked-queries.)* against the shared context, racing render workers** (fw-document-djvu.c:409,496,521,549,565,597,640). Take render_lock around all of them; add the lock-discipline header paragraph.
 - [x] **HIGH (CONFIRMED): MOBI INDX second-pass infinite loop on read_var_len length 0**
   *(DONE 2026-09-15: the CNCX vl.length == 0 guard ported; pinned by regress-final-audit /mobi-indx-zero-len with a hand-built AZW3 whose INDX claims 127 varlen bytes from the record's last byte; verified it hangs hot without the guard.)* (fw-mobi-parser.c:604-610; the CNCX loop has the guard, this pass does not).
-- [ ] MED: Memory-safety family:
+- [x] MED: Memory-safety family:
   *(DONE 2026-09-15: all seven, one commit; cache in-flight count, ExtractCtx owned refs + document capture, MOBI bare get_resources, EPUB/FB2 256 MB entry caps, MOBI </style guard, hdr_length in gsize, CBR volatile fz_try locals + the CRITICAL RULES header block. ASan+UBSan pass: 7/8 with the documented corpus-soak RSS exception.)* cache rendering-bool reset defeats the eviction guard (fw-cache.c:681 vs 796-808, replace with in-flight count); ExtractCtx raw window* across the portal async (fw-window.c:886-897; the "weak: not refed" comment manufactures a lifetime guarantee that does not exist); MOBI get_resources extra ref never dropped (transfer-none contract); EPUB/FB2 archive entries uncapped; MOBI inline <style> breakout missing the EPUB "</style" guard; MOBI hdr_length 32-bit overflow; CBR non-volatile fz_try locals.
-- [ ] MED: Dead-code sweep:
+- [x] MED: Dead-code sweep:
   *(DONE 2026-09-15: all six removals approved via prompts and executed, one hygiene commit per interface: cache dead API, webview PositionRequest machinery, MOBI eager GdkTexture decode, cmp comparators, fw_document_close wrapper + slot, reflow close chain.)* fw_cache_get_page + fw_cache_page_ready (zero callers); webview PositionRequest machinery (~55 lines, duplicated by the live user-script path); MOBI eager GdkTexture decode (never read); fw_document_close wrapper + reflow close chain (both dead lifecycles); cmp_uint/cmp_guint32 duplicates.
-- [ ] MED: Docs residue:
+- [x] MED: Docs residue:
   *(DONE 2026-09-15: text/plain in the desktop MimeType; the DnD decision recorded in spec 5.3; section 2 renumbered sequentially with real state keys; fallback claim qualified for TXT/MD; all named CLAUDE/README/roadmap/tests-README stale bits fixed; the gschema descriptions moved to the WebKit vocabulary.)* desktop MimeType missing text/plain (TXT claimed by spec + shipped in the file dialog); spec drag-and-drop still "TBD" (decided in code v0.10); two sections numbered 2.4 + state-sketch keys zoom/scroll_y (code: zoom_level/scroll_position); fallback-to-MuPDF claim false for TXT/MD under fixed-pages mode; CLAUDE.md stale bits ("three stress tests" → seven, 6/7 ASan posture, Phase 6 open → shipped, get_resources "EPUB-only" → EPUB+MOBI, reflow gate missing Markdown, scope list missing TXT, Calibre-Library-as-default-corpus); roadmap corpus-root box + screenshots box + fw-window line count; README HiDPI shipped-claim + Phase 13.1 parenthetical + "5-figure" textbook; spec search debounce 300ms → GtkSearchEntry 150ms default; tests/README FW_TEST_CORPUS_ROOT is runtime, not configure-time.
-- [ ] MED: Em-dash ban:
+- [x] MED: Em-dash ban:
   *(DONE 2026-09-15: zero rendered em-dashes across roadmap, README (entities included), CLAUDE, spec, tests/README, foliate-rewrite, and the patchnotes title + newest entries; all listed slop kills applied except the AGPL sentence trio, deliberately kept verbatim-per-document for licensing clarity.)* 348 rendered violations (roadmap 152 bold-label separators, README 68 including mdash entities, CLAUDE.md 47, foliate-rewrite 47, spec 29); plus slop kills: "Best-in-Class UX" Phase-14 tagline, "Leveraging", "Seamless Auto-Reload", "marquee delivery", "design north star", "utilizing", "seamless" duplicated across README/roadmap, "core performance differentiator" duplicated spec/CLAUDE.
-- [ ] MED: GitHub:
+- [x] MED: GitHub:
   *(DONE 2026-09-15: manifest bumped to MuPDF 1.28.2 + x-checker-data on both sources; CI hardened (SHA pin, concurrency, weekly schedule probe, stress harness compiles, regress targets run); release.yml publishes the tag annotation verbatim; dependabot (actions-only) + a bug template added; the no-force-push rulesets are active on main and v* tags per Brandon's go. Flathub: submission prep done (docs/flathub-submission.md), the submission itself rides the blitz release tag per decision.)* manifest bundles MuPDF 1.27.1 while dev/CI link 1.28.2 (bump + stress soak before the next Flatpak build); Flathub gate now open (type:git+tag verified); submission prep + x-checker-data on Brandon's go; no tag-triggered release automation; CI hardening (SHA pin, concurrency, schedule probe, compile the stress harness); optional no-force-push ruleset for the v1.0.0 anchor; issue template + actions-only dependabot.
 - [x] LOW: Robustness:
   *(DONE 2026-09-15: coords zero-init, fz_try-wrapped handler registration at both sites, 64-level recursion caps on the three miniexp walkers, guint32 MOBI record index, CBR cross-thread read documented as deliberate.)* DjVu coords[4] uninitialized on short rect annotations; fz_register_document_handlers outside fz_try (pdf:331, cbr:588); miniexp walker recursion unbounded; MOBI guint16 truncation; CBR width/height cross-thread reads formally UB.

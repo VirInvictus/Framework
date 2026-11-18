@@ -2,6 +2,18 @@
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
+## v1.0.3 (2026-11-17)
+
+*The tracker-reconciliation release: the one genuinely open defect from the 2026-11-13 ring audit's move of the 2026-09-12 wave-4 findings to GitHub (issue #3) is fixed, with a regression test that fails without the guard. Issue #4's five thread/lifetime defects were verified against the tree and closed as already shipped in v1.0.1; no code change rides them. No new features.*
+
+### Changed
+
+* **Sponsorship.** GitHub Sponsors and Liberapay via `FUNDING.yml`, and the donation URL in the AppStream metadata where software centers surface it (both landed 2026-09-17, after the v1.0.2 tag; this is their first release note).
+
+### Fixed
+
+* **A crafted MOBI INDX record could fill the KF8 tag map with zeroes through the fixed-count value loop.** `parse_indx_record_body`'s `value_count` branch (issue #3, migrated from the 2026-09-12 audit's wave-4 HIGH) consumed `value_count * num_values` varlen values with no zero-length skip: past the record end `read_var_len` returns length 0, `pos` never advances, and the loop re-read the same exhausted bytes up to 65,025 times (both operands are `guint8`, so the issue's billion-iteration estimate does not apply), appending that many zero values. In a KF8 NCX index the zero-filled tag-6 array then passed the TOC builder's `len >= 2` gate with fid=0/off=0, emitting a bogus TOC entry resolved through the CNCX table's offset-0 label. The loop now breaks on the first zero-length varlen (the same guard the `value_bytes` loop received in v1.0.1), which also bounds the loop's work and memory to the record's readable bytes and subsumes the proposed `total > rec_len` clamp. Pinned by `/final-audit/mobi-indx-fixed-count` in `tests/stress/regress-final-audit.c`: its hand-built AZW3 carries an NCX entry whose fixed-count tag 6 starts past the record end, and asserts the poisoned entry produces no TOC entry; the test fails against the unfixed parser and passes with the guard, and the suite is clean under ASan+UBSan.
+
 ## v1.0.2 (2026-09-16)
 
 *The post-blitz verification release: one real bug, found by launching the app against real books on verification day. Reflow reading-position restore has silently landed every EPUB reopen at the top of the book since the reading stylesheet gained its id. No new features.*

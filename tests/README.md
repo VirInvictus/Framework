@@ -28,8 +28,9 @@ filenames just have to match. The corpus-walking targets (`stress-multidoc`,
 `stress-corpus-soak`) skip individual missing files with `skip (missing)`
 lines; the argv-targeted tests (the scrub/zoom/search registrations against
 `effective-java.pdf`) fail if their named sample is absent, and every
-corpus-driven target fails when the whole corpus is missing (as on a CI
-runner, which therefore runs only the two regress targets).
+corpus-driven target fails when the whole corpus is missing (as on a
+CI runner, which therefore runs only the corpus-free regress targets
+the workflow names: `regress-phase20` and `regress-final-audit`).
 
 To use a corpus elsewhere on disk (for example your full library, for a
 heavier memory-pressure soak), set `FW_TEST_CORPUS_ROOT` to a directory
@@ -51,11 +52,15 @@ Registered tests: `stress-scrub`, `stress-zoom-storm`,
 `stress-search-cache`, `stress-multidoc`, `stress-corpus-soak`,
 `stress-reflow`, `regress-phase20` (pins the Phase 20 fixes: CBR
 cancel-generation semantics, the search-indicator clear, and the
-ComicInfo paths, against synthetic in-memory comic archives), and
-`regress-final-audit` (pins the 2026-09-13 final-audit fixes: the PDF
-metadata clamp, the DjVu lock discipline, the MOBI INDX zero-length
-guard; builds synthetic documents, and skips the DjVu case when the
-corpus file is absent). The
+ComicInfo paths, against synthetic in-memory comic archives),
+`regress-final-audit` (pins the 2026-09-13 final-audit fixes and their
+tracker follow-up: the PDF metadata clamp, the DjVu lock discipline,
+the MOBI INDX zero-length guard, and the MOBI INDX fixed-count guard
+(issue #3, v1.0.3); builds synthetic documents, and skips the DjVu
+case when the corpus file is absent), and `regress-webview-anchor`
+(pins the v1.0.2 reading-position restore fix by source inspection of
+the injected position-reporter script; the script only executes
+inside WebKitWebView, which the headless suite never instantiates). The
 benchmarks (`bench-render`, `bench-startup`,
 `bench-cache-hit-rate`) are built but not registered; invoke them
 directly.
